@@ -4,6 +4,7 @@ out/
 *.tsbuildinfo
 .env
 .env.local
+apps/cli/models.config.json
 *.log
 .DS_Store
 .claude/settings.local.json

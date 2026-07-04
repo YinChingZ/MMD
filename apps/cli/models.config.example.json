@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy this file to models.config.json (already gitignored) and fill in real values. Do NOT put actual API keys in this file — apiKeyEnvVar only names an environment variable; set its value in apps/cli/.env instead.",
+  "coordinatorModelId": "model_a",
+  "models": [
+    {
+      "id": "model_a",
+      "modelId": "REPLACE_WITH_REAL_MODEL_ID (e.g. gpt-4.1)",
+      "baseUrl": "REPLACE_WITH_BASE_URL (e.g. https://api.openai.com/v1)",
+      "apiKeyEnvVar": "MODEL_A_API_KEY"
+    },
+    {
+      "id": "model_b",
+      "modelId": "REPLACE_WITH_REAL_MODEL_ID",
+      "baseUrl": "REPLACE_WITH_BASE_URL",
+      "apiKeyEnvVar": "MODEL_B_API_KEY"
+    },
+    {
+      "id": "model_c",
+      "modelId": "REPLACE_WITH_REAL_MODEL_ID",
+      "baseUrl": "REPLACE_WITH_BASE_URL",
+      "apiKeyEnvVar": "MODEL_C_API_KEY"
+    }
+  ]
+}

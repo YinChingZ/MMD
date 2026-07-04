@@ -4,3 +4,4 @@ export * from "./fanout.js";
 export * from "./structured.js";
 export * from "./providers/mock.js";
 export * from "./providers/openai-compatible.js";
+export * from "./providers/routing.js";
