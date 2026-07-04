@@ -6,7 +6,7 @@ Multiple LLMs deliberate through a six-phase protocol — Propose → Critique �
 
 ## Status
 
-**M0 (protocol hardening) + M1 (CLI prototype) + M1.5 (convergence check, go decision) + v0.2 (planning mode for long-form output) + M2 (Backend API) are all complete**, and all of them have been validated end-to-end with real models (not just mocks). `apps/cli` supports three modes: `standard` (all six phases, default), `quick` (skips critique/revise/vote), and `planning` (splits the question into topics, for long-form/comprehensive planning output). `apps/api` moves the same orchestrator logic (now extracted into `packages/orchestrator`, shared by both CLI and API) onto a Fastify + Postgres server: a Conversation/Run API, an SSE event stream (replayable on reconnect via `Last-Event-ID`), and persisted run results. M3 Web MVP is next. See [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) (in Chinese; includes real-run findings and data) for the full milestone plan.
+**M0 (protocol hardening) + M1 (CLI prototype) + M1.5 (convergence check, go decision) + v0.2 (planning mode for long-form output) + M2 (Backend API) + M3 (Web MVP) are all complete**, and all of them have been validated end-to-end with real models (not just mocks). `apps/cli` supports three modes: `standard` (all six phases, default), `quick` (skips critique/revise/vote), and `planning` (splits the question into topics, for long-form/comprehensive planning output). `apps/api` moves the same orchestrator logic (now extracted into `packages/orchestrator`, shared by both CLI and API) onto a Fastify + Postgres server: a Conversation/Run API, an SSE event stream (replayable on reconnect via `Last-Event-ID`), and persisted run results. `apps/web` is the Next.js frontend that consumes that API: ask a question, pick models, watch the run progress live, expand the original claims behind each consensus point, copy the final answer. M4 (productization basics) is next. See [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) (in Chinese; includes real-run findings and data) for the full milestone plan.
 
 ## The six-phase protocol
 
@@ -35,6 +35,7 @@ The protocol's hard constraints — ratio-based consensus, run-scoped ids, quoru
 apps/
   cli/                 # M1: the CLI entry point that runs the whole pipeline
   api/                  # M2: Fastify + Postgres backend (Conversation/Run API, SSE event stream)
+  web/                  # M3: Next.js frontend (question input, model selection, run progress, consensus panel)
 packages/
   protocol/             # zod schemas + pure functions for consensus classification / quorum / ids / budget
   model-adapters/       # provider adapters: mock, OpenAI-compatible, quorum-aware fan-out
@@ -103,12 +104,24 @@ Falls back to `MockProvider` when `apps/api/models.config.json` doesn't exist, s
 
 | Endpoint | Description |
 |------|------|
+| `GET /api/models` | List selectable models (`id`/`providerLabel`/`isCoordinator`) |
 | `POST /api/conversations` | Create a conversation |
+| `GET /api/conversations` | List conversations (most recently active first) |
 | `GET /api/conversations/:id` | View a conversation and its runs |
 | `POST /api/conversations/:id/runs` | Start a deliberation run (`question`/`mode`/optional `modelIds`; model ids must come from the server-side `models.config.json` registry — the client never supplies its own provider/baseUrl) |
 | `GET /api/runs/:id` | Check run status |
 | `GET /api/runs/:id/result` | Get the final result (409 while still running) |
 | `GET /api/runs/:id/events` | SSE event stream, replayable on reconnect via `Last-Event-ID` |
+
+## Web MVP (M3)
+
+```bash
+cd apps/web
+cp .env.example .env      # API_BASE_URL defaults to http://localhost:3000
+npm run dev                # port 3001, proxies /api/* to apps/api via same-origin rewrites
+```
+
+Open `http://localhost:3001`: create a conversation, ask a question, pick a mode (`standard`/`quick`/`planning`) and models, then watch phase-by-phase progress live over SSE. Once complete, it shows the final answer, a consensus panel (each candidate expandable to show the original pre-merge claims), and a collapsed-by-default discussion process. `planning` mode additionally shows the outline step and one independent progress row per topic. In dev, `next.config.ts` explicitly disables Next's built-in gzip compression (`compress: false`) — leaving it on buffers the proxied SSE response and silently breaks live progress updates, a real bug caught while testing against real models.
 
 ## Development
 

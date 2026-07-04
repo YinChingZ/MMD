@@ -6,7 +6,7 @@
 
 ## 现状
 
-**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）+ M2（Backend API）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。`apps/api` 把同一套 orchestrator 逻辑（现已提取为 `packages/orchestrator`，CLI 和 API 共用）搬到了 Fastify + Postgres 服务端：Conversation/Run API、SSE 事件流（断线重连可按 `Last-Event-ID` 回放）、run 结果持久化。下一步是 M3 Web MVP。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)（含真实测试的发现和数据）。
+**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）+ M2（Backend API）+ M3（Web MVP）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。`apps/api` 把同一套 orchestrator 逻辑（现已提取为 `packages/orchestrator`，CLI 和 API 共用）搬到了 Fastify + Postgres 服务端：Conversation/Run API、SSE 事件流（断线重连可按 `Last-Event-ID` 回放）、run 结果持久化。`apps/web` 是消费这套 API 的 Next.js 前端：提问、选模型、实时看运行进度、展开查看共识背后的原始 claims、复制最终答案。下一步是 M4 产品化基础。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)（含真实测试的发现和数据）。
 
 ## 六阶段协议
 
@@ -29,6 +29,7 @@
 apps/
   cli/                 # M1：跑通全流程的命令行入口
   api/                  # M2：Fastify + Postgres 后端（Conversation/Run API、SSE 事件流）
+  web/                  # M3：Next.js 前端（问题输入、模型选择、运行进度、共识面板）
 packages/
   protocol/             # zod schema + 共识分类 / quorum / id / budget 纯函数
   model-adapters/       # provider 封装：mock、OpenAI 兼容、按 quorum 的 fan-out
@@ -96,12 +97,24 @@ npm run start
 
 | 接口 | 说明 |
 |------|------|
+| `GET /api/models` | 列出服务端可选模型（`id`/`providerLabel`/`isCoordinator`） |
 | `POST /api/conversations` | 创建会话 |
+| `GET /api/conversations` | 列出会话（按最近活跃排序） |
 | `GET /api/conversations/:id` | 查看会话及其下的 run 列表 |
 | `POST /api/conversations/:id/runs` | 发起一次协商 run（`question`/`mode`/可选 `modelIds`，模型必须来自服务端 `models.config.json` 里配置的 id，不接受客户端自带 provider/baseUrl） |
 | `GET /api/runs/:id` | 查询 run 状态 |
 | `GET /api/runs/:id/result` | 获取最终结果（run 未完成时返回 409） |
 | `GET /api/runs/:id/events` | SSE 事件流，支持按 `Last-Event-ID` 断线重连回放 |
+
+## Web MVP（M3）
+
+```bash
+cd apps/web
+cp .env.example .env      # API_BASE_URL 默认指向 http://localhost:3000
+npm run dev                # 端口 3001，通过 rewrites 同源代理 /api/* 到 apps/api
+```
+
+浏览器打开 `http://localhost:3001`：新建会话、输入问题、选模式（`standard`/`quick`/`planning`）和模型、提交后实时看阶段进度（SSE），完成后展示最终答案、共识面板（可展开查看合并前的原始 claims）、按阶段折叠的讨论过程。`planning` 模式额外展示 outline 步骤和每个主题独立的进度条。开发环境下 `next.config.ts` 显式关闭了 Next 的内置 gzip 压缩（`compress: false`）——开启的话会缓冲被代理的 SSE 响应，导致运行进度收不到实时更新，是真实测试中发现的坑。
 
 ## 开发
 

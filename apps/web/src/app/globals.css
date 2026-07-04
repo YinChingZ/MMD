@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+:root {
+  --consensus-strong: #16a34a;
+  --consensus-qualified: #2563eb;
+  --consensus-disputed: #d97706;
+  --consensus-rejected: #dc2626;
+}
+
+body {
+  color-scheme: light;
+}

@@ -9,3 +9,5 @@ apps/api/models.config.json
 *.log
 .DS_Store
 .claude/
+apps/web/.next/
+apps/web/next-env.d.ts

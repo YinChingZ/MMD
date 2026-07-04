@@ -63,6 +63,19 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
     await db.destroy();
   });
 
+  it("lists conversations most-recently-updated first", async () => {
+    const firstId = await createConversationViaApi(app);
+    const secondId = await createConversationViaApi(app);
+
+    const res = await app.inject({ method: "GET", url: "/api/conversations" });
+    expect(res.statusCode).toBe(200);
+    const { conversations } = res.json();
+    expect(conversations.map((c: { id: string }) => c.id)).toEqual([
+      secondId,
+      firstId,
+    ]);
+  });
+
   it("creates a conversation, starts a run, and the run completes with a schema-valid result reachable via GET /result", async () => {
     const conversationId = await createConversationViaApi(app);
 

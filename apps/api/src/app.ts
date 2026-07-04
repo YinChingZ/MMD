@@ -4,6 +4,7 @@ import type { ResolvedProvider } from "./config/provider-factory.js";
 import type { Database } from "./db/client.js";
 import { conversationsRoutes } from "./routes/conversations.js";
 import { eventsRoutes } from "./routes/events.js";
+import { modelsRoutes } from "./routes/models.js";
 import { runsRoutes } from "./routes/runs.js";
 import { RunBroadcaster } from "./sse/broadcaster.js";
 import { RunService } from "./services/run-service.js";
@@ -37,6 +38,7 @@ export function buildApp(params: BuildAppParams): FastifyInstance {
   app.register((instance) => conversationsRoutes(instance, deps));
   app.register((instance) => runsRoutes(instance, deps));
   app.register((instance) => eventsRoutes(instance, deps));
+  app.register((instance) => modelsRoutes(instance, deps));
 
   return app;
 }

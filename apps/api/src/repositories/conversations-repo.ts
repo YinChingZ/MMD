@@ -32,6 +32,17 @@ export async function getConversation(
   return row ? toSummary(row) : undefined;
 }
 
+export async function listConversations(
+  db: Kysely<Database>
+): Promise<ConversationSummary[]> {
+  const rows = await db
+    .selectFrom("conversations")
+    .selectAll()
+    .orderBy("updated_at", "desc")
+    .execute();
+  return rows.map(toSummary);
+}
+
 function toSummary(
   row: Selectable<ConversationsTable>
 ): ConversationSummary {

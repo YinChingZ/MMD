@@ -4,6 +4,7 @@ import type { AppDeps } from "../app.js";
 import {
   createConversation,
   getConversation,
+  listConversations,
 } from "../repositories/conversations-repo.js";
 import { listRunsForConversation } from "../repositories/runs-repo.js";
 
@@ -22,6 +23,11 @@ export async function conversationsRoutes(
     }
     const conversation = await createConversation(deps.db, parsed.data.title);
     return reply.code(201).send(conversation);
+  });
+
+  fastify.get("/api/conversations", async (_request, reply) => {
+    const conversations = await listConversations(deps.db);
+    return reply.send({ conversations });
   });
 
   fastify.get<{ Params: { id: string } }>(
