@@ -30,13 +30,16 @@ export const STANDARD_BUDGET: RunBudget = {
   phases: [...PHASES],
 };
 
-// quick mode: 2 模型，跳过 critique/revise/vote，只做 propose 后直接 compose。
+// quick mode: 2 模型，跳过 critique/revise/vote。normalize 阶段保留，
+// 因为没有显式投票时，仍需要用 candidate 的 source_claim_ids 覆盖了几个
+// 模型来推断共识强度（每个来源模型视为一票隐含 approve），否则 compose
+// 阶段完全没有共识信号可用。
 export const QUICK_MODE_BUDGET: RunBudget = {
   modelCount: 2,
   critiqueRounds: 0,
   targetP50Ms: 20_000,
   targetP95Ms: 40_000,
-  phases: ["propose", "compose"],
+  phases: ["propose", "normalize", "compose"],
 };
 
 export function getBudget(mode: RunMode): RunBudget {
