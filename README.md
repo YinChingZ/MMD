@@ -90,4 +90,5 @@ npm run build   # 各 workspace 的 TypeScript 构建
 ## 相关文档
 
 - [docs/protocol.md](docs/protocol.md) — 协议规则的落地说明
+- [docs/prior-art.md](docs/prior-art.md) — 与 OpenRouter Fusion Router、litesquad、LiteLLM 生态的对比分析
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — 里程碑规划与风险对照表
