@@ -2,7 +2,7 @@
 
 *[中文](protocol.md)*
 
-This document describes the protocol implemented in `packages/protocol`. It's the as-built version of chapter 5 of `multi-model-deliberation-tech-design.md` and the M0-stage revisions in [multi-model-deliberation-dev-roadmap.md](../multi-model-deliberation-dev-roadmap.md). CLI/backend code should import `@mmd/protocol` rather than redefining these schemas.
+This document describes the protocol implemented in `packages/protocol`. It's the as-built version of chapter 5 of `multi-model-deliberation-tech-design.md` and the M0-stage revisions in [multi-model-deliberation-dev-roadmap.md](../multi-model-deliberation-dev-roadmap.md). The current TypeScript CLI imports `@mmd/protocol` directly; the `litellm-integration` branch's Python/Pydantic port must match these schemas and pure-function semantics rather than redefining a separate protocol.
 
 ## The six phases
 
@@ -15,7 +15,7 @@ This document describes the protocol implemented in `packages/protocol`. It's th
 | Vote | `src/schemas/vote.ts` | Each model votes on the candidate claims |
 | Compose | `src/schemas/compose.ts` | The final answer is generated from the consensus classification |
 
-Every phase's input/output is a zod schema. When validation fails, the caller (CLI/backend) should retry or ask the model to fix its JSON — not fail the whole run outright (this addresses the "structured output is unreliable" risk from chapter 12 of the tech design doc).
+Every phase's input/output is a zod schema. When validation fails, the caller (the current TypeScript CLI, and later the LiteLLM Python port) should retry or ask the model to fix its JSON — not fail the whole run outright (this addresses the "structured output is unreliable" risk from chapter 12 of the tech design doc).
 
 ## Protocol-level constraints (M0 hardening — these are hard rules, not implementation suggestions)
 

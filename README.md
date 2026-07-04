@@ -6,7 +6,9 @@
 
 ## 现状
 
-**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。Backend API（M2）尚未开始，是下一步。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)（含真实测试的发现和数据）。
+**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。
+
+当前 `litellm-integration` branch 的技术方向已经从“继续自建 Backend API / Web MVP”调整为 **LiteLLM-first**：把 MMD 协议核心改造成 LiteLLM 生态里的开源 Fusion-like router/provider 能力，一切优先服务 LiteLLM 的适配便利、upstream 接受度和开源社区影响力。详见 [docs/litellm-integration.md](docs/litellm-integration.md) 和 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)。
 
 ## 六阶段协议
 
@@ -34,6 +36,7 @@ packages/
   prompts/              # 六阶段的 prompt 构造
 docs/
   protocol.md           # 协议规则文档
+  litellm-integration.md # LiteLLM 集成转向设计
 ```
 
 ## 快速开始
@@ -90,5 +93,6 @@ npm run build   # 各 workspace 的 TypeScript 构建
 ## 相关文档
 
 - [docs/protocol.md](docs/protocol.md) — 协议规则的落地说明
+- [docs/litellm-integration.md](docs/litellm-integration.md) — 本 branch 的 LiteLLM 集成转向设计
 - [docs/prior-art.md](docs/prior-art.md) — 与 OpenRouter Fusion Router、litesquad、LiteLLM 生态的对比分析
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — 里程碑规划与风险对照表

@@ -2,7 +2,7 @@
 
 *[English](protocol.en.md)*
 
-本文档描述 `packages/protocol` 里实现的协议，是 [multi-model-deliberation-tech-design.md](../multi-model-deliberation-tech-design.md) 第 5 章和 [multi-model-deliberation-dev-roadmap.md](../multi-model-deliberation-dev-roadmap.md) M0 阶段修订的落地版本。CLI/backend 都应该 import `@mmd/protocol`，不要各自重新定义 schema。
+本文档描述 `packages/protocol` 里实现的协议，是 [multi-model-deliberation-tech-design.md](../multi-model-deliberation-tech-design.md) 第 5 章和 [multi-model-deliberation-dev-roadmap.md](../multi-model-deliberation-dev-roadmap.md) M0 阶段修订的落地版本。当前 TypeScript CLI 直接 import `@mmd/protocol`；`litellm-integration` branch 的 Python/Pydantic port 必须与这里的 schema 和纯函数行为保持一致，不要重新发明另一套协议。
 
 ## 六个阶段
 
@@ -15,7 +15,7 @@
 | Vote | `src/schemas/vote.ts` | 每个模型对 candidate claims 表决 |
 | Compose | `src/schemas/compose.ts` | 根据共识分类生成最终答案 |
 
-所有阶段的输入输出都是 zod schema，校验失败时上层（CLI/backend）应该走"重试/让模型修复 JSON"的路径，而不是直接让整个 run 失败（对应技术设计文档 12 章"结构化输出不稳定"风险）。
+所有阶段的输入输出都是 zod schema，校验失败时调用方（当前 TypeScript CLI，以及后续 LiteLLM Python port）应该走"重试/让模型修复 JSON"的路径，而不是直接让整个 run 失败（对应技术设计文档 12 章"结构化输出不稳定"风险）。
 
 ## 协议级约束（M0 加固项，不是实现建议，是硬性规则）
 

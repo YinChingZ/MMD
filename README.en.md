@@ -6,7 +6,9 @@ Multiple LLMs deliberate through a six-phase protocol — Propose → Critique �
 
 ## Status
 
-**M0 (protocol hardening) + M1 (CLI prototype) + M1.5 (convergence check, go decision) + v0.2 (planning mode for long-form output) are all complete**, and all of them have been validated end-to-end with real models (not just mocks). `apps/cli` supports three modes: `standard` (all six phases, default), `quick` (skips critique/revise/vote), and `planning` (splits the question into topics, for long-form/comprehensive planning output). Backend API (M2) hasn't started yet — that's the next step. See [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) (in Chinese; includes real-run findings and data) for the full milestone plan.
+**M0 (protocol hardening) + M1 (CLI prototype) + M1.5 (convergence check, go decision) + v0.2 (planning mode for long-form output) are all complete**, and all of them have been validated end-to-end with real models (not just mocks). `apps/cli` supports three modes: `standard` (all six phases, default), `quick` (skips critique/revise/vote), and `planning` (splits the question into topics, for long-form/comprehensive planning output).
+
+The `litellm-integration` branch is now **LiteLLM-first**: it pivots the next milestone away from a standalone Backend API / Web MVP and toward an open-source Fusion-like router/provider capability optimized for LiteLLM integration convenience, upstream acceptance, and community impact. See [docs/litellm-integration.md](docs/litellm-integration.md) and [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) for the detailed plan.
 
 ## The six-phase protocol
 
@@ -41,6 +43,7 @@ packages/
 docs/
   protocol.md           # protocol rules (Chinese)
   protocol.en.md         # protocol rules (English)
+  litellm-integration.md # LiteLLM integration pivot design (Chinese)
 ```
 
 ## Quickstart
@@ -98,5 +101,6 @@ npm run build   # TypeScript build across all workspaces
 
 - [docs/protocol.en.md](docs/protocol.en.md) — how the protocol constraints are implemented
 - [docs/protocol.md](docs/protocol.md) — the same, in Chinese
+- [docs/litellm-integration.md](docs/litellm-integration.md) — LiteLLM integration pivot design (Chinese)
 - [docs/prior-art.en.md](docs/prior-art.en.md) — how MMD compares to OpenRouter Fusion Router, litesquad, and the LiteLLM ecosystem
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — milestone plan and risk register (Chinese)
