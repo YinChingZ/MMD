@@ -1,7 +1,16 @@
 import { MockProvider } from "@mmd/model-adapters";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { buildApp } from "../src/app.js";
 import { buildProvider, type ResolvedProvider } from "../src/config/provider-factory.js";
 import type { Database } from "../src/db/client.js";
@@ -14,23 +23,51 @@ if (!hasTestDatabase()) {
   );
 }
 
-async function createConversationViaApi(app: FastifyInstance): Promise<string> {
+const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7);
+
+/**
+ * No login — every visitor gets an anonymous workspace cookie (see
+ * src/middleware/workspace.ts). app.inject() doesn't carry cookies across
+ * separate calls the way a browser would, so tests must capture the
+ * Set-Cookie from the first request and thread it through every subsequent
+ * call that needs to stay in the same workspace.
+ */
+function extractWorkspaceCookie(res: { headers: Record<string, unknown> }): string | undefined {
+  const raw = res.headers["set-cookie"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" ? value.split(";")[0] : undefined;
+}
+
+async function createConversationViaApi(
+  app: FastifyInstance,
+  cookie?: string
+): Promise<{ id: string; cookie: string }> {
   const res = await app.inject({
     method: "POST",
     url: "/api/conversations",
     payload: { title: "T" },
+    headers: cookie ? { cookie } : undefined,
   });
   expect(res.statusCode).toBe(201);
-  return res.json().id;
+  const resolvedCookie = extractWorkspaceCookie(res) ?? cookie;
+  if (!resolvedCookie) {
+    throw new Error("expected a workspace cookie to be issued");
+  }
+  return { id: res.json().id, cookie: resolvedCookie };
 }
 
 async function pollUntilSettled(
   app: FastifyInstance,
-  runId: string
+  runId: string,
+  cookie: string
 ): Promise<string> {
   let status = "running";
   for (let i = 0; i < 100 && status === "running"; i++) {
-    const res = await app.inject({ method: "GET", url: `/api/runs/${runId}` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}`,
+      headers: { cookie },
+    });
     status = res.json().status;
     if (status === "running") await new Promise((r) => setTimeout(r, 50));
   }
@@ -50,6 +87,7 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
     app = buildApp({
       db,
       resolvedProvider: buildProvider(undefined),
+      encryptionKey: TEST_ENCRYPTION_KEY,
       logger: false,
     });
     await app.ready();
@@ -64,37 +102,72 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
   });
 
   it("lists conversations most-recently-updated first", async () => {
-    const firstId = await createConversationViaApi(app);
-    const secondId = await createConversationViaApi(app);
+    const first = await createConversationViaApi(app);
+    const second = await createConversationViaApi(app, first.cookie);
 
-    const res = await app.inject({ method: "GET", url: "/api/conversations" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/conversations",
+      headers: { cookie: second.cookie },
+    });
     expect(res.statusCode).toBe(200);
     const { conversations } = res.json();
     expect(conversations.map((c: { id: string }) => c.id)).toEqual([
-      secondId,
-      firstId,
+      second.id,
+      first.id,
     ]);
   });
 
+  it("does not show one workspace's conversations to another (no login, cookie-scoped history)", async () => {
+    const ownerConversation = await createConversationViaApi(app);
+
+    const strangerRes = await app.inject({
+      method: "GET",
+      url: "/api/conversations",
+    });
+    expect(strangerRes.statusCode).toBe(200);
+    expect(strangerRes.json().conversations).toEqual([]);
+
+    const strangerCookie = extractWorkspaceCookie(strangerRes);
+    expect(strangerCookie).toBeDefined();
+    expect(strangerCookie).not.toBe(ownerConversation.cookie);
+
+    const strangerAccessRes = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${ownerConversation.id}`,
+      headers: { cookie: strangerCookie! },
+    });
+    expect(strangerAccessRes.statusCode).toBe(404);
+
+    const ownerAccessRes = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${ownerConversation.id}`,
+      headers: { cookie: ownerConversation.cookie },
+    });
+    expect(ownerAccessRes.statusCode).toBe(200);
+  });
+
   it("creates a conversation, starts a run, and the run completes with a schema-valid result reachable via GET /result", async () => {
-    const conversationId = await createConversationViaApi(app);
+    const conversation = await createConversationViaApi(app);
 
     const createRunRes = await app.inject({
       method: "POST",
-      url: `/api/conversations/${conversationId}/runs`,
+      url: `/api/conversations/${conversation.id}/runs`,
       payload: { question: "Should a small team adopt a monorepo?", mode: "quick" },
+      headers: { cookie: conversation.cookie },
     });
     expect(createRunRes.statusCode).toBe(201);
     const { runId, status: initialStatus } = createRunRes.json();
     expect(typeof runId).toBe("string");
     expect(initialStatus).toBe("running");
 
-    const status = await pollUntilSettled(app, runId);
+    const status = await pollUntilSettled(app, runId, conversation.cookie);
     expect(status).toBe("completed");
 
     const resultRes = await app.inject({
       method: "GET",
       url: `/api/runs/${runId}/result`,
+      headers: { cookie: conversation.cookie },
     });
     expect(resultRes.statusCode).toBe(200);
     const body = resultRes.json();
@@ -102,13 +175,305 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
   });
 
   it("rejects a run-creation request for an unknown modelId", async () => {
-    const conversationId = await createConversationViaApi(app);
+    const conversation = await createConversationViaApi(app);
     const res = await app.inject({
       method: "POST",
-      url: `/api/conversations/${conversationId}/runs`,
+      url: `/api/conversations/${conversation.id}/runs`,
       payload: { question: "Q?", modelIds: ["not_a_real_model"] },
+      headers: { cookie: conversation.cookie },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects a run-creation request for an unsupported BYOK provider id", async () => {
+    const conversation = await createConversationViaApi(app);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: {
+        question: "Q?",
+        byokModels: [
+          {
+            providerId: "not-a-whitelisted-provider",
+            modelId: "some-model",
+            apiKey: "sk-test",
+          },
+        ],
+      },
+      headers: { cookie: conversation.cookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/unsupported provider/);
+  });
+
+  it("rejects a byok label that collides with a selected legacy model id", async () => {
+    const conversation = await createConversationViaApi(app);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: {
+        question: "Q?",
+        modelIds: ["model_a"],
+        byokModels: [
+          {
+            providerId: "openai",
+            modelId: "gpt-4.1-mini",
+            apiKey: "sk-test",
+            label: "model_a",
+          },
+        ],
+      },
+      headers: { cookie: conversation.cookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/used by both/);
+  });
+
+  it("creates a run mixing a legacy model and a BYOK model without ever persisting the caller's api key", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network disabled in test"));
+    try {
+      const conversation = await createConversationViaApi(app);
+      const createRunRes = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q?",
+          mode: "quick",
+          modelIds: ["model_a"],
+          byokModels: [
+            {
+              providerId: "openai",
+              modelId: "gpt-4.1-mini",
+              apiKey: "sk-should-never-be-persisted",
+              label: "my_openai",
+            },
+          ],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      expect(createRunRes.statusCode).toBe(201);
+      const { runId } = createRunRes.json();
+
+      const persisted = await db
+        .selectFrom("runs")
+        .select(["model_config"])
+        .where("id", "=", runId)
+        .executeTakeFirstOrThrow();
+      const modelConfig = persisted.model_config;
+      expect(modelConfig).toEqual([
+        { id: "model_a", provider: "mock" },
+        { id: "my_openai", provider: "OpenAI" },
+      ]);
+      expect(JSON.stringify(modelConfig)).not.toContain(
+        "sk-should-never-be-persisted"
+      );
+
+      // Let the background deliberation settle (it'll fail — fetch is
+      // stubbed to reject — but we don't care about the outcome here, only
+      // that it doesn't leave dangling async work for the next test).
+      await pollUntilSettled(app, runId, conversation.cookie);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("persists a byok key under the workspace when save is true, exposes only metadata via GET /api/workspace/keys, and never leaks the plaintext into that workspace's saved-key row", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network disabled in test"));
+    try {
+      const conversation = await createConversationViaApi(app);
+      const createRunRes = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q?",
+          mode: "quick",
+          byokModels: [
+            {
+              providerId: "openai",
+              modelId: "gpt-4.1-mini",
+              apiKey: "sk-remember-me",
+              label: "my_openai",
+              save: true,
+            },
+          ],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      expect(createRunRes.statusCode).toBe(201);
+      const { runId } = createRunRes.json();
+
+      const keysRes = await app.inject({
+        method: "GET",
+        url: "/api/workspace/keys",
+        headers: { cookie: conversation.cookie },
+      });
+      expect(keysRes.statusCode).toBe(200);
+      const { keys } = keysRes.json();
+      expect(keys).toEqual([
+        {
+          id: expect.any(String),
+          providerId: "openai",
+          modelId: "gpt-4.1-mini",
+          label: "my_openai",
+          createdAt: expect.any(String),
+        },
+      ]);
+      expect(JSON.stringify(keys)).not.toContain("sk-remember-me");
+
+      const row = await db
+        .selectFrom("workspace_api_keys")
+        .select(["encrypted_key"])
+        .where("id", "=", keys[0].id)
+        .executeTakeFirstOrThrow();
+      expect(row.encrypted_key.toString("latin1")).not.toContain(
+        "sk-remember-me"
+      );
+
+      // A different workspace must not see this saved key.
+      const strangerKeysRes = await app.inject({
+        method: "GET",
+        url: "/api/workspace/keys",
+      });
+      expect(strangerKeysRes.json().keys).toEqual([]);
+
+      await pollUntilSettled(app, runId, conversation.cookie);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("reuses a saved key via savedKeyId without the client ever resending the plaintext", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network disabled in test"));
+    try {
+      const conversation = await createConversationViaApi(app);
+
+      // First run: save a key.
+      const firstRunRes = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q?",
+          mode: "quick",
+          byokModels: [
+            {
+              providerId: "openai",
+              modelId: "gpt-4.1-mini",
+              apiKey: "sk-reuse-me",
+              label: "my_openai",
+              save: true,
+            },
+          ],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      const { runId: firstRunId } = firstRunRes.json();
+      await pollUntilSettled(app, firstRunId, conversation.cookie);
+
+      const keysRes = await app.inject({
+        method: "GET",
+        url: "/api/workspace/keys",
+        headers: { cookie: conversation.cookie },
+      });
+      const savedKeyId = keysRes.json().keys[0].id as string;
+
+      // Second run: reuse it by id only — no apiKey/providerId/modelId in
+      // the payload at all, proving the server derives them from storage.
+      const secondRunRes = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q2?",
+          mode: "quick",
+          byokModels: [{ savedKeyId }],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      expect(secondRunRes.statusCode).toBe(201);
+      const { runId: secondRunId } = secondRunRes.json();
+
+      const persisted = await db
+        .selectFrom("runs")
+        .select(["model_config"])
+        .where("id", "=", secondRunId)
+        .executeTakeFirstOrThrow();
+      expect(persisted.model_config).toEqual([
+        { id: "my_openai", provider: "OpenAI" },
+      ]);
+      expect(JSON.stringify(persisted.model_config)).not.toContain(
+        "sk-reuse-me"
+      );
+
+      // Confirm the actual outbound call used the decrypted saved key.
+      await pollUntilSettled(app, secondRunId, conversation.cookie);
+      const call = fetchSpy.mock.calls.find(([url]) =>
+        String(url).includes("api.openai.com")
+      );
+      expect(call).toBeDefined();
+      const init = call![1] as { headers: Record<string, string> };
+      expect(init.headers.Authorization).toBe("Bearer sk-reuse-me");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("rejects a run-creation request referencing an unknown/foreign savedKeyId", async () => {
+    const conversation = await createConversationViaApi(app);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: {
+        question: "Q?",
+        byokModels: [{ savedKeyId: "00000000-0000-0000-0000-000000000000" }],
+      },
+      headers: { cookie: conversation.cookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/unknown saved key id/);
+  });
+
+  it("does not persist a byok key when save is omitted/false", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network disabled in test"));
+    try {
+      const conversation = await createConversationViaApi(app);
+      const createRunRes = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q?",
+          mode: "quick",
+          byokModels: [
+            {
+              providerId: "openai",
+              modelId: "gpt-4.1-mini",
+              apiKey: "sk-do-not-remember",
+              label: "my_openai",
+            },
+          ],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      expect(createRunRes.statusCode).toBe(201);
+      const { runId } = createRunRes.json();
+
+      const keysRes = await app.inject({
+        method: "GET",
+        url: "/api/workspace/keys",
+        headers: { cookie: conversation.cookie },
+      });
+      expect(keysRes.json().keys).toEqual([]);
+
+      await pollUntilSettled(app, runId, conversation.cookie);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("404s when creating a run under a non-existent conversation", async () => {
@@ -121,18 +486,20 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
   });
 
   it("replays the full persisted event log over SSE after the run has completed (page-refresh/reconnect scenario)", async () => {
-    const conversationId = await createConversationViaApi(app);
+    const conversation = await createConversationViaApi(app);
     const createRunRes = await app.inject({
       method: "POST",
-      url: `/api/conversations/${conversationId}/runs`,
+      url: `/api/conversations/${conversation.id}/runs`,
       payload: { question: "Q?", mode: "quick" },
+      headers: { cookie: conversation.cookie },
     });
     const { runId } = createRunRes.json();
-    await pollUntilSettled(app, runId);
+    await pollUntilSettled(app, runId, conversation.cookie);
 
     const eventsRes = await app.inject({
       method: "GET",
       url: `/api/runs/${runId}/events`,
+      headers: { cookie: conversation.cookie },
     });
     expect(eventsRes.statusCode).toBe(200);
     expect(eventsRes.payload).toContain("event: run_started");
@@ -149,9 +516,39 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
     const resumeRes = await app.inject({
       method: "GET",
       url: `/api/runs/${runId}/events`,
-      headers: { "last-event-id": String(maxSeq) },
+      headers: { "last-event-id": String(maxSeq), cookie: conversation.cookie },
     });
     expect(resumeRes.payload.trim()).toBe("");
+  });
+
+  it("does not let a different workspace access another's run status/result/events (404, not 403)", async () => {
+    const conversation = await createConversationViaApi(app);
+    const createRunRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: { question: "Q?", mode: "quick" },
+      headers: { cookie: conversation.cookie },
+    });
+    const { runId } = createRunRes.json();
+    await pollUntilSettled(app, runId, conversation.cookie);
+
+    const strangerStatusRes = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}`,
+    });
+    expect(strangerStatusRes.statusCode).toBe(404);
+
+    const strangerResultRes = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}/result`,
+    });
+    expect(strangerResultRes.statusCode).toBe(404);
+
+    const strangerEventsRes = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}/events`,
+    });
+    expect(strangerEventsRes.statusCode).toBe(404);
   });
 
   it("marks a run failed (not a crashed process) when quorum is not met, and surfaces the reason", async () => {
@@ -166,30 +563,34 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
     const failApp = buildApp({
       db,
       resolvedProvider: failingProvider,
+      encryptionKey: TEST_ENCRYPTION_KEY,
       logger: false,
     });
     await failApp.ready();
     try {
-      const conversationId = await createConversationViaApi(failApp);
+      const conversation = await createConversationViaApi(failApp);
       const createRunRes = await failApp.inject({
         method: "POST",
-        url: `/api/conversations/${conversationId}/runs`,
+        url: `/api/conversations/${conversation.id}/runs`,
         payload: { question: "Q?", mode: "standard" },
+        headers: { cookie: conversation.cookie },
       });
       const { runId } = createRunRes.json();
 
-      const status = await pollUntilSettled(failApp, runId);
+      const status = await pollUntilSettled(failApp, runId, conversation.cookie);
       expect(status).toBe("failed");
 
       const runRes = await failApp.inject({
         method: "GET",
         url: `/api/runs/${runId}`,
+        headers: { cookie: conversation.cookie },
       });
       expect(runRes.json().error).toMatch(/quorum/);
 
       const resultRes = await failApp.inject({
         method: "GET",
         url: `/api/runs/${runId}/result`,
+        headers: { cookie: conversation.cookie },
       });
       expect(resultRes.statusCode).toBe(422);
     } finally {

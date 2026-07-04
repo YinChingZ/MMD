@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { buildApp } from "./app.js";
-import { loadApiEnv, loadEnvFile } from "./config/env.js";
+import { loadApiEnv, loadEncryptionKey, loadEnvFile } from "./config/env.js";
 import { loadModelsConfig } from "./config/models-config.js";
 import { buildProvider } from "./config/provider-factory.js";
 import { createDb } from "./db/client.js";
@@ -9,6 +9,7 @@ loadEnvFile(".env");
 loadEnvFile(".env.local");
 
 const env = loadApiEnv();
+const encryptionKey = loadEncryptionKey();
 const db = createDb(env.databaseUrl);
 
 const MODELS_CONFIG_PATH = "./models.config.json";
@@ -27,7 +28,7 @@ if (resolvedProvider.isMock) {
   );
 }
 
-const app = buildApp({ db, resolvedProvider });
+const app = buildApp({ db, resolvedProvider, encryptionKey });
 
 app.listen({ port: env.port, host: "0.0.0.0" }, (err) => {
   if (err) {

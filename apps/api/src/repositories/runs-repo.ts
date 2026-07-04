@@ -8,6 +8,7 @@ export type RunStatus = "running" | "completed" | "failed";
 export interface RunRow {
   id: string;
   conversationId: string;
+  workspaceId: string | null;
   question: string;
   mode: RunMode;
   status: RunStatus;
@@ -21,6 +22,7 @@ export async function createRun(
   params: {
     id: string;
     conversationId: string;
+    workspaceId: string;
     question: string;
     mode: RunMode;
     modelConfig: ModelConfig[];
@@ -32,6 +34,7 @@ export async function createRun(
     .values({
       id: params.id,
       conversation_id: params.conversationId,
+      workspace_id: params.workspaceId,
       question: params.question,
       mode: params.mode,
       status: "running",
@@ -97,6 +100,7 @@ function toRunRow(row: Selectable<RunsTable>): RunRow {
   return {
     id: row.id,
     conversationId: row.conversation_id,
+    workspaceId: row.workspace_id,
     question: row.question,
     mode: row.mode as RunMode,
     status: row.status as RunStatus,

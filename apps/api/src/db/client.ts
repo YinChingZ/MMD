@@ -1,9 +1,27 @@
 import { Kysely, PostgresDialect, type Generated } from "kysely";
 import { Pool } from "pg";
 
+export interface WorkspacesTable {
+  id: Generated<string>;
+  token: string;
+  created_at: Generated<Date>;
+  last_seen_at: Generated<Date>;
+}
+
+export interface WorkspaceApiKeysTable {
+  id: Generated<string>;
+  workspace_id: string;
+  provider_id: string;
+  model_id: string;
+  label: string | null;
+  encrypted_key: Buffer;
+  created_at: Generated<Date>;
+}
+
 export interface ConversationsTable {
   id: Generated<string>;
   title: string | null;
+  workspace_id: string | null;
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
 }
@@ -11,6 +29,7 @@ export interface ConversationsTable {
 export interface RunsTable {
   id: string;
   conversation_id: string;
+  workspace_id: string | null;
   question: string;
   mode: string;
   protocol_version: Generated<string>;
@@ -102,6 +121,8 @@ export interface RunResultsTable {
 }
 
 export interface Database {
+  workspaces: WorkspacesTable;
+  workspace_api_keys: WorkspaceApiKeysTable;
   conversations: ConversationsTable;
   runs: RunsTable;
   run_events: RunEventsTable;

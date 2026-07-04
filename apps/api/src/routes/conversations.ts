@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppDeps } from "../app.js";
+import { resolveWorkspace } from "../middleware/workspace.js";
 import {
   createConversation,
   getConversation,
@@ -16,17 +17,28 @@ export async function conversationsRoutes(
   fastify: FastifyInstance,
   deps: AppDeps
 ): Promise<void> {
+  fastify.addHook("onRequest", async (request, reply) => {
+    request.workspaceId = await resolveWorkspace(deps.db, request, reply);
+  });
+
   fastify.post("/api/conversations", async (request, reply) => {
     const parsed = CreateConversationBody.safeParse(request.body ?? {});
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.message });
     }
-    const conversation = await createConversation(deps.db, parsed.data.title);
+    const conversation = await createConversation(
+      deps.db,
+      request.workspaceId,
+      parsed.data.title
+    );
     return reply.code(201).send(conversation);
   });
 
-  fastify.get("/api/conversations", async (_request, reply) => {
-    const conversations = await listConversations(deps.db);
+  fastify.get("/api/conversations", async (request, reply) => {
+    const conversations = await listConversations(
+      deps.db,
+      request.workspaceId
+    );
     return reply.send({ conversations });
   });
 
@@ -34,7 +46,7 @@ export async function conversationsRoutes(
     "/api/conversations/:id",
     async (request, reply) => {
       const conversation = await getConversation(deps.db, request.params.id);
-      if (!conversation) {
+      if (!conversation || conversation.workspaceId !== request.workspaceId) {
         return reply.code(404).send({ error: "conversation not found" });
       }
       const runs = await listRunsForConversation(deps.db, request.params.id);

@@ -113,6 +113,14 @@ M2 moves the orchestrator logic already validated in `apps/cli` (now extracted i
 - **No Redis.** The original tech design doc mentions Redis for task state/short-term event queueing, but M2's acceptance criteria (start a run, subscribe to it live, see the result after a refresh) don't need cross-process event fan-out — a single-process in-memory broadcaster plus Postgres persistence (for reconnect replay) is enough. Redis can be introduced later if/when true horizontal scaling is actually needed; not worth over-engineering for now.
 - **Persistence**: beyond `conversations`/`runs`/`run_events`, the `claims`/`reviews`/`candidates`/`votes` tables flatten each run's detailed data into queryable rows (`candidates.source_claim_ids` preserves M0's traceability constraint), while `run_results` stores a full `DeliberationResult`/`PlanDocument` snapshot as the direct data source for `GET /result`. See `apps/api/src/db/migrations/0001_init.sql` for the schema and migration script.
 
+## M4 phase 1: BYOK reopens "client-supplied provider" — but keeps the whitelist
+
+The section above describes how M2 collapsed model selection into a server-side `models.config.json` registry to avoid SSRF and avoid needing client-supplied API keys. M4 phase 1 (no account system, a BYOK platform — see multi-model-deliberation-dev-roadmap.md) reopens client-supplied API keys, but does *not* reopen "client-supplied arbitrary baseUrl":
+
+- `packages/protocol/src/provider-whitelist.ts` defines a fixed list of providers (`providerId` → a fixed `baseUrl`) — currently only OpenAI-compatible-shaped ones: OpenAI, DeepSeek, OpenRouter, Volcengine. A client can only pick a `providerId` + its own `apiKey` + a free-text `modelId`, never a `baseUrl` — which is exactly why reopening client-supplied keys didn't reopen the SSRF surface: `baseUrl` is still resolved entirely server-side from `providerId`.
+- `apps/api/src/config/provider-factory.ts`'s `buildRunProvider()` constructs a provider per `POST /runs` request (merging the selected server-registry models with any client-supplied BYOK models into one `RoutingProvider`), kept entirely separate from `buildProvider()` (built once at startup, still serving the server registry) so neither path affects the other.
+- Fully custom/arbitrary baseUrl (for self-hosted or niche providers) would need a full SSRF-hardening pass — private-IP filtering, DNS-rebinding protection, redirect revalidation, IP-encoding bypass handling — assessed as meaningfully more work and left as an explicit follow-up, not done in this pass.
+
 ## Usage
 
 ```ts

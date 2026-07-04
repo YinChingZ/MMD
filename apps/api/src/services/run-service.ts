@@ -14,6 +14,7 @@ import type { RunBroadcaster } from "../sse/broadcaster.js";
 
 export interface StartRunParams {
   conversationId: string;
+  workspaceId: string;
   question: string;
   mode: RunMode;
   models: ModelConfig[];
@@ -45,6 +46,7 @@ export class RunService {
     await createRun(this.db, {
       id: runId,
       conversationId: params.conversationId,
+      workspaceId: params.workspaceId,
       question: params.question,
       mode: params.mode,
       modelConfig: params.models,

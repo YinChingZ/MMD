@@ -40,6 +40,33 @@ export interface ModelInfo {
   isCoordinator: boolean;
 }
 
+export interface ProviderInfo {
+  providerId: string;
+  displayName: string;
+}
+
+export interface SavedApiKeyMetadata {
+  id: string;
+  providerId: string;
+  modelId: string;
+  label: string | null;
+  createdAt: string;
+}
+
+// Exactly one of apiKey/savedKeyId, mirroring apps/api's ByokModelEntry —
+// either a freshly-entered key (optionally opted into being saved), or a
+// reference to a previously-saved one so the browser never re-holds the
+// plaintext to reuse it.
+export type ByokModelInput =
+  | {
+      providerId: string;
+      modelId: string;
+      apiKey: string;
+      label?: string;
+      save?: boolean;
+    }
+  | { savedKeyId: string; label?: string };
+
 // Mirrors apps/api/src/repositories/results-repo.ts's getResult() shape plus
 // the runId/question/mode/status the route adds on top — not DeliberationResult
 // itself, which also carries a `budget` field getResult never persists.
@@ -100,9 +127,26 @@ export async function listModels(): Promise<ModelInfo[]> {
   return body.models;
 }
 
+export async function listProviders(): Promise<ProviderInfo[]> {
+  const res = await fetch("/api/providers");
+  const body = await asJson<{ providers: ProviderInfo[] }>(res);
+  return body.providers;
+}
+
+export async function listWorkspaceKeys(): Promise<SavedApiKeyMetadata[]> {
+  const res = await fetch("/api/workspace/keys");
+  const body = await asJson<{ keys: SavedApiKeyMetadata[] }>(res);
+  return body.keys;
+}
+
 export async function createRun(
   conversationId: string,
-  params: { question: string; mode: RunMode; modelIds?: string[] }
+  params: {
+    question: string;
+    mode: RunMode;
+    modelIds?: string[];
+    byokModels?: ByokModelInput[];
+  }
 ): Promise<{ runId: string; status: RunStatus }> {
   const res = await fetch(`/api/conversations/${conversationId}/runs`, {
     method: "POST",

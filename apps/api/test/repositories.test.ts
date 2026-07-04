@@ -14,6 +14,7 @@ import {
   markRunCompleted,
   markRunFailed,
 } from "../src/repositories/runs-repo.js";
+import { createWorkspace } from "../src/repositories/workspaces-repo.js";
 import { hasTestDatabase, setupTestDb, truncateAll } from "./db-helpers.js";
 
 const describeIfDb = hasTestDatabase() ? describe : describe.skip;
@@ -25,6 +26,7 @@ if (!hasTestDatabase()) {
 
 describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () => {
   let db: Kysely<Database>;
+  let workspaceId: string;
 
   beforeAll(async () => {
     db = await setupTestDb();
@@ -32,6 +34,7 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
 
   beforeEach(async () => {
     await truncateAll(db);
+    workspaceId = (await createWorkspace(db)).id;
   });
 
   afterAll(async () => {
@@ -39,23 +42,30 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
   });
 
   it("creates and reads a conversation", async () => {
-    const conversation = await createConversation(db, "Test conversation");
+    const conversation = await createConversation(
+      db,
+      workspaceId,
+      "Test conversation"
+    );
     expect(conversation.title).toBe("Test conversation");
+    expect(conversation.workspaceId).toBe(workspaceId);
     const fetched = await getConversation(db, conversation.id);
     expect(fetched?.id).toBe(conversation.id);
   });
 
   it("creates a run, transitions it to completed, and lists it under its conversation", async () => {
-    const conversation = await createConversation(db);
+    const conversation = await createConversation(db, workspaceId);
     const run = await createRun(db, {
       id: "run_test_1",
       conversationId: conversation.id,
+      workspaceId,
       question: "Q?",
       mode: "standard",
       modelConfig: [{ id: "model_a", provider: "mock" }],
       budget: getBudget("standard"),
     });
     expect(run.status).toBe("running");
+    expect(run.workspaceId).toBe(workspaceId);
 
     await markRunCompleted(db, run.id);
     const updated = await getRun(db, run.id);
@@ -67,10 +77,11 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
   });
 
   it("marks a run failed with an error message", async () => {
-    const conversation = await createConversation(db);
+    const conversation = await createConversation(db, workspaceId);
     const run = await createRun(db, {
       id: "run_test_fail",
       conversationId: conversation.id,
+      workspaceId,
       question: "Q?",
       mode: "standard",
       modelConfig: [{ id: "model_a", provider: "mock" }],
@@ -83,10 +94,11 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
   });
 
   it("appends run events with caller-assigned seq and replays only events after a given seq", async () => {
-    const conversation = await createConversation(db);
+    const conversation = await createConversation(db, workspaceId);
     const run = await createRun(db, {
       id: "run_test_events",
       conversationId: conversation.id,
+      workspaceId,
       question: "Q?",
       mode: "standard",
       modelConfig: [{ id: "model_a", provider: "mock" }],
@@ -121,7 +133,7 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
   });
 
   it("persists a full deliberation result and reconstructs it via getResult, preserving candidate source_claim_ids traceability", async () => {
-    const conversation = await createConversation(db);
+    const conversation = await createConversation(db, workspaceId);
     const models = [
       { id: "model_a", provider: "mock" },
       { id: "model_b", provider: "mock" },
@@ -137,6 +149,7 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
     await createRun(db, {
       id: result.runId,
       conversationId: conversation.id,
+      workspaceId,
       question: result.question,
       mode: result.mode,
       modelConfig: models,
@@ -161,7 +174,7 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
   });
 
   it("persists a planning-mode result without candidate/vote primary-key collisions across topics (regression: MockProvider's mockNormalize deterministically emits cc_1/cc_2/... in every topic, and a real cross-topic planning run hit 'duplicate key value violates unique constraint candidates_pkey' before candidate/vote ids were scoped per topic)", async () => {
-    const conversation = await createConversation(db);
+    const conversation = await createConversation(db, workspaceId);
     const models = [
       { id: "model_a", provider: "mock" },
       { id: "model_b", provider: "mock" },
@@ -179,6 +192,7 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
     await createRun(db, {
       id: result.runId,
       conversationId: conversation.id,
+      workspaceId,
       question: result.question,
       mode: result.mode,
       modelConfig: models,

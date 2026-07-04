@@ -23,7 +23,7 @@ export async function setupTestDb(): Promise<Kysely<Database>> {
 }
 
 export async function truncateAll(db: Kysely<Database>): Promise<void> {
-  await sql`truncate table run_results, votes, candidates, reviews, claims, run_events, runs, conversations restart identity cascade`.execute(
+  await sql`truncate table run_results, votes, candidates, reviews, claims, run_events, runs, conversations, workspace_api_keys, workspaces restart identity cascade`.execute(
     db
   );
 }

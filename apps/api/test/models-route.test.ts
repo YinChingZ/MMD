@@ -14,6 +14,7 @@ describe("GET /api/models", () => {
     app = buildApp({
       db: {} as Kysely<Database>,
       resolvedProvider: buildProvider(undefined),
+      encryptionKey: Buffer.alloc(32, 7),
       logger: false,
     });
     await app.ready();
@@ -45,6 +46,7 @@ describe("GET /api/models", () => {
     const coordApp = buildApp({
       db: {} as Kysely<Database>,
       resolvedProvider,
+      encryptionKey: Buffer.alloc(32, 7),
       logger: false,
     });
     await coordApp.ready();

@@ -113,6 +113,14 @@ M2 把 `apps/cli` 里已经验证过的 orchestrator 逻辑（现已提取为 `p
 - **不引入 Redis**：原技术设计文档提到用 Redis 做任务状态/短期事件队列，但 M2 的验收标准（能发起 run、能实时订阅、刷新后能看到结果）不需要跨进程的事件分发——单进程内存广播器 + Postgres 持久化（用于断线重连回放）已经足够。等真正需要水平扩展时再引入，不在这个阶段过度设计。
 - **持久化**：`conversations`/`runs`/`run_events` 之外，`claims`/`reviews`/`candidates`/`votes` 表把每个 run 的详细数据落成可查询的行（`candidates.source_claim_ids` 保留 M0 的可追溯性约束），`run_results` 表则存一份完整的 `DeliberationResult`/`PlanDocument` 快照作为 `GET /result` 的直接数据源。表结构和迁移脚本见 `apps/api/src/db/migrations/0001_init.sql`。
 
+## M4 第一阶段：BYOK 重新打开"客户端自带 provider"，但保留白名单
+
+上一节提到 M2 为了避免 SSRF、避免需要客户端自带 key，把模型选择收敛成了服务端 `models.config.json` 注册表。M4 第一阶段（不做账号体系，BYOK 平台，详见 multi-model-deliberation-dev-roadmap.md）重新允许客户端提供自己的 API key，但没有重新打开"客户端自带任意 baseUrl"这个口子：
+
+- `packages/protocol/src/provider-whitelist.ts` 定义一份固定的 provider 列表（`providerId` → 固定 `baseUrl`），目前只有 OpenAI 兼容格式的 OpenAI/DeepSeek/OpenRouter/Volcengine。客户端只能选 `providerId` + 自己的 `apiKey` + 自由文本的 `modelId`，永远不能自己传 `baseUrl`——这就是为什么重新允许客户端自带 key 之后，SSRF 面并没有重新打开：`baseUrl` 依然完全由服务端按 `providerId` 查表决定。
+- `apps/api/src/config/provider-factory.ts` 的 `buildRunProvider()` 按每次 `POST /runs` 请求构造 provider（把选中的服务端注册表模型 + 客户端自带的 BYOK 模型合并成一个 `RoutingProvider`），跟 `buildProvider()`（启动时构造一次，服务于服务端注册表）完全分开，互不影响。
+- 完全自定义 baseUrl（用户自建/小众服务）需要额外一整套 SSRF 加固（内网地址过滤、DNS rebinding 防护、重定向校验、IP 编码解析），评估后判断工作量明显更大，作为明确的后续待办，这次没有做。
+
 ## 使用方式
 
 ```ts

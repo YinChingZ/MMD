@@ -11,3 +11,4 @@ export * from "./ids.js";
 export * from "./quorum.js";
 export * from "./budget.js";
 export * from "./consensus.js";
+export * from "./provider-whitelist.js";

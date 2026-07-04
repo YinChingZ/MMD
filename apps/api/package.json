@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.0.2",
     "@mmd/model-adapters": "*",
     "@mmd/orchestrator": "*",
     "@mmd/prompts": "*",

@@ -10,6 +10,8 @@ export interface OpenAICompatibleOptions {
   baseUrl?: string;
   /** Env var name holding the API key. Defaults to OPENAI_API_KEY. */
   apiKeyEnvVar?: string;
+  /** Literal API key (e.g. supplied by a client at request time). Takes precedence over apiKeyEnvVar when set. */
+  apiKey?: string;
 }
 
 interface ChatCompletionResponse {
@@ -26,17 +28,19 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly name = "openai-compatible";
   private readonly baseUrl: string;
   private readonly apiKeyEnvVar: string;
+  private readonly literalApiKey: string | undefined;
 
   constructor(opts: OpenAICompatibleOptions = {}) {
     this.baseUrl = opts.baseUrl ?? "https://api.openai.com/v1";
     this.apiKeyEnvVar = opts.apiKeyEnvVar ?? "OPENAI_API_KEY";
+    this.literalApiKey = opts.apiKey;
   }
 
   async complete(
     config: ModelConfig,
     request: CompletionRequest
   ): Promise<CompletionResult> {
-    const apiKey = process.env[this.apiKeyEnvVar];
+    const apiKey = this.literalApiKey ?? process.env[this.apiKeyEnvVar];
     if (!apiKey) {
       throw new Error(
         `missing API key: set ${this.apiKeyEnvVar} to use ${this.name} for model "${config.id}"`

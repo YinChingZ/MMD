@@ -40,3 +40,24 @@ export function loadApiEnv(): ApiEnv {
   }
   return { port, databaseUrl };
 }
+
+/**
+ * Separate from loadApiEnv/ApiEnv on purpose — apps/db/migrate.ts only needs
+ * databaseUrl and shouldn't be forced to have an encryption key configured
+ * just to run a migration. Only main.ts (the actual server) calls this.
+ */
+export function loadEncryptionKey(): Buffer {
+  const raw = process.env.ENCRYPTION_KEY;
+  if (!raw) {
+    throw new Error(
+      "ENCRYPTION_KEY is not set — generate one with `openssl rand -base64 32` and set it in apps/api/.env (see .env.example). It encrypts BYOK API keys that users opt into saving."
+    );
+  }
+  const key = Buffer.from(raw, "base64");
+  if (key.length !== 32) {
+    throw new Error(
+      `ENCRYPTION_KEY must decode (base64) to exactly 32 bytes for AES-256-GCM, got ${key.length} — generate one with \`openssl rand -base64 32\`.`
+    );
+  }
+  return key;
+}
