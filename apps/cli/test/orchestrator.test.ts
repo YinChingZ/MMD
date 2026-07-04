@@ -91,16 +91,29 @@ describe("runDeliberation — M1 acceptance criteria", () => {
     expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
   });
 
-  it("fails fast with a typed error when quorum is not met (2 of 3 models down)", async () => {
-    await expect(
-      runDeliberation({
-        question,
-        models,
-        provider: new MockProvider({
-          failModelIds: new Set(["model_b", "model_c"]),
-        }),
-      })
-    ).rejects.toThrow(DeliberationQuorumError);
+  it("fails fast with a typed error when quorum is not met (2 of 3 models down), naming which models failed and why", async () => {
+    const run = runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({
+        failModelIds: new Set(["model_b", "model_c"]),
+      }),
+    });
+    await expect(run).rejects.toThrow(DeliberationQuorumError);
+    try {
+      await run;
+      expect.unreachable();
+    } catch (err) {
+      const error = err as DeliberationQuorumError;
+      expect(error.phase).toBe("propose");
+      expect(error.failures.map((f) => f.modelId).sort()).toEqual([
+        "model_b",
+        "model_c",
+      ]);
+      for (const f of error.failures) {
+        expect(f.message).toMatch(/simulated failure/);
+      }
+    }
   });
 
   it("quick mode skips critique/revise/vote but still classifies via proposal overlap", async () => {

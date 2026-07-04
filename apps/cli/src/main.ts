@@ -87,6 +87,11 @@ const result = await runDeliberation({
   onEvent: (event) => {
     const phase = event.phase ? ` (${event.phase})` : "";
     console.error(`[${event.timestamp}] ${event.type}${phase}`);
+    const failures = (event.data as { failures?: { modelId: string; message: string }[] } | undefined)
+      ?.failures;
+    for (const f of failures ?? []) {
+      console.error(`  - ${f.modelId} failed: ${f.message}`);
+    }
   },
 });
 

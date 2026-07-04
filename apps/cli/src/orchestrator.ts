@@ -28,6 +28,7 @@ import {
   type ModelProvider,
   type ModelConfig,
   type CompletionRequest,
+  type FanoutOutcome,
 } from "@mmd/model-adapters";
 import {
   buildProposePrompt,
@@ -55,13 +56,29 @@ export interface RunEvent {
   data?: unknown;
 }
 
+export interface ModelFailure {
+  modelId: string;
+  message: string;
+}
+
+function describeFailures<T>(outcome: FanoutOutcome<T>): ModelFailure[] {
+  return outcome.results
+    .filter((r): r is Extract<typeof r, { ok: false }> => !r.ok)
+    .map((r) => ({ modelId: r.config.id, message: r.error.message }));
+}
+
 export class DeliberationQuorumError extends Error {
   constructor(
     public readonly phase: Phase,
-    public readonly quorum: QuorumCheck
+    public readonly quorum: QuorumCheck,
+    public readonly failures: ModelFailure[]
   ) {
+    const detail = failures
+      .map((f) => `${f.modelId}: ${f.message}`)
+      .join(" | ");
     super(
-      `phase "${phase}" did not meet quorum: ${quorum.respondentCount}/${quorum.required} required responses`
+      `phase "${phase}" did not meet quorum: ${quorum.respondentCount}/${quorum.required} required responses` +
+        (detail ? ` — failures: ${detail}` : "")
     );
     this.name = "DeliberationQuorumError";
   }
@@ -202,7 +219,10 @@ export async function runDeliberation(
   const mode = input.mode ?? "standard";
   const budget = getBudget(mode);
   const fanout = {
-    timeoutMs: input.fanoutOptions?.timeoutMs ?? 15_000,
+    // Defaults to the run's own p95 budget rather than an arbitrary constant —
+    // reasoning models can easily take 30-60s+ on a real structured-output
+    // prompt, so a flat 15s (fine for MockProvider) was timing out real calls.
+    timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.targetP95Ms,
     retries: input.fanoutOptions?.retries ?? 1,
     backoffMs: input.fanoutOptions?.backoffMs ?? 200,
   };
@@ -241,13 +261,15 @@ export async function runDeliberation(
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
   if (!proposeOutcome.quorum.met) {
-    emit("run_failed", "propose", { quorum: proposeOutcome.quorum });
-    throw new DeliberationQuorumError("propose", proposeOutcome.quorum);
+    const failures = describeFailures(proposeOutcome);
+    emit("run_failed", "propose", { quorum: proposeOutcome.quorum, failures });
+    throw new DeliberationQuorumError("propose", proposeOutcome.quorum, failures);
   }
   const proposals = proposeOutcome.succeeded.map((s) => s.value);
   emit("phase_completed", "propose", {
     count: proposals.length,
     partial: proposeOutcome.quorum.partial,
+    failures: describeFailures(proposeOutcome),
   });
 
   // --- Critique (optional per budget) ---
@@ -273,13 +295,15 @@ export async function runDeliberation(
     timings.critique = Date.now() - t0;
     quorum.critique = critiqueOutcome.quorum;
     if (!critiqueOutcome.quorum.met) {
-      emit("run_failed", "critique", { quorum: critiqueOutcome.quorum });
-      throw new DeliberationQuorumError("critique", critiqueOutcome.quorum);
+      const failures = describeFailures(critiqueOutcome);
+      emit("run_failed", "critique", { quorum: critiqueOutcome.quorum, failures });
+      throw new DeliberationQuorumError("critique", critiqueOutcome.quorum, failures);
     }
     critiques = critiqueOutcome.succeeded.map((s) => s.value);
     emit("phase_completed", "critique", {
       count: critiques.length,
       partial: critiqueOutcome.quorum.partial,
+      failures: describeFailures(critiqueOutcome),
     });
   }
 
@@ -308,13 +332,15 @@ export async function runDeliberation(
     timings.revise = Date.now() - t0;
     quorum.revise = reviseOutcome.quorum;
     if (!reviseOutcome.quorum.met) {
-      emit("run_failed", "revise", { quorum: reviseOutcome.quorum });
-      throw new DeliberationQuorumError("revise", reviseOutcome.quorum);
+      const failures = describeFailures(reviseOutcome);
+      emit("run_failed", "revise", { quorum: reviseOutcome.quorum, failures });
+      throw new DeliberationQuorumError("revise", reviseOutcome.quorum, failures);
     }
     revisions = reviseOutcome.succeeded.map((s) => s.value);
     emit("phase_completed", "revise", {
       count: revisions.length,
       partial: reviseOutcome.quorum.partial,
+      failures: describeFailures(reviseOutcome),
     });
   }
 
@@ -364,13 +390,15 @@ export async function runDeliberation(
     timings.vote = Date.now() - t0;
     quorum.vote = voteOutcome.quorum;
     if (!voteOutcome.quorum.met) {
-      emit("run_failed", "vote", { quorum: voteOutcome.quorum });
-      throw new DeliberationQuorumError("vote", voteOutcome.quorum);
+      const failures = describeFailures(voteOutcome);
+      emit("run_failed", "vote", { quorum: voteOutcome.quorum, failures });
+      throw new DeliberationQuorumError("vote", voteOutcome.quorum, failures);
     }
     votes = voteOutcome.succeeded.map((s) => s.value);
     emit("phase_completed", "vote", {
       count: votes.length,
       partial: voteOutcome.quorum.partial,
+      failures: describeFailures(voteOutcome),
     });
   }
 
