@@ -8,6 +8,9 @@ export const ClaimSchema = z.object({
   confidence: Confidence,
   rationale: z.string().min(1),
   conditions: z.array(z.string()).default([]),
+  // v0.2 planning mode only: which outline topic this claim belongs to.
+  // Always undefined in standard/quick mode.
+  topic_id: z.string().min(1).optional(),
 });
 export type Claim = z.infer<typeof ClaimSchema>;
 

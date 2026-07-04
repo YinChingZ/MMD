@@ -9,6 +9,8 @@ export const CandidateClaimSchema = z.object({
     .array(z.string().min(1))
     .min(1, "candidate claim must trace back to at least one source claim"),
   notes: z.string().optional(),
+  // v0.2 planning mode only: propagated from the source claims' topic_id.
+  topic_id: z.string().min(1).optional(),
 });
 export type CandidateClaim = z.infer<typeof CandidateClaimSchema>;
 

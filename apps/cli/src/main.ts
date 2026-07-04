@@ -32,7 +32,8 @@ const { values } = parseArgs({
 const question =
   values.question ??
   "Should a small team adopt a monorepo for a new multi-package TypeScript project?";
-const mode = values.mode === "quick" ? "quick" : "standard";
+const mode =
+  values.mode === "quick" ? "quick" : values.mode === "planning" ? "planning" : "standard";
 
 const DEFAULT_CONFIG_PATH = "./models.config.json";
 const configPath = values.config ?? DEFAULT_CONFIG_PATH;
@@ -86,10 +87,19 @@ const result = await runDeliberation({
   coordinatorModelId,
   onEvent: (event) => {
     const phase = event.phase ? ` (${event.phase})` : "";
-    console.error(`[${event.timestamp}] ${event.type}${phase}`);
-    const failures = (event.data as { failures?: { modelId: string; message: string }[] } | undefined)
-      ?.failures;
-    for (const f of failures ?? []) {
+    const eventData = event.data as
+      | {
+          failures?: { modelId: string; message: string }[];
+          topicId?: string;
+          step?: string;
+        }
+      | undefined;
+    const topicLabel = eventData?.topicId ? ` [topic:${eventData.topicId}]` : "";
+    const stepLabel = eventData?.step ? ` (${eventData.step})` : "";
+    console.error(
+      `[${event.timestamp}] ${event.type}${phase}${stepLabel}${topicLabel}`
+    );
+    for (const f of eventData?.failures ?? []) {
       console.error(`  - ${f.modelId} failed: ${f.message}`);
     }
   },

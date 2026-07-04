@@ -4,7 +4,7 @@
 
 ## 现状
 
-当前仓库处于 **M0（协议加固）+ M1（CLI 原型）** 阶段：协议层已实现并有测试覆盖，`apps/cli` 可以用 mock provider 或真实的 OpenAI 兼容 API 端到端跑通一次协商并输出 JSON/Markdown 报告。Backend API（M2）和 Web MVP（M3）尚未开始。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)。
+**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。Backend API（M2）尚未开始，是下一步。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)（含真实测试的发现和数据）。
 
 ## 六阶段协议
 
@@ -17,7 +17,9 @@
 | Vote | 每个模型对 candidate claims 表决 |
 | Compose | 按比例制共识分类（strong / qualified / disputed / rejected）生成最终答案 |
 
-协议的硬性约束（比例制共识、run 隔离的 id、quorum 降级、延迟/成本预算、quick mode）见 [docs/protocol.md](docs/protocol.md)。
+`standard`/`quick` 模式直接跑这六个阶段；`planning` 模式在最前面加一个 **Outline** 阶段（单一 coordinator 把问题拆成最多 8 个主题），然后对每个主题并行跑一遍这六阶段，最终按主题分节输出。
+
+协议的硬性约束（比例制共识、run 隔离的 id、quorum 降级、延迟/成本预算、quick/planning mode、outline 阶段为什么用单一 coordinator）见 [docs/protocol.md](docs/protocol.md)。
 
 ## Monorepo 结构
 
@@ -47,6 +49,14 @@ npm run start -- --question "Should a small team adopt a monorepo?" --mode stand
 
 不存在 `models.config.json`（或传 `--provider mock`）时会自动使用 `MockProvider`，默认模拟 `model_a,model_b,model_c` 三个模型，不会发起真实网络请求。结果会写入 `apps/cli/out/<runId>.json` 和 `.md`，并打印到终端。
 
+### Planning mode：长输出/综合技术规划
+
+```bash
+npm run start -- --question "给一个 3 人团队的电商项目做技术选型规划" --mode planning
+```
+
+会先跑一次 outline 把问题拆成最多 8 个主题，再对每个主题并行跑完整六阶段协议，最终输出一份按主题分节的规划文档（`## Executive Summary` + 每个主题一节）。真实模型下单个主题的六阶段耗时和 `standard` 模式的单次 run 类似（见 [docs/protocol.md](docs/protocol.md) 的真实耗时基线），多个主题并行执行，所以总耗时约等于最慢的那个主题，而不是耗时总和。
+
 ### 接入真实模型
 
 ```bash
@@ -61,7 +71,7 @@ cp apps/cli/.env.example apps/cli/.env
 | flag | 说明 |
 |------|------|
 | `--question`, `-q` | 待协商的问题 |
-| `--mode` | `standard`（默认，六阶段全跑）或 `quick`（跳过 critique/revise/vote） |
+| `--mode` | `standard`（默认，六阶段全跑）、`quick`（跳过 critique/revise/vote）或 `planning`（按主题拆分，适合长输出/综合规划） |
 | `--models`, `-m` | 使用 mock provider 时的模型 id 列表，逗号分隔 |
 | `--fail-models` | 使用 mock provider 时指定模拟失败的模型 id，用于测试 quorum 降级 |
 | `--config`, `-c` | models config 路径，默认 `./models.config.json` |

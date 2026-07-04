@@ -5,3 +5,5 @@ export * from "./revise.js";
 export * from "./normalize.js";
 export * from "./vote.js";
 export * from "./compose.js";
+export * from "./outline.js";
+export * from "./section-compose.js";

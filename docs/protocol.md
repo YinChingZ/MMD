@@ -59,6 +59,36 @@ Orchestrator 的实现规则：某阶段未达到 quorum → 该阶段标记为 
 
 `getBudget(mode)` 返回对应配置，orchestrator 应该据此决定要跑哪些阶段，而不是自己再判断一遍。
 
+## v0.2：Planning Mode（长输出/综合规划支持）
+
+v0.1 的六阶段协议假设所有 claim 是一个扁平的、互相可比较/可合并的集合——这对"一问一答"式的窄问题效果很好，但对"给一个项目做全面技术规划"这种长输出场景有结构性缺口（claim 数量爆炸导致 critique 的 O(n²) 成本失控、跨主题的 claim 被硬塞进同一个合并/投票池、compose 输出扁平不适合结构化文档）。v0.2 新增 `mode: "planning"`，按主题（topic）拆分复用现有六阶段协议来解决这些问题，而不重新设计共识机制本身。
+
+### Outline 阶段：为什么用单一 coordinator，而不是多模型协商
+
+Planning 模式在 Propose 之前多一个 **Outline** 阶段：一次 coordinator 调用（`buildOutlinePrompt` / `OutlineResultSchema`），把问题拆成最多 8 个主题（`RunBudget.maxTopics`，同时在 `OutlineResultSchema` 里用 `.max(8)` 做了 schema 层的硬限制，不只是 prompt 文字说明）。
+
+这里没有像 Normalize 阶段那样要求多模型参与决策，是刻意的选择：本文档第 1 条约束（"Normalize 阶段必须保持可追溯"）针对的是**已经产生的、带真值判断的 claim 内容被合并时可能被抹掉异议**——outline 阶段还没有任何 claim 产生，只是决定"分几个主题讨论"，一个不太好的主题划分是覆盖面问题，不是真值/异议被抹除的问题，而且完全可恢复：后续 Propose 阶段仍然是所有模型各自在每个主题下独立提案，如果 outline 漏了什么，模型可以在对应主题里用 `risk` 类型的 claim 指出遗漏。多模型 outline 至少多两轮真实网络往返，真实推理模型每阶段普遍要 90-250 秒（见下方"真实耗时基线"），为一个可恢复、低风险的决策多付出这个延迟成本不划算。
+
+### 按主题循环复用六阶段协议
+
+每个 outline topic 独立跑一次完整的 propose→critique→revise→normalize→vote→classify（`apps/cli/src/orchestrator.ts` 的 `runTopicDeliberation`），所有主题**并行**执行（`Promise.all`/`Promise.allSettled`，不串行——避免延迟随主题数线性增长）。这意味着：
+
+- `classifyCandidate`、`checkQuorum`、`fanOutWithQuorum` 等核心函数完全不需要知道 topic 的存在，按主题分别调用即可，不做任何改动。
+- Claim/candidate id 在 `stampProposal` 里扩展成 `${topicId}::${modelId}::c${i}`（原本是 `${modelId}::c${i}`），保证跨主题不冲突，同时不touch `src/ids.ts`（那个模块解决的是跨 run 的存储键隔离，是另一个维度）。
+- 单个主题的 quorum 失败会让该主题的 `runTopicDeliberation` 抛出 `DeliberationQuorumError`，但 `runPlanningDeliberation` 用 `Promise.allSettled` 收集结果——一个主题失败不会拖垮整个规划文档（同一个"单模型失败不阻塞整个 run"的原则，往上提了一层），除非**全部**主题都失败才会整体报错。
+
+### Section Compose：为什么 executive summary 是确定性拼接，不是模型调用
+
+每个主题单独跑一次 section-compose（`buildSectionComposePrompt` / `SectionAnswerSchema`，字段等价于 `FinalAnswerSchema` 加上 `topic_id`/`title`/`tldr`）。最终文档的 `executive_summary` 是**用代码把每个 section 的 `tldr` 拼起来**，不再调一次模型做"跨主题综合摘要"——如果加这一次调用，等于让 compose 重新变成跨主题做判断的裁判，正是 4.1/4.3 原则一直在避免的失败模式。`FinalAnswerSchema` 本身完全不变，`SectionAnswerSchema` 是独立的新 schema，不是把 `FinalAnswerSchema` 改成一个"可能有 topic 也可能没有"的联合类型。
+
+### 预算与 CLI
+
+`getBudget("planning")` 返回 `PLANNING_BUDGET`：每个主题跑完整六阶段（`phases` 与 `STANDARD_BUDGET` 相同），外加 `maxTopics: 8`。CLI 用 `--mode planning` 触发。
+
+### 真实耗时基线（截至本文档更新时）
+
+用真实模型（Volcengine/DeepSeek 系列推理模型）跑过的窄问题（standard 模式）单次耗时在 96-250 秒之间，远高于 `STANDARD_BUDGET` 里当初凭 mock 猜测的 p50 60s / p95 120s 目标——这两个数字还没有用真实数据校准，是已知的后续待办，不在这次 v0.2 改动范围内。Planning 模式因为每个主题都要跑完整六阶段，单个主题的耗时预期和 standard 模式的单次 run 类似，多个主题并行执行，所以总耗时约等于"最慢的那个主题"而不是"耗时总和"。
+
 ## 使用方式
 
 ```ts
@@ -69,6 +99,9 @@ import {
   NormalizeResultSchema,
   VoteSetSchema,
   FinalAnswerSchema,
+  OutlineResultSchema,
+  SectionAnswerSchema,
+  PlanDocumentSchema,
   classifyCandidate,
   checkQuorum,
   makeRunId,

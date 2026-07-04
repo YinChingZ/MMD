@@ -1,4 +1,4 @@
-import { CritiqueSchema, type Proposal } from "@mmd/protocol";
+import { CritiqueSchema, type Proposal, type Topic } from "@mmd/protocol";
 import type { CompletionRequest } from "@mmd/model-adapters";
 import { describeSchema } from "./schema-text.js";
 
@@ -6,12 +6,14 @@ export interface BuildCritiquePromptParams {
   question: string;
   reviewerModelId: string;
   proposals: Proposal[];
+  /** v0.2 planning mode: scope this critique to a single outline topic. `proposals` should already be filtered to that topic's claims by the caller. */
+  topic?: Topic;
 }
 
 export function buildCritiquePrompt(
   params: BuildCritiquePromptParams
 ): CompletionRequest {
-  const { question, reviewerModelId, proposals } = params;
+  const { question, reviewerModelId, proposals, topic } = params;
 
   const targets = proposals
     .flatMap((p) =>
@@ -29,6 +31,11 @@ export function buildCritiquePrompt(
     "Every challenge must include a concrete reason — do not challenge a claim just because of phrasing or style differences; those should not be marked major or critical.",
     "Rate severity as minor, major, or critical, reflecting how much the claim would change the final answer if the challenge were ignored.",
     "You do not need to review your own claims — they have been excluded from the list below.",
+    ...(topic
+      ? [
+          `All claims below are scoped to the topic "${topic.title}" — ${topic.description}. Keep your review within this topic.`,
+        ]
+      : []),
     "Return ONLY JSON matching this schema, no prose outside the JSON:",
     describeSchema(CritiqueSchema, "Critique"),
   ].join("\n\n");
@@ -42,6 +49,11 @@ export function buildCritiquePrompt(
   return {
     systemPrompt,
     userPrompt,
-    meta: { phase: "critique", reviewerModelId, targets },
+    meta: {
+      phase: "critique",
+      reviewerModelId,
+      targets,
+      ...(topic ? { topicId: topic.topic_id } : {}),
+    },
   };
 }

@@ -1,7 +1,19 @@
 # 多模型协商式对话产品：改进版开发流程
 
-日期：2026-07-03
-配套文档：[multi-model-deliberation-tech-design.md](/Users/xyz91928/Documents/Codex/2026-07-03/yo/outputs/multi-model-deliberation-tech-design.md)
+日期：2026-07-03（最后更新 2026-07-04）
+配套文档：[multi-model-deliberation-tech-design.md](/Users/xyz91928/Documents/Codex/2026-07-03/yo/outputs/multi-model-deliberation-tech-design.md)、[docs/protocol.md](docs/protocol.md)
+
+## 当前进度
+
+| 阶段 | 状态 | 说明 |
+|------|------|------|
+| M0 协议加固 | ✅ 完成 | `packages/protocol`，五个风险点全部落地为 schema/纯函数约束 |
+| M1 CLI 原型 | ✅ 完成 | `apps/cli`，mock provider 和真实 OpenAI 兼容 API 都跑通过 |
+| M1.5 收敛验证关卡 | ✅ 完成，Go 决策 | 见下方"M1.5 实际结果" |
+| v0.2 Planning Mode（长输出支持） | ✅ 完成 | 不在原路线图里，M1.5 之后新增，见下方专门一节 |
+| M2 Backend API | 待开始 | 下一步 |
+| M3 Web MVP | 未开始 | |
+| M4 产品化基础 | 未开始 | |
 
 ## 0. 为什么要改
 
@@ -64,20 +76,33 @@
 - 输出结果里包含 normalize 前的原始 claims 追溯链（哪怕 CLI 阶段只是打印在 JSON 里，不做 UI）。
 
 **验收标准**（在原文档基础上新增）：
-- 一个问题可以完整跑完，可以看到每个模型是否修改立场。
-- 最终答案按共识分类生成，且能从 candidate claim 追溯到原始 claim。
-- 跑 5-10 个跨类型真实问题（事实类、主观判断类、技术权衡类），记录每阶段耗时和 token 成本，产出一份耗时/成本基线表。
-- 至少构造 1 个"某模型超时/报错"的场景，验证 quorum 降级路径不会让整个 run 崩溃。
+- 一个问题可以完整跑完，可以看到每个模型是否修改立场。✅
+- 最终答案按共识分类生成，且能从 candidate claim 追溯到原始 claim。✅
+- 跑 5-10 个跨类型真实问题（事实类、主观判断类、技术权衡类），记录每阶段耗时和 token 成本，产出一份耗时/成本基线表。✅ 实测下来单次真实 run 耗时 96-410 秒不等（远超 M0 阶段凭空猜的 60s/120s 目标，见 `docs/protocol.md`"真实耗时基线"一节，`STANDARD_BUDGET` 的具体数字还没回填，是已知待办）。
+- 至少构造 1 个"某模型超时/报错"的场景，验证 quorum 降级路径不会让整个 run 崩溃。✅ 真实场景下也验证过：某个模型两次超时，quorum 仍以 2/3 完成 run，没有崩溃。
 
-### M1.5：收敛验证关卡（新增，决策检查点，不写代码）
+**实测中额外发现并修复的问题**（M1 acceptance criteria 之外，属于真跑真实模型才会暴露的坑）：
+- 真实模型会在 `model_id`/`claim_id` 字段里瞎编身份（甚至编出别的厂商的模型名），不会老实回填我们传给它的 id。`stampProposal`/`stampCritique`/`stampRevisionSet`/`stampVoteSet` 现在强制用调用时已知的 `ModelConfig.id` 覆盖模型自报的身份，claim id 按模型加前缀隔离，避免跨模型的 id 碰撞。mock provider 测试完全测不出这个问题，因为它一直老实回填。
 
-用 M1 跑出来的真实数据回答一个问题：**critique/revise 是否真的改变了模型立场，还是模型只是互相"礼貌认可"？**
+### M1.5：收敛验证关卡 — 实际结果（已完成，Go 决策）
 
-- 检查 revise 阶段的 `decision` 字段分布：如果绝大多数都是 `keep`，说明 1 轮 critique 可能不够有效，需要考虑增加轮次或调整 critique prompt 的力度。
-- 检查跨题目类型的表现：事实类问题可能很快收敛，主观判断类问题可能长期 disputed——这是否符合预期。
-- Go/No-go 决策：协议是否需要在进入 M2 之前再调整一版（比如 critique 轮次、severity 判定标准）。
+用真实模型（Volcengine/DeepSeek 系列推理模型）跑了 4 个真实问题（事实类、主观判断类、技术权衡类、刻意挑的争议话题）：
 
-这一步的意义是把"协商是否真的产生增量价值"这个最大的产品假设，放在投入 backend/web 资源之前验证，而不是等 Web MVP 做完才发现模型只是在互相客套。
+- **critique/revise 是真实工作，不是走过场**：多次观察到具体的事实修正（比如金球奖数量从 7 次修正为 8 次）和表述精细化（比如区分"简单 BFF"和"复杂 BFF 场景"），都能追溯到具体的同行评审意见。
+- **没有分歧时不会硬造分歧**：事实类问题（地月距离）三个模型直接一致，revise 阶段全是 `keep`。
+- **disputed/rejected 分类在真实数据里还没被真正触发过**：跑过的所有真实问题（含刻意选的"996 工作制是否应该被禁止"这种有争议话题）最终都收敛到 strong/qualified consensus，vote 阶段几乎没有 `object` 票。原因判断：当前配置的 3 个模型（deepseek 系 + glm）同属一个供应商生态，训练语料和安全对齐方式相近，观点相关性比"真正跨厂商"的模型组合更高——这是模型选型问题，不是协议代码问题（disputed 分类逻辑本身在 mock 测试里已验证是对的）。
+- **Go 决策**：核心产品假设（协商能产生真实增量价值）成立，进入 M2 backend 开发。协议本身不需要在这个阶段再调整。
+
+这一步的意义是把"协商是否真的产生增量价值"这个最大的产品假设，放在投入 backend/web 资源之前验证，而不是等 Web MVP 做完才发现模型只是在互相客套——现在已经验证过，可以放心往下走。
+
+## v0.2 补充：Planning Mode（长输出/综合技术规划支持）
+
+M1.5 之后，讨论到"如果用户想让模型给一个项目做全面技术规划"这种长输出场景，发现 v0.1 协议有结构性缺口（claim 数量爆炸导致 critique 的 O(n²) 成本失控、跨主题的 claim 被硬塞进同一个合并/投票池、compose 输出扁平不适合结构化文档）。已实现并上线：
+
+- 新增 **Outline 阶段**：单一 coordinator 调用把问题拆成最多 8 个主题，然后现有六阶段协议对每个主题**并行**独立跑一遍（详细设计和"为什么 outline 阶段可以用单一 coordinator 而不违反 4.1 原则"的推理见 [docs/protocol.md](docs/protocol.md) "v0.2 Planning Mode" 一节）。
+- 最终文档按主题分节，`executive_summary` 是每个 section 的 `tldr` 确定性拼接，不是再调一次模型做跨主题摘要。
+- v0.1 的所有行为完全不受影响（现有测试零回归），CLI 用 `--mode planning` 触发。
+- **真实验证**：跑了一次"给 3 人团队的电商项目做技术选型规划"，outline 自动拆出 8 个合理的主题（后端/前端/数据库/部署/支付/搜索/缓存/认证安全），全部 quorum 3/3，并行执行总耗时 6 分 46 秒（如果串行会是 40+ 分钟）。critique/revise 产生了大量真实的实质性修正（如指出 Firebase Auth 在中国不可靠、补充云托管 Elasticsearch 折中方案等），但最终分类仍以 strong_consensus 为主——"长内容细节更容易暴露真实分歧"这个猜想在实测中没有被验证，原因判断和 M1.5 一致（模型选型的相关性问题，不是长短内容的问题）。
 
 ### M2：Backend API（同原文档，落实 M0 的约束）
 
@@ -137,4 +162,8 @@
 
 ## 4. 下一步
 
-M0 是唯一需要在写 orchestrator 代码前完成的前置工作，预计 0.5-1 天。完成后进入 M1 CLI 原型，用真实数据跑出耗时/成本基线，并在 M1.5 做一次 go/no-go 评审，再决定是否投入 M2/M3 的 backend 和 web 开发。
+M0、M1、M1.5 均已完成并给出 Go 决策，v0.2 Planning Mode 作为额外能力也已上线并通过真实测试。下一步是 M2 Backend API：Conversation/Run API、SSE 事件流、Postgres 持久化，把 `apps/cli` 里已经验证过的 orchestrator 逻辑搬到服务端。
+
+其他已知的、不阻塞 M2 但值得记录的后续待办：
+- `STANDARD_BUDGET`/`PLANNING_BUDGET` 的 p50/p95 目标数字还是 M0 阶段凭空猜的，需要用已经收集到的真实耗时数据回填。
+- 当前 3 个模型（deepseek 系 + glm）同厂商生态，观点相关性偏高，disputed 分类路径还没被真实数据触发过；如果想验证这条路径，需要换一批训练谱系更独立的模型。

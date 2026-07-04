@@ -6,7 +6,15 @@ import {
   buildNormalizePrompt,
   buildVotePrompt,
   buildComposePrompt,
+  buildOutlinePrompt,
+  buildSectionComposePrompt,
 } from "../src/index.js";
+
+const sampleTopic = {
+  topic_id: "database",
+  title: "Database",
+  description: "Choice of primary datastore",
+};
 
 describe("prompt builders", () => {
   it("buildProposePrompt embeds the Proposal schema and sets phase meta", () => {
@@ -128,5 +136,84 @@ describe("prompt builders", () => {
     });
     expect(req.systemPrompt).toMatch(/not a judge/);
     expect(req.userPrompt).toContain("Y is unclear");
+  });
+});
+
+describe("v0.2 planning mode: optional topic param on existing builders", () => {
+  it("buildProposePrompt omits topicId from meta when no topic is given (backward compatible)", () => {
+    const req = buildProposePrompt({ question: "Is X true?", modelId: "model_a" });
+    expect(req.meta).not.toHaveProperty("topicId");
+  });
+
+  it("buildProposePrompt adds a scope instruction and topicId when a topic is given", () => {
+    const req = buildProposePrompt({
+      question: "Plan a project",
+      modelId: "model_a",
+      topic: sampleTopic,
+    });
+    expect(req.systemPrompt).toMatch(/Address ONLY the following topic/);
+    expect(req.systemPrompt).toContain("Database");
+    expect(req.meta.topicId).toBe("database");
+  });
+
+  it("buildCritiquePrompt adds topicId to meta when a topic is given", () => {
+    const req = buildCritiquePrompt({
+      question: "Plan a project",
+      reviewerModelId: "model_a",
+      proposals: [],
+      topic: sampleTopic,
+    });
+    expect(req.systemPrompt).toMatch(/scoped to the topic/);
+    expect(req.meta.topicId).toBe("database");
+  });
+
+  it("buildNormalizePrompt adds topicId to meta when a topic is given", () => {
+    const req = buildNormalizePrompt({
+      question: "Plan a project",
+      claims: [],
+      topic: sampleTopic,
+    });
+    expect(req.systemPrompt).toMatch(/scoped to the topic/);
+    expect(req.meta.topicId).toBe("database");
+  });
+});
+
+describe("buildOutlinePrompt", () => {
+  it("embeds the OutlineResult schema and the topic cap", () => {
+    const req = buildOutlinePrompt({ question: "Plan a project", maxTopics: 5 });
+    expect(req.systemPrompt).toMatch(/Return ONLY JSON/);
+    expect(req.systemPrompt).toMatch(/at most 5 topics/);
+    expect(req.meta).toEqual({
+      phase: "outline",
+      question: "Plan a project",
+      maxTopics: 5,
+    });
+  });
+
+  it("defaults maxTopics to 8", () => {
+    const req = buildOutlinePrompt({ question: "Plan a project" });
+    expect(req.meta.maxTopics).toBe(8);
+  });
+});
+
+describe("buildSectionComposePrompt", () => {
+  it("requires a one-sentence tldr and forbids cross-topic content", () => {
+    const req = buildSectionComposePrompt({
+      question: "Plan a project",
+      topic: sampleTopic,
+      strongConsensus: ["Use Postgres."],
+      qualifiedConsensus: [],
+      disputed: [],
+      rejected: [],
+      positionChanges: [],
+    });
+    expect(req.systemPrompt).toMatch(/not a judge/);
+    expect(req.systemPrompt).toMatch(/tldr must be exactly one sentence/);
+    expect(req.systemPrompt).toContain("Database");
+    expect(req.meta).toMatchObject({
+      phase: "section_compose",
+      topicId: "database",
+      topicTitle: "Database",
+    });
   });
 });

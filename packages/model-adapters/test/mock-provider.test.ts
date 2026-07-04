@@ -6,6 +6,8 @@ import {
   NormalizeResultSchema,
   VoteSetSchema,
   FinalAnswerSchema,
+  OutlineResultSchema,
+  SectionAnswerSchema,
 } from "@mmd/protocol";
 import { MockProvider } from "../src/providers/mock.js";
 import type { ModelConfig } from "../src/provider.js";
@@ -80,6 +82,36 @@ describe("MockProvider — every phase output must validate against @mmd/protoco
       positionChanges: [],
     });
     expect(FinalAnswerSchema.safeParse(json).success).toBe(true);
+  });
+
+  it("outline", async () => {
+    const json = await complete({ phase: "outline", question: "Plan a project" });
+    expect(OutlineResultSchema.safeParse(json).success).toBe(true);
+  });
+
+  it("outline respects maxTopics", async () => {
+    const json = await complete({
+      phase: "outline",
+      question: "Plan a project",
+      maxTopics: 1,
+    });
+    expect(json.topics).toHaveLength(1);
+  });
+
+  it("section_compose", async () => {
+    const json = await complete({
+      phase: "section_compose",
+      question: "Plan a project",
+      topicId: "database",
+      topicTitle: "Database",
+      strongConsensus: ["Use Postgres."],
+      qualifiedConsensus: [],
+      disputed: [],
+      rejected: [],
+      positionChanges: [],
+    });
+    expect(SectionAnswerSchema.safeParse(json).success).toBe(true);
+    expect(json.topic_id).toBe("database");
   });
 
   it("throws for an unknown phase", async () => {

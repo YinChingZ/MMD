@@ -5,6 +5,7 @@ export * from "./schemas/revise.js";
 export * from "./schemas/normalize.js";
 export * from "./schemas/vote.js";
 export * from "./schemas/compose.js";
+export * from "./schemas/outline.js";
 
 export * from "./ids.js";
 export * from "./quorum.js";

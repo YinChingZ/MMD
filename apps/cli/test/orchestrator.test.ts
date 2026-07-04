@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FinalAnswerSchema } from "@mmd/protocol";
+import { FinalAnswerSchema, SectionAnswerSchema } from "@mmd/protocol";
 import { MockProvider } from "@mmd/model-adapters";
 import { DeliberationQuorumError, runDeliberation } from "../src/orchestrator.js";
 
@@ -41,13 +41,14 @@ describe("runDeliberation — M1 acceptance criteria", () => {
     });
 
     // Deterministic given MockProvider's hash-based critique stances for these
-    // exact model ids: model_a and model_b each receive a non-"support" review
-    // and revise both claims; model_c's claims are only ever supported.
-    expect(result.final.model_position_changes).toHaveLength(4);
+    // exact model ids and the orchestrator's own "${modelId}::c${i}" claim id
+    // scoping: only model_a's first claim draws a (major) challenge from
+    // model_c; every other claim is only ever supported.
+    expect(result.final.model_position_changes).toHaveLength(1);
     const changedModels = new Set(
       result.final.model_position_changes.map((c) => c.model_id)
     );
-    expect(changedModels).toEqual(new Set(["model_a", "model_b"]));
+    expect(changedModels).toEqual(new Set(["model_a"]));
     for (const change of result.final.model_position_changes) {
       expect(change.changed_from).not.toBe(change.changed_to);
       expect(change.reason.length).toBeGreaterThan(0);
@@ -134,5 +135,102 @@ describe("runDeliberation — M1 acceptance criteria", () => {
       "compose",
     ]);
     expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+  });
+});
+
+describe("runDeliberation — v0.2 planning mode", () => {
+  it("runs an outline then a full per-topic deliberation, producing a schema-valid plan document", async () => {
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider(),
+      mode: "planning",
+    });
+
+    // MockProvider's mockOutline deterministically produces 2 topics (capped
+    // by PLANNING_BUDGET.maxTopics=8, but MockProvider keeps it small so
+    // tests stay fast and assertions can be exact).
+    expect(result.outline?.topics).toHaveLength(2);
+    expect(result.topics).toHaveLength(2);
+    expect(result.planDocument?.sections).toHaveLength(2);
+
+    for (const section of result.planDocument?.sections ?? []) {
+      expect(SectionAnswerSchema.safeParse(section).success).toBe(true);
+    }
+
+    // executive_summary is a deterministic join of each section's tldr, never
+    // a fresh model call — assert it round-trips exactly, not just "exists".
+    const expectedSummary = (result.planDocument?.sections ?? [])
+      .map((s) => s.tldr)
+      .join("\n");
+    expect(result.planDocument?.executive_summary).toBe(expectedSummary);
+  });
+
+  it("scopes each topic's proposals with model_id and claim ids in the ${topicId}::${modelId}::c{i} format", async () => {
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider(),
+      mode: "planning",
+    });
+
+    for (const topicResult of result.topics ?? []) {
+      for (const proposal of topicResult.proposals) {
+        expect(models.map((m) => m.id)).toContain(proposal.model_id);
+        for (const claim of proposal.claims) {
+          expect(claim.topic_id).toBe(topicResult.topic.topic_id);
+          expect(claim.claim_id.startsWith(`${topicResult.topic.topic_id}::`)).toBe(
+            true
+          );
+        }
+      }
+    }
+
+    // Claim ids from different topics never collide, even though MockProvider
+    // assigns the same local claim numbering ("c0", "c1", ...) in every topic.
+    const allClaimIds = (result.topics ?? []).flatMap((t) =>
+      t.proposals.flatMap((p) => p.claims.map((c) => c.claim_id))
+    );
+    expect(new Set(allClaimIds).size).toBe(allClaimIds.length);
+  });
+
+  it("runs each topic's full six-phase deliberation (critique/revise/vote all present)", async () => {
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider(),
+      mode: "planning",
+    });
+
+    for (const topicResult of result.topics ?? []) {
+      expect(topicResult.critiques).toHaveLength(3);
+      expect(topicResult.revisions).toHaveLength(3);
+      expect(topicResult.votes).toHaveLength(3);
+      expect(Object.keys(topicResult.timings)).toEqual([
+        "propose",
+        "critique",
+        "revise",
+        "normalize",
+        "vote",
+        "compose",
+      ]);
+    }
+  });
+
+  it("fails fast with a clear error when every topic fails quorum", async () => {
+    // Every topic uses the same model roster, so a model-wide failure fails
+    // every topic's propose phase identically — this exercises the
+    // "all topics failed" aggregate error, distinct from a single topic
+    // failing on its own (which Promise.allSettled would otherwise tolerate).
+    await expect(
+      runDeliberation({
+        question: "Plan a project",
+        models,
+        provider: new MockProvider({
+          failModelIds: new Set(["model_b", "model_c"]),
+        }),
+        mode: "planning",
+      })
+    ).rejects.toThrow(/all \d+ topic\(s\) failed/);
   });
 });

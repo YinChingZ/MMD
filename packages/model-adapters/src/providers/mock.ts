@@ -64,6 +64,10 @@ function generate(config: ModelConfig, request: CompletionRequest): unknown {
       return mockVote(config, request);
     case "compose":
       return mockCompose(request);
+    case "outline":
+      return mockOutline(request);
+    case "section_compose":
+      return mockSectionCompose(request);
     default:
       throw new Error(`mock provider: unknown phase "${phase}"`);
   }
@@ -235,25 +239,39 @@ interface PositionChangeMeta {
   reason: string;
 }
 
-function mockCompose(request: CompletionRequest) {
-  const question = String(request.meta.question ?? "");
-  const strong = (request.meta.strongConsensus as string[]) ?? [];
-  const qualified = (request.meta.qualifiedConsensus as string[]) ?? [];
-  const disputed = (request.meta.disputed as string[]) ?? [];
-  const rejected = (request.meta.rejected as string[]) ?? [];
-  const positionChanges =
-    (request.meta.positionChanges as PositionChangeMeta[]) ?? [];
+interface ConsensusBuckets {
+  strong: string[];
+  qualified: string[];
+  disputed: string[];
+  rejected: string[];
+}
 
-  const strength =
-    strong.length >= qualified.length + disputed.length
-      ? "high"
-      : disputed.length > strong.length + qualified.length
-        ? "low"
-        : "medium";
+function readConsensusBuckets(request: CompletionRequest): ConsensusBuckets {
+  return {
+    strong: (request.meta.strongConsensus as string[]) ?? [],
+    qualified: (request.meta.qualifiedConsensus as string[]) ?? [],
+    disputed: (request.meta.disputed as string[]) ?? [],
+    rejected: (request.meta.rejected as string[]) ?? [],
+  };
+}
 
-  const finalAnswer =
+function computeConsensusStrength({
+  strong,
+  qualified,
+  disputed,
+}: ConsensusBuckets): "high" | "medium" | "low" {
+  if (strong.length >= qualified.length + disputed.length) return "high";
+  if (disputed.length > strong.length + qualified.length) return "low";
+  return "medium";
+}
+
+function buildAnswerText(
+  intro: string,
+  { strong, qualified, disputed }: ConsensusBuckets
+): string {
+  return (
     [
-      `Regarding: ${question}`,
+      intro,
       strong.length ? `Main conclusions: ${strong.join(" ")}` : undefined,
       qualified.length
         ? `Conditional conclusions: ${qualified.join(" ")}`
@@ -261,18 +279,63 @@ function mockCompose(request: CompletionRequest) {
       disputed.length ? `Open disputes: ${disputed.join(" ")}` : undefined,
     ]
       .filter(Boolean)
-      .join("\n\n") || `No consensus reached on: ${question}`;
+      .join("\n\n") || `No consensus reached. ${intro}`
+  );
+}
+
+function mockCompose(request: CompletionRequest) {
+  const question = String(request.meta.question ?? "");
+  const buckets = readConsensusBuckets(request);
+  const positionChanges =
+    (request.meta.positionChanges as PositionChangeMeta[]) ?? [];
 
   return {
-    final_answer: finalAnswer,
-    strong_consensus: strong,
-    qualified_consensus: qualified,
-    disputed_points: disputed,
-    rejected_or_unsupported: rejected,
+    final_answer: buildAnswerText(`Regarding: ${question}`, buckets),
+    strong_consensus: buckets.strong,
+    qualified_consensus: buckets.qualified,
+    disputed_points: buckets.disputed,
+    rejected_or_unsupported: buckets.rejected,
     model_position_changes: positionChanges,
     confidence_summary: {
-      consensus_strength: strength,
-      notes: `${strong.length} strong, ${qualified.length} qualified, ${disputed.length} disputed, ${rejected.length} rejected.`,
+      consensus_strength: computeConsensusStrength(buckets),
+      notes: `${buckets.strong.length} strong, ${buckets.qualified.length} qualified, ${buckets.disputed.length} disputed, ${buckets.rejected.length} rejected.`,
+    },
+  };
+}
+
+function mockOutline(request: CompletionRequest) {
+  const maxTopics = Number(request.meta.maxTopics ?? 8);
+  const topicCount = Math.max(1, Math.min(2, maxTopics));
+  const topics = Array.from({ length: topicCount }, (_, i) => ({
+    topic_id: `topic_${i + 1}`,
+    title: `Topic ${i + 1}`,
+    description: `Mock scope for topic ${i + 1}`,
+  }));
+  return { topics };
+}
+
+function mockSectionCompose(request: CompletionRequest) {
+  const topicId = String(request.meta.topicId ?? "");
+  const topicTitle = String(request.meta.topicTitle ?? "");
+  const buckets = readConsensusBuckets(request);
+  const positionChanges =
+    (request.meta.positionChanges as PositionChangeMeta[]) ?? [];
+
+  return {
+    topic_id: topicId,
+    title: topicTitle,
+    tldr: `${topicTitle}: ${
+      buckets.strong[0] ?? buckets.qualified[0] ?? "no consensus reached"
+    }`,
+    section_answer: buildAnswerText(`Regarding ${topicTitle}:`, buckets),
+    strong_consensus: buckets.strong,
+    qualified_consensus: buckets.qualified,
+    disputed_points: buckets.disputed,
+    rejected_or_unsupported: buckets.rejected,
+    model_position_changes: positionChanges,
+    confidence_summary: {
+      consensus_strength: computeConsensusStrength(buckets),
+      notes: `${buckets.strong.length} strong, ${buckets.qualified.length} qualified, ${buckets.disputed.length} disputed, ${buckets.rejected.length} rejected.`,
     },
   };
 }
