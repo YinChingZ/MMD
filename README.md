@@ -6,7 +6,7 @@
 
 ## 现状
 
-**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。Backend API（M2）尚未开始，是下一步。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)（含真实测试的发现和数据）。
+**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）+ M2（Backend API）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。`apps/api` 把同一套 orchestrator 逻辑（现已提取为 `packages/orchestrator`，CLI 和 API 共用）搬到了 Fastify + Postgres 服务端：Conversation/Run API、SSE 事件流（断线重连可按 `Last-Event-ID` 回放）、run 结果持久化。下一步是 M3 Web MVP。详见 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)（含真实测试的发现和数据）。
 
 ## 六阶段协议
 
@@ -28,10 +28,12 @@
 ```
 apps/
   cli/                 # M1：跑通全流程的命令行入口
+  api/                  # M2：Fastify + Postgres 后端（Conversation/Run API、SSE 事件流）
 packages/
   protocol/             # zod schema + 共识分类 / quorum / id / budget 纯函数
   model-adapters/       # provider 封装：mock、OpenAI 兼容、按 quorum 的 fan-out
   prompts/              # 六阶段的 prompt 构造
+  orchestrator/         # propose→critique→revise→normalize→vote→compose 的编排逻辑，CLI 和 API 共用
 docs/
   protocol.md           # 协议规则文档
 ```
@@ -80,10 +82,31 @@ cp apps/cli/.env.example apps/cli/.env
 | `--provider mock` | 强制使用 mock provider，即使存在 config 文件 |
 | `--out`, `-o` | 输出目录，默认 `./out` |
 
+## Backend API（M2）
+
+```bash
+docker compose up -d postgres
+cp apps/api/.env.example apps/api/.env      # 按需修改 DATABASE_URL/PORT
+cd apps/api
+npm run db:migrate
+npm run start
+```
+
+不存在 `apps/api/models.config.json` 时同样会退回 `MockProvider`（行为与 CLI 一致）。核心接口：
+
+| 接口 | 说明 |
+|------|------|
+| `POST /api/conversations` | 创建会话 |
+| `GET /api/conversations/:id` | 查看会话及其下的 run 列表 |
+| `POST /api/conversations/:id/runs` | 发起一次协商 run（`question`/`mode`/可选 `modelIds`，模型必须来自服务端 `models.config.json` 里配置的 id，不接受客户端自带 provider/baseUrl） |
+| `GET /api/runs/:id` | 查询 run 状态 |
+| `GET /api/runs/:id/result` | 获取最终结果（run 未完成时返回 409） |
+| `GET /api/runs/:id/events` | SSE 事件流，支持按 `Last-Event-ID` 断线重连回放 |
+
 ## 开发
 
 ```bash
-npm run test    # 各 workspace 的单元测试
+npm run test    # 各 workspace 的单元测试（apps/api 的集成测试需要 DATABASE_URL，未设置时会跳过）
 npm run build   # 各 workspace 的 TypeScript 构建
 ```
 

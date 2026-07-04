@@ -7,9 +7,8 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "../../packages/protocol" },
-    { "path": "../../packages/model-adapters" },
-    { "path": "../../packages/prompts" },
-    { "path": "../../packages/orchestrator" }
+    { "path": "../protocol" },
+    { "path": "../model-adapters" },
+    { "path": "../prompts" }
   ]
 }

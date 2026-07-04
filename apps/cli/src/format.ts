@@ -1,5 +1,5 @@
 import type { PositionChange } from "@mmd/protocol";
-import type { DeliberationResult, TopicResult } from "./orchestrator.js";
+import type { DeliberationResult, TopicResult } from "@mmd/orchestrator";
 
 interface ConsensusBucketsForRender {
   strong: string[];

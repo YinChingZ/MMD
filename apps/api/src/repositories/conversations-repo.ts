@@ -1,0 +1,44 @@
+import type { Kysely, Selectable } from "kysely";
+import type { ConversationsTable, Database } from "../db/client.js";
+
+export interface ConversationSummary {
+  id: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function createConversation(
+  db: Kysely<Database>,
+  title?: string
+): Promise<ConversationSummary> {
+  const row = await db
+    .insertInto("conversations")
+    .values({ title: title ?? null })
+    .returningAll()
+    .executeTakeFirstOrThrow();
+  return toSummary(row);
+}
+
+export async function getConversation(
+  db: Kysely<Database>,
+  id: string
+): Promise<ConversationSummary | undefined> {
+  const row = await db
+    .selectFrom("conversations")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
+  return row ? toSummary(row) : undefined;
+}
+
+function toSummary(
+  row: Selectable<ConversationsTable>
+): ConversationSummary {
+  return {
+    id: row.id,
+    title: row.title,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}

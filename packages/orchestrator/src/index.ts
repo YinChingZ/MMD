@@ -102,6 +102,15 @@ export interface DeliberationInput {
   coordinatorModelId?: string;
   fanoutOptions?: { timeoutMs?: number; retries?: number; backoffMs?: number };
   onEvent?: (event: RunEvent) => void;
+  /**
+   * Pre-generated run id (e.g. from @mmd/protocol's makeRunId()). Callers
+   * that need the id before the run settles — the API's run-service responds
+   * with {runId} immediately, before deliberation completes — should
+   * generate it themselves and pass it in here rather than relying on
+   * execution-order timing of the "run_started" event. Defaults to a fresh
+   * makeRunId() call, unchanged from before this field existed.
+   */
+  runId?: string;
 }
 
 export interface DeliberationResult {
@@ -353,7 +362,7 @@ export async function runDeliberation(
 async function runStandardOrQuickDeliberation(
   input: DeliberationInput
 ): Promise<DeliberationResult> {
-  const runId = makeRunId();
+  const runId = input.runId ?? makeRunId();
   const mode = input.mode ?? "standard";
   const budget = getBudget(mode);
   const fanout = {
@@ -813,7 +822,7 @@ async function runTopicDeliberation(
 async function runPlanningDeliberation(
   input: DeliberationInput
 ): Promise<DeliberationResult> {
-  const runId = makeRunId();
+  const runId = input.runId ?? makeRunId();
   const budget = getBudget("planning");
   const fanout = {
     timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.targetP95Ms,

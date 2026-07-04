@@ -9,7 +9,7 @@ import {
   type ModelConfig,
   type ModelProvider,
 } from "@mmd/model-adapters";
-import { runDeliberation } from "./orchestrator.js";
+import { runDeliberation } from "@mmd/orchestrator";
 import { toMarkdown } from "./format.js";
 import { loadEnvFile } from "./env.js";
 import { loadModelsConfig } from "./models-config.js";

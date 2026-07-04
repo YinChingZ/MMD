@@ -5,6 +5,7 @@ out/
 .env
 .env.local
 apps/cli/models.config.json
+apps/api/models.config.json
 *.log
 .DS_Store
 .claude/

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FinalAnswerSchema, SectionAnswerSchema } from "@mmd/protocol";
 import { MockProvider } from "@mmd/model-adapters";
-import { DeliberationQuorumError, runDeliberation } from "../src/orchestrator.js";
+import { DeliberationQuorumError, runDeliberation } from "../src/index.js";
 
 const models = [
   { id: "model_a", provider: "mock" },
@@ -31,6 +31,17 @@ describe("runDeliberation — M1 acceptance criteria", () => {
       "vote",
       "compose",
     ]);
+  });
+
+  it("uses a caller-supplied runId instead of generating one, so API callers can know the id before the run settles", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      runId: "run_caller_supplied",
+    });
+
+    expect(result.runId).toBe("run_caller_supplied");
   });
 
   it("surfaces which models changed their position and why (not just a flat merge)", async () => {

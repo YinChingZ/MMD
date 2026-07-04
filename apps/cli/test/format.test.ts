@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { toMarkdown } from "../src/format.js";
-import type { DeliberationResult, TopicResult } from "../src/orchestrator.js";
+import type { DeliberationResult, TopicResult } from "@mmd/orchestrator";
 
 function baseResult(): DeliberationResult {
   return {

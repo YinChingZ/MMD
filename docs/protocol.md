@@ -73,7 +73,7 @@ Planning 模式在 Propose 之前多一个 **Outline** 阶段：一次 coordinat
 
 ### 按主题循环复用六阶段协议
 
-每个 outline topic 独立跑一次完整的 propose→critique→revise→normalize→vote→classify（`apps/cli/src/orchestrator.ts` 的 `runTopicDeliberation`），所有主题**并行**执行（`Promise.all`/`Promise.allSettled`，不串行——避免延迟随主题数线性增长）。这意味着：
+每个 outline topic 独立跑一次完整的 propose→critique→revise→normalize→vote→classify（`packages/orchestrator/src/index.ts` 的 `runTopicDeliberation`——M2 阶段从 `apps/cli` 提取为共享包，CLI 和 `apps/api` 都从这里 import，逻辑本身未变），所有主题**并行**执行（`Promise.all`/`Promise.allSettled`，不串行——避免延迟随主题数线性增长）。这意味着：
 
 - `classifyCandidate`、`checkQuorum`、`fanOutWithQuorum` 等核心函数完全不需要知道 topic 的存在，按主题分别调用即可，不做任何改动。
 - Claim/candidate id 在 `stampProposal` 里扩展成 `${topicId}::${modelId}::c${i}`（原本是 `${modelId}::c${i}`），保证跨主题不冲突，同时不touch `src/ids.ts`（那个模块解决的是跨 run 的存储键隔离，是另一个维度）。
@@ -101,7 +101,17 @@ Planning 模式在 Propose 之前多一个 **Outline** 阶段：一次 coordinat
 
 用跨厂商组合跑"给 3 人团队的电商项目做技术选型规划"（planning 模式）时，"后端技术栈与接口设计"这个主题下出现过一次真实分歧：候选方案"Java 21 + Spring Boot 3"进入 strong_consensus，候选方案"TypeScript + Node.js + NestJS"被分类为 `disputed`——两个模型投了 approve，但提出该方案的模型自己在投票阶段投了 `object`（major），理由是"把两个方案并列作为等价选项具有误导性，电商项目的状态机/事务/库存并发等复杂逻辑在 Node 生态里处理成本明显更高"。这验证了比例制共识 + major 反对规则在真实的、有实质技术论据的分歧场景下能正确工作（2/3 approve 但有 major 反对，没有被多数票压过去，正确分流到 disputed 而不是 strong_consensus）。
 
-同一次复测也发现并修复了一个 bug：section-compose 阶段的模型会给 `topic_id` 编一个更语义化的新字符串（例如把 outline 给的 `"4"` 改写成 `"backend-tech-stack-api-design"`），而不是照抄传入的原始值——和 propose/critique/revise/vote 阶段模型瞎编 `model_id`/`claim_id` 是同一类问题。`apps/cli/src/orchestrator.ts` 的 `stampSectionAnswer` 现在会用调用时已知的 `topic.topic_id`/`topic.title` 覆盖模型自报的值，`packages/model-adapters` 的 `MockProvider` 也相应改成故意模拟这种"改写 id"的行为，让回归测试能真正测到这个修复（否则 mock 会一直老实回填，永远测不出这类问题——这是这个项目里第二次踩到"mock 太听话导致测试有盲区"的坑）。
+同一次复测也发现并修复了一个 bug：section-compose 阶段的模型会给 `topic_id` 编一个更语义化的新字符串（例如把 outline 给的 `"4"` 改写成 `"backend-tech-stack-api-design"`），而不是照抄传入的原始值——和 propose/critique/revise/vote 阶段模型瞎编 `model_id`/`claim_id` 是同一类问题。`packages/orchestrator/src/index.ts` 的 `stampSectionAnswer` 现在会用调用时已知的 `topic.topic_id`/`topic.title` 覆盖模型自报的值，`packages/model-adapters` 的 `MockProvider` 也相应改成故意模拟这种"改写 id"的行为，让回归测试能真正测到这个修复（否则 mock 会一直老实回填，永远测不出这类问题——这是这个项目里第二次踩到"mock 太听话导致测试有盲区"的坑）。
+
+## M2：Backend API
+
+M2 把 `apps/cli` 里已经验证过的 orchestrator 逻辑（现已提取为 `packages/orchestrator`，CLI 和 `apps/api` 共用同一份实现）搬到了 Fastify + Postgres 服务端，协议本身（六阶段 schema、比例制共识、quorum、budget）完全不变——M2 是纯粹的交付层工作，不是协议修订。
+
+- **Conversation/Run API**：`POST /api/conversations`、`POST /api/conversations/:id/runs`、`GET /api/runs/:id`、`GET /api/runs/:id/result`。
+- **SSE 事件流**（`GET /api/runs/:id/events`）：`packages/orchestrator` 的 `onEvent` 回调本来就已经在每个阶段边界触发（`run_started`/`phase_started`/`phase_completed`/`run_failed`/`run_completed`，含 planning 模式的按主题事件）——M2 只是把这些事件持久化到 `run_events` 表（按 run 内单调递增的 `seq` 排序）并通过一个进程内的内存广播器转发给当前连接的 SSE 客户端。断线重连时客户端带上 `Last-Event-ID`，服务端先从 Postgres 回放 `seq` 更大的历史事件，再继续实时推送。
+- **与原技术设计文档的一处偏离：模型选择改为服务端注册表，而不是客户端自带 provider**。原文档的 API 草案里，创建 run 的请求体直接让客户端传 `{id, provider}` 这样的模型对象；M2 改成服务端加载一份 `models.config.json`（与 `apps/cli` 同构：`id`/`modelId`/`baseUrl`/`apiKeyEnvVar`），创建 run 的请求只能从这份服务端注册表里选 `modelIds` 子集。原因：避免客户端自带任意 `baseUrl` 造成 SSRF，也避免需要客户端自己提供 API key。没有 `models.config.json` 时和 CLI 一样退回 `MockProvider`。
+- **不引入 Redis**：原技术设计文档提到用 Redis 做任务状态/短期事件队列，但 M2 的验收标准（能发起 run、能实时订阅、刷新后能看到结果）不需要跨进程的事件分发——单进程内存广播器 + Postgres 持久化（用于断线重连回放）已经足够。等真正需要水平扩展时再引入，不在这个阶段过度设计。
+- **持久化**：`conversations`/`runs`/`run_events` 之外，`claims`/`reviews`/`candidates`/`votes` 表把每个 run 的详细数据落成可查询的行（`candidates.source_claim_ids` 保留 M0 的可追溯性约束），`run_results` 表则存一份完整的 `DeliberationResult`/`PlanDocument` 快照作为 `GET /result` 的直接数据源。表结构和迁移脚本见 `apps/api/src/db/migrations/0001_init.sql`。
 
 ## 使用方式
 
