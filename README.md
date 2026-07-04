@@ -1,5 +1,7 @@
 # MMD — Multi-Model Deliberation
 
+*[English](README.en.md)*
+
 多个 LLM 按 Propose → Critique → Revise → Normalize → Vote → Compose 六阶段协议进行协商式对话，输出带共识强度标注、且可追溯到原始论点的最终答案。
 
 ## 现状
