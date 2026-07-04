@@ -322,7 +322,12 @@ function mockSectionCompose(request: CompletionRequest) {
     (request.meta.positionChanges as PositionChangeMeta[]) ?? [];
 
   return {
-    topic_id: topicId,
+    // Real models routinely invent their own (more descriptive) topic_id
+    // instead of echoing back the one given in the prompt — this mock
+    // deliberately mangles it too, so tests actually exercise the
+    // orchestrator's stampSectionAnswer() override rather than passing
+    // vacuously because the mock happened to behave.
+    topic_id: `mock-renamed-${topicId}`,
     title: topicTitle,
     tldr: `${topicTitle}: ${
       buckets.strong[0] ?? buckets.qualified[0] ?? "no consensus reached"

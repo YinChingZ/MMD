@@ -111,7 +111,9 @@ describe("MockProvider — every phase output must validate against @mmd/protoco
       positionChanges: [],
     });
     expect(SectionAnswerSchema.safeParse(json).success).toBe(true);
-    expect(json.topic_id).toBe("database");
+    // Deliberately mangled — see mockSectionCompose's comment. The
+    // orchestrator, not the mock, is responsible for restoring the real id.
+    expect(json.topic_id).toBe("mock-renamed-database");
   });
 
   it("throws for an unknown phase", async () => {

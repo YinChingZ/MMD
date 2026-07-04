@@ -233,6 +233,15 @@ function stampVoteSet(config: ModelConfig, set: VoteSet): VoteSet {
   return { ...set, model_id: config.id };
 }
 
+/** Same self-reported-identity problem as stampProposal etc: real models
+ * routinely invent their own (more descriptive) topic_id instead of echoing
+ * back the one we gave them in the prompt, which breaks the topicById
+ * lookup format.ts relies on to attach per-topic timings/quorum. Ground
+ * truth wins. */
+function stampSectionAnswer(topic: Topic, section: SectionAnswer): SectionAnswer {
+  return { ...section, topic_id: topic.topic_id, title: topic.title };
+}
+
 function ballotsByCandidate(votes: VoteSet[]): Map<string, Ballot[]> {
   const map = new Map<string, Ballot[]>();
   for (const set of votes) {
@@ -919,7 +928,7 @@ async function runPlanningDeliberation(
         SectionAnswerSchema
       );
       topicResult.timings.compose = Date.now() - sectionStart;
-      return section;
+      return stampSectionAnswer(topicResult.topic, section);
     })
   );
 

@@ -166,6 +166,29 @@ describe("runDeliberation — v0.2 planning mode", () => {
     expect(result.planDocument?.executive_summary).toBe(expectedSummary);
   });
 
+  it("overrides a section-compose call's self-reported topic_id with ground truth (found via real-model testing: real models invent their own topic_id instead of echoing the one given)", async () => {
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider(),
+      mode: "planning",
+    });
+
+    // MockProvider deliberately mangles topic_id in its section_compose
+    // response (prefixes with "mock-renamed-") to mimic what real models do.
+    // If the orchestrator didn't stamp it back, every section's topic_id
+    // would fail to match any TopicResult and format.ts's per-section
+    // timings/quorum lookup would silently render nothing.
+    const topicIds = (result.topics ?? []).map((t) => t.topic.topic_id);
+    const sectionTopicIds = (result.planDocument?.sections ?? []).map(
+      (s) => s.topic_id
+    );
+    expect(sectionTopicIds).toEqual(topicIds);
+    for (const id of sectionTopicIds) {
+      expect(id.startsWith("mock-renamed-")).toBe(false);
+    }
+  });
+
   it("scopes each topic's proposals with model_id and claim ids in the ${topicId}::${modelId}::c{i} format", async () => {
     const result = await runDeliberation({
       question: "Plan a project",

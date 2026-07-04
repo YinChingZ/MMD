@@ -89,6 +89,18 @@ Planning 模式在 Propose 之前多一个 **Outline** 阶段：一次 coordinat
 
 用真实模型（Volcengine/DeepSeek 系列推理模型）跑过的窄问题（standard 模式）单次耗时在 96-250 秒之间，远高于 `STANDARD_BUDGET` 里当初凭 mock 猜测的 p50 60s / p95 120s 目标——这两个数字还没有用真实数据校准，是已知的后续待办，不在这次 v0.2 改动范围内。Planning 模式因为每个主题都要跑完整六阶段，单个主题的耗时预期和 standard 模式的单次 run 类似，多个主题并行执行，所以总耗时约等于"最慢的那个主题"而不是"耗时总和"。
 
+换成真正跨厂商的组合（OpenAI GPT-5.5 / DeepSeek v4 Pro / Google Gemini 3.1 Pro，经 OpenRouter 统一接入）后，单次 standard 模式耗时在 164-301 秒之间，量级和之前同厂商组合接近，没有明显变慢或变快。
+
+### 已观察到的一个分类边界情况：全票 critical 反对会进入 disputed 而不是 rejected
+
+`classifyCandidate` 的规则是"存在 critical 反对就直接进 disputed，不能被多数票吞掉"（见上文"共识分类是比例制"一节）。真实测试中出现过一次：normalize 阶段产生了一条空白/无实质内容的 candidate claim，三个模型在 vote 阶段**全部**投了 `object`（major/critical/critical）。按现有规则，这会被分类为 `disputed`，而不是更符合直觉的 `rejected`——因为"critical 反对"的判断只看是否存在，不看是否全票一致。这不是 bug（规则本身是为了防止多数票压制少数关键异议，这里只是恰好三票都反对），但值得记录：如果未来发现"全票反对却显示为 disputed"造成用户困惑，可以考虑加一条特化规则——全体投票都是 `object`（无论 severity）时直接归为 `rejected`，视为独立于比例阈值的显式一致排除。
+
+### 一个真实的 disputed 案例（planning 模式，跨厂商组合）
+
+用跨厂商组合跑"给 3 人团队的电商项目做技术选型规划"（planning 模式）时，"后端技术栈与接口设计"这个主题下出现过一次真实分歧：候选方案"Java 21 + Spring Boot 3"进入 strong_consensus，候选方案"TypeScript + Node.js + NestJS"被分类为 `disputed`——两个模型投了 approve，但提出该方案的模型自己在投票阶段投了 `object`（major），理由是"把两个方案并列作为等价选项具有误导性，电商项目的状态机/事务/库存并发等复杂逻辑在 Node 生态里处理成本明显更高"。这验证了比例制共识 + major 反对规则在真实的、有实质技术论据的分歧场景下能正确工作（2/3 approve 但有 major 反对，没有被多数票压过去，正确分流到 disputed 而不是 strong_consensus）。
+
+同一次复测也发现并修复了一个 bug：section-compose 阶段的模型会给 `topic_id` 编一个更语义化的新字符串（例如把 outline 给的 `"4"` 改写成 `"backend-tech-stack-api-design"`），而不是照抄传入的原始值——和 propose/critique/revise/vote 阶段模型瞎编 `model_id`/`claim_id` 是同一类问题。`apps/cli/src/orchestrator.ts` 的 `stampSectionAnswer` 现在会用调用时已知的 `topic.topic_id`/`topic.title` 覆盖模型自报的值，`packages/model-adapters` 的 `MockProvider` 也相应改成故意模拟这种"改写 id"的行为，让回归测试能真正测到这个修复（否则 mock 会一直老实回填，永远测不出这类问题——这是这个项目里第二次踩到"mock 太听话导致测试有盲区"的坑）。
+
 ## 使用方式
 
 ```ts
