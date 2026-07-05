@@ -1,0 +1,24 @@
+[project]
+name = "mmd-litellm"
+version = "0.0.0"
+description = "LiteLLM-shaped Python proof of concept for Multi-Model Deliberation."
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.8",
+]
+
+[project.optional-dependencies]
+litellm = [
+  "litellm>=1.70",
+]
+test = [
+  "pytest>=8.0",
+]
+dev = [
+  "mmd-litellm[litellm,test]",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+

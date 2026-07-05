@@ -1,0 +1,19 @@
+model_list:
+  - model_name: mmd-fusion
+    litellm_params:
+      model: mmd/fusion
+      analysis_models:
+        - openai/gpt-4.1-mini
+        - anthropic/claude-3-5-haiku
+      coordinator_model: openai/gpt-4.1-mini
+      mmd_mode: quick
+      quorum_ratio: 0.66
+      per_model_timeout: 40
+      max_repair_attempts: 2
+      return_trace: false
+
+litellm_settings:
+  custom_provider_map:
+    - provider: mmd
+      custom_handler: mmd_litellm.custom_handler.mmd_custom_llm
+

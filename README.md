@@ -34,6 +34,8 @@ packages/
   protocol/             # zod schema + 共识分类 / quorum / id / budget 纯函数
   model-adapters/       # provider 封装：mock、OpenAI 兼容、按 quorum 的 fan-out
   prompts/              # 六阶段的 prompt 构造
+python/
+  mmd_litellm/          # M2'：LiteLLM-shaped Python/Pydantic PoC
 docs/
   protocol.md           # 协议规则文档
   litellm-integration.md # LiteLLM 集成转向设计
@@ -89,6 +91,14 @@ cp apps/cli/.env.example apps/cli/.env
 npm run test    # 各 workspace 的单元测试
 npm run build   # 各 workspace 的 TypeScript 构建
 ```
+
+### LiteLLM PoC（M2'）
+
+```bash
+uv run --project python --extra test pytest
+```
+
+当前 Python PoC 先实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）和 OpenAI-compatible response。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
 ## 相关文档
 
