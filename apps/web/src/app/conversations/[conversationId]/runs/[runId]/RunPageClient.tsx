@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { getRunResult, type RunResult } from "@/lib/api";
+import { formatRunCost } from "@/lib/cost";
 import { deriveRunProgress } from "@/lib/progress";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useRunStatus } from "@/hooks/useRunStatus";
@@ -63,6 +64,9 @@ export function RunPageClient({ runId }: { runId: string }) {
 
       {run.status === "completed" && result && (
         <>
+          {result.cost && (
+            <p className="text-sm text-gray-500">{formatRunCost(result.cost)}</p>
+          )}
           {result.planDocument ? (
             <PlanDocumentView planDocument={result.planDocument} topics={result.topics ?? []} />
           ) : (

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { listWorkspaceKeys, type SavedApiKeyMetadata } from "@/lib/api";
+import { formatSavedRate } from "@/lib/cost";
 import type { ByokEntryUI } from "@/lib/model-sources";
 
 export function SavedKeysPicker({
@@ -39,6 +40,11 @@ export function SavedKeysPicker({
             className="flex items-center gap-2 text-sm text-gray-700"
           >
             <span>{label}</span>
+            {key.pricing && (
+              <span className="text-xs text-gray-400">
+                ({formatSavedRate(key.pricing)})
+              </span>
+            )}
             <button
               type="button"
               disabled={alreadyAdded}

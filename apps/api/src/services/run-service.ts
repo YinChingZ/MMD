@@ -20,6 +20,8 @@ export interface StartRunParams {
   models: ModelConfig[];
   provider: ModelProvider;
   coordinatorModelId?: string;
+  /** M5.1 cost circuit breaker — see runs.ts's DEFAULT_COST_LIMIT_USD for what callers get when they don't set this themselves. */
+  costLimitUsd?: number;
 }
 
 const TERMINAL_TYPES = new Set(["run_completed", "run_failed"]);
@@ -91,6 +93,7 @@ export class RunService {
       provider: params.provider,
       mode: params.mode,
       coordinatorModelId: params.coordinatorModelId,
+      costLimitUsd: params.costLimitUsd,
       runId,
       onEvent,
     })

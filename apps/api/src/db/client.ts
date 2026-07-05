@@ -15,6 +15,9 @@ export interface WorkspaceApiKeysTable {
   model_id: string;
   label: string | null;
   encrypted_key: Buffer;
+  /** M5.1 follow-up: an optional persisted custom $/1M-token rate — both set or both null, see workspace-api-keys-repo.ts. */
+  input_per_million: number | null;
+  output_per_million: number | null;
   created_at: Generated<Date>;
 }
 
@@ -117,6 +120,7 @@ export interface RunResultsTable {
   plan_document: unknown;
   timings: unknown;
   quorum: unknown;
+  cost: unknown;
   created_at: Generated<Date>;
 }
 

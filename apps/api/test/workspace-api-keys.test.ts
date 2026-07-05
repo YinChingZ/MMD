@@ -112,6 +112,46 @@ describeIfDb(
       expect(decrypted?.apiKey).toBe("sk-second-value");
     });
 
+    it("M5.1: persists a custom pricing rate alongside a saved key and returns it on reuse", async () => {
+      const saved = await saveApiKey(db, ENCRYPTION_KEY, {
+        workspaceId,
+        providerId: "some-self-hosted-thing",
+        modelId: "custom-model",
+        apiKey: "sk-with-custom-rate",
+        pricing: { inputPerMillion: 3, outputPerMillion: 9 },
+      });
+      expect(saved.pricing).toEqual({ inputPerMillion: 3, outputPerMillion: 9 });
+
+      const listed = await listApiKeysForWorkspace(db, workspaceId);
+      expect(listed[0].pricing).toEqual({ inputPerMillion: 3, outputPerMillion: 9 });
+
+      const decrypted = await getDecryptedApiKey(db, ENCRYPTION_KEY, {
+        workspaceId,
+        id: saved.id,
+      });
+      expect(decrypted?.pricing).toEqual({ inputPerMillion: 3, outputPerMillion: 9 });
+    });
+
+    it("M5.1: saving without pricing leaves it undefined, and a later save can clear a previously-saved rate", async () => {
+      const withRate = await saveApiKey(db, ENCRYPTION_KEY, {
+        workspaceId,
+        providerId: "openai",
+        modelId: "gpt-4.1-mini",
+        apiKey: "sk-first",
+        pricing: { inputPerMillion: 1, outputPerMillion: 2 },
+      });
+      expect(withRate.pricing).toEqual({ inputPerMillion: 1, outputPerMillion: 2 });
+
+      // Same (workspace, provider, model) — upsert without a pricing field clears it.
+      const withoutRate = await saveApiKey(db, ENCRYPTION_KEY, {
+        workspaceId,
+        providerId: "openai",
+        modelId: "gpt-4.1-mini",
+        apiKey: "sk-second",
+      });
+      expect(withoutRate.pricing).toBeUndefined();
+    });
+
     it("does not let a different workspace decrypt another workspace's saved key by id", async () => {
       const saved = await saveApiKey(db, ENCRYPTION_KEY, {
         workspaceId,

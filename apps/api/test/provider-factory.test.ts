@@ -175,6 +175,114 @@ describe("buildRunProvider", () => {
     ]);
   });
 
+  it("passes providerId through so the byok model's usage can be priced (M5.1)", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "byok reply" } }],
+        usage: { prompt_tokens: 100, completion_tokens: 100, cost: 0.0007 },
+      }),
+      text: async () => "",
+    });
+
+    const legacy = fakeLegacyResolvedProvider();
+    const run = buildRunProvider({
+      legacy,
+      selectedLegacyIds: [],
+      byokModels: [
+        {
+          label: "byok_openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKey: "sk-caller-key",
+          modelId: "some/model",
+          providerLabel: "OpenRouter",
+          providerId: "openrouter",
+        },
+      ],
+    });
+
+    const result = await run.provider.complete(
+      { id: "byok_openrouter", provider: "irrelevant" },
+      request
+    );
+    // OpenRouter's usage.cost is authoritative — providerId being threaded
+    // through is what lets the pricing strategy pick it up at all.
+    expect(result.usage?.costUsd).toBe(0.0007);
+  });
+
+  it("omitting providerId (legacy path or an unresolvable provider) never fabricates a cost", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "byok reply" } }],
+        usage: { prompt_tokens: 100, completion_tokens: 100 },
+      }),
+      text: async () => "",
+    });
+
+    const legacy = fakeLegacyResolvedProvider();
+    const run = buildRunProvider({
+      legacy,
+      selectedLegacyIds: [],
+      byokModels: [
+        {
+          label: "byok_unknown",
+          baseUrl: "https://example.com/v1",
+          apiKey: "sk-caller-key",
+          modelId: "some-model",
+          providerLabel: "Example",
+        },
+      ],
+    });
+
+    const result = await run.provider.complete(
+      { id: "byok_unknown", provider: "irrelevant" },
+      request
+    );
+    expect(result.usage?.promptTokens).toBe(100);
+    expect(result.usage?.costUsd).toBeUndefined();
+  });
+
+  it("M5.1: a caller-supplied pricing rate prices an otherwise-unrecognized provider", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "byok reply" } }],
+        usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
+      }),
+      text: async () => "",
+    });
+
+    const legacy = fakeLegacyResolvedProvider();
+    const run = buildRunProvider({
+      legacy,
+      selectedLegacyIds: [],
+      byokModels: [
+        {
+          label: "byok_custom",
+          baseUrl: "https://example.com/v1",
+          apiKey: "sk-caller-key",
+          modelId: "some-model",
+          providerLabel: "Example",
+          // no providerId — unrecognized on its own
+          pricing: { inputPerMillion: 1, outputPerMillion: 4 },
+        },
+      ],
+    });
+
+    const result = await run.provider.complete(
+      { id: "byok_custom", provider: "irrelevant" },
+      request
+    );
+    expect(result.usage?.costUsd).toBeCloseTo(5, 5);
+  });
+
   it("throws when byokModels contains duplicate labels", () => {
     const legacy = fakeLegacyResolvedProvider();
     expect(() =>

@@ -422,6 +422,86 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
     }
   });
 
+  it("M5.1: persists a caller-supplied pricing override alongside a saved byok key, and a later run can override it again", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network disabled in test"));
+    try {
+      const conversation = await createConversationViaApi(app);
+
+      const firstRunRes = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q?",
+          mode: "quick",
+          byokModels: [
+            {
+              providerId: "openai",
+              modelId: "gpt-4.1-mini",
+              apiKey: "sk-with-rate",
+              label: "my_openai",
+              save: true,
+              pricing: { inputPerMillion: 3, outputPerMillion: 9 },
+            },
+          ],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      expect(firstRunRes.statusCode).toBe(201);
+      const { runId: firstRunId } = firstRunRes.json();
+      await pollUntilSettled(app, firstRunId, conversation.cookie);
+
+      const keysRes = await app.inject({
+        method: "GET",
+        url: "/api/workspace/keys",
+        headers: { cookie: conversation.cookie },
+      });
+      const savedKey = keysRes.json().keys[0];
+      expect(savedKey.pricing).toEqual({ inputPerMillion: 3, outputPerMillion: 9 });
+
+      const row = await db
+        .selectFrom("workspace_api_keys")
+        .select(["input_per_million", "output_per_million"])
+        .where("id", "=", savedKey.id)
+        .executeTakeFirstOrThrow();
+      expect(row.input_per_million).toBe(3);
+      expect(row.output_per_million).toBe(9);
+
+      // Saving again for the same (workspace, provider, model) with a
+      // different rate replaces the stored one, same upsert semantics as
+      // the key/label themselves.
+      await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q2?",
+          mode: "quick",
+          byokModels: [
+            {
+              providerId: "openai",
+              modelId: "gpt-4.1-mini",
+              apiKey: "sk-with-rate",
+              label: "my_openai",
+              save: true,
+              pricing: { inputPerMillion: 10, outputPerMillion: 20 },
+            },
+          ],
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      const updatedRow = await db
+        .selectFrom("workspace_api_keys")
+        .select(["input_per_million", "output_per_million"])
+        .where("id", "=", savedKey.id)
+        .executeTakeFirstOrThrow();
+      expect(updatedRow.input_per_million).toBe(10);
+      expect(updatedRow.output_per_million).toBe(20);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("rejects a run-creation request referencing an unknown/foreign savedKeyId", async () => {
     const conversation = await createConversationViaApi(app);
     const res = await app.inject({
@@ -595,6 +675,86 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
       expect(resultRes.statusCode).toBe(422);
     } finally {
       await failApp.close();
+    }
+  });
+
+  it("M5.1: applies a default cost limit when the request omits costLimitUsd, marking the run failed instead of letting it run unprotected", async () => {
+    const expensiveProvider: ResolvedProvider = {
+      provider: new MockProvider({ costPerCallUsd: 10 }),
+      availableModelIds: ["model_a", "model_b", "model_c"],
+      isMock: true,
+      modelIdToProviderLabel: () => "mock",
+    };
+    const expensiveApp = buildApp({
+      db,
+      resolvedProvider: expensiveProvider,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      logger: false,
+    });
+    await expensiveApp.ready();
+    try {
+      const conversation = await createConversationViaApi(expensiveApp);
+      const createRunRes = await expensiveApp.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        // No costLimitUsd supplied — the route's DEFAULT_COST_LIMIT_USD ($5)
+        // should apply on its own, since 3 models x $10/call blows well past it.
+        payload: { question: "Q?", mode: "standard" },
+        headers: { cookie: conversation.cookie },
+      });
+      const { runId } = createRunRes.json();
+
+      const status = await pollUntilSettled(expensiveApp, runId, conversation.cookie);
+      expect(status).toBe("failed");
+
+      const runRes = await expensiveApp.inject({
+        method: "GET",
+        url: `/api/runs/${runId}`,
+        headers: { cookie: conversation.cookie },
+      });
+      expect(runRes.json().error).toMatch(/cost limit exceeded/);
+    } finally {
+      await expensiveApp.close();
+    }
+  });
+
+  it("M5.1: an explicit costLimitUsd overrides the default, letting an otherwise-over-default-budget run complete", async () => {
+    const expensiveProvider: ResolvedProvider = {
+      provider: new MockProvider({ costPerCallUsd: 10 }),
+      availableModelIds: ["model_a", "model_b", "model_c"],
+      isMock: true,
+      modelIdToProviderLabel: () => "mock",
+    };
+    const expensiveApp = buildApp({
+      db,
+      resolvedProvider: expensiveProvider,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      logger: false,
+    });
+    await expensiveApp.ready();
+    try {
+      const conversation = await createConversationViaApi(expensiveApp);
+      const createRunRes = await expensiveApp.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: { question: "Q?", mode: "quick", costLimitUsd: 1000 },
+        headers: { cookie: conversation.cookie },
+      });
+      const { runId } = createRunRes.json();
+
+      const status = await pollUntilSettled(expensiveApp, runId, conversation.cookie);
+      expect(status).toBe("completed");
+
+      const resultRes = await expensiveApp.inject({
+        method: "GET",
+        url: `/api/runs/${runId}/result`,
+        headers: { cookie: conversation.cookie },
+      });
+      expect(resultRes.statusCode).toBe(200);
+      expect(resultRes.json().cost.totalUsd).toBeGreaterThan(5);
+      expect(resultRes.json().cost.limitUsd).toBe(1000);
+    } finally {
+      await expensiveApp.close();
     }
   });
 });

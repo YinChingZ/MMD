@@ -10,6 +10,15 @@ export interface MockProviderOptions {
   /** Model ids that should always fail — used to exercise quorum/degradation paths without real API errors. */
   failModelIds?: Set<string>;
   latencyMs?: number;
+  /**
+   * Deterministic fake USD cost reported per call via CompletionResult.usage.
+   * Defaults to a tiny non-zero amount so cost-accumulation logic has
+   * something real to sum, without ever tripping a sane cost limit by
+   * accident. Tests exercising the M5.1 circuit breaker set this higher to
+   * make a run cross a low costLimitUsd deterministically, without needing a
+   * real API key (mirrors failModelIds' role for quorum testing).
+   */
+  costPerCallUsd?: number;
 }
 
 /**
@@ -37,7 +46,18 @@ export class MockProvider implements ModelProvider {
     }
     await sleep(this.opts.latencyMs ?? 5);
     const text = JSON.stringify(generate(config, request));
-    return { text, latencyMs: Date.now() - start };
+    const promptTokens = Math.ceil(request.userPrompt.length / 4);
+    const completionTokens = Math.ceil(text.length / 4);
+    return {
+      text,
+      latencyMs: Date.now() - start,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        costUsd: this.opts.costPerCallUsd ?? 0.0001,
+      },
+    };
   }
 }
 

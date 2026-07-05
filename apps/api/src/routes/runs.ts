@@ -12,6 +12,11 @@ import {
   saveApiKey,
 } from "../repositories/workspace-api-keys-repo.js";
 
+const PricingOverride = z.object({
+  inputPerMillion: z.number().positive(),
+  outputPerMillion: z.number().positive(),
+});
+
 const ByokModelEntry = z
   .object({
     providerId: z.string().min(1).optional(),
@@ -26,6 +31,15 @@ const ByokModelEntry = z
     // caller might want to remember an OpenRouter key but not a one-off key
     // for another provider in the same run. Only meaningful with a fresh apiKey.
     save: z.boolean().optional(),
+    // M5.1 follow-up: a caller-supplied $/1M-token rate — overrides
+    // @mmd/protocol's built-in approximate table (never a provider's own
+    // real reported cost, e.g. OpenRouter's), and is the only way to price
+    // a provider we don't otherwise recognize at all. When savedKeyId is
+    // used instead of a fresh apiKey, this overrides that saved key's own
+    // persisted pricing (if any) for this run only, without changing what's
+    // stored — see the `save: true` handling below for updating the stored
+    // rate itself.
+    pricing: PricingOverride.optional(),
   })
   .refine((m) => Boolean(m.apiKey) !== Boolean(m.savedKeyId), {
     message: "each byokModels entry needs exactly one of apiKey or savedKeyId",
@@ -33,6 +47,15 @@ const ByokModelEntry = z
   .refine((m) => !m.apiKey || (m.providerId && m.modelId), {
     message: "providerId and modelId are required when supplying a fresh apiKey",
   });
+
+// M5.1 cost circuit breaker: applied whenever a request doesn't supply its
+// own costLimitUsd, so a run is never unprotected just because a caller
+// forgot to think about cost — see multi-model-deliberation-dev-roadmap.md's
+// M5.1 section for why $5 was chosen (standard/quick real-model runs cost
+// cents to ~$1; planning mode's up-to-8-parallel-topics case needs more
+// headroom, which callers running a large planning run should raise
+// explicitly via costLimitUsd rather than relying on the default).
+const DEFAULT_COST_LIMIT_USD = 5;
 
 const CreateRunBody = z.object({
   question: z.string().min(1),
@@ -43,6 +66,10 @@ const CreateRunBody = z.object({
   modelIds: z.array(z.string().min(1)).min(1).optional(),
   // BYOK path: client supplies its own whitelisted-provider credentials.
   byokModels: z.array(ByokModelEntry).min(1).optional(),
+  // Hard USD cap on the run's total cost, checked before each phase starts.
+  // Omitted entirely (not just falsy) triggers DEFAULT_COST_LIMIT_USD — there
+  // is no way to request "no limit at all" from the HTTP API.
+  costLimitUsd: z.number().positive().optional(),
 });
 
 export async function runsRoutes(
@@ -66,8 +93,13 @@ export async function runsRoutes(
         return reply.code(400).send({ error: parsed.error.message });
       }
 
-      const { question, mode = "standard", modelIds, byokModels = [] } =
-        parsed.data;
+      const {
+        question,
+        mode = "standard",
+        modelIds,
+        byokModels = [],
+        costLimitUsd = DEFAULT_COST_LIMIT_USD,
+      } = parsed.data;
       const { availableModelIds } = deps.resolvedProvider;
 
       // Omitting modelIds keeps the pre-BYOK default of "use every registry
@@ -95,6 +127,7 @@ export async function runsRoutes(
         apiKey: string;
         label?: string;
         save?: boolean;
+        pricing?: { inputPerMillion: number; outputPerMillion: number };
       }> = [];
       for (const m of byokModels) {
         if (m.savedKeyId) {
@@ -112,6 +145,8 @@ export async function runsRoutes(
             modelId: saved.modelId,
             apiKey: saved.apiKey,
             label: m.label ?? saved.label ?? undefined,
+            // Request-level override wins over the saved default for this run only.
+            pricing: m.pricing ?? saved.pricing,
           });
         } else {
           resolvedByokModels.push({
@@ -120,6 +155,7 @@ export async function runsRoutes(
             apiKey: m.apiKey!,
             label: m.label,
             save: m.save,
+            pricing: m.pricing,
           });
         }
       }
@@ -144,6 +180,8 @@ export async function runsRoutes(
             apiKey: m.apiKey,
             modelId: m.modelId,
             providerLabel: getProviderDisplayName(m.providerId) ?? m.providerId,
+            providerId: m.providerId,
+            pricing: m.pricing,
           })),
         });
       } catch (err) {
@@ -159,6 +197,7 @@ export async function runsRoutes(
           modelId: m.modelId,
           apiKey: m.apiKey,
           label: m.label,
+          pricing: m.pricing,
         });
       }
 
@@ -170,6 +209,7 @@ export async function runsRoutes(
         models: runProvider.models,
         provider: runProvider.provider,
         coordinatorModelId: runProvider.coordinatorModelId,
+        costLimitUsd,
       });
 
       return reply.code(201).send({ runId, status: "running" });

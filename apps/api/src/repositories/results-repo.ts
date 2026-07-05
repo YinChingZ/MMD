@@ -226,6 +226,7 @@ export async function saveResult(
           : null,
         timings: JSON.stringify(result.timings),
         quorum: JSON.stringify(result.quorum),
+        cost: JSON.stringify(result.cost),
       })
       .execute();
 
@@ -267,5 +268,6 @@ export async function getResult(
     planDocument: row.plan_document ?? undefined,
     timings: row.timings,
     quorum: row.quorum,
+    cost: row.cost ?? undefined,
   };
 }

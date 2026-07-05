@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { FinalAnswerSchema, SectionAnswerSchema } from "@mmd/protocol";
 import { MockProvider } from "@mmd/model-adapters";
-import { DeliberationQuorumError, runDeliberation } from "../src/index.js";
+import {
+  CostLimitExceededError,
+  DeliberationQuorumError,
+  runDeliberation,
+  type RunEvent,
+} from "../src/index.js";
 
 const models = [
   { id: "model_a", provider: "mock" },
@@ -266,5 +271,76 @@ describe("runDeliberation — v0.2 planning mode", () => {
         mode: "planning",
       })
     ).rejects.toThrow(/all \d+ topic\(s\) failed/);
+  });
+});
+
+describe("runDeliberation — M5.1 cost circuit breaker", () => {
+  it("completes normally and reports an accumulated cost when under the limit", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ costPerCallUsd: 0.01 }),
+      costLimitUsd: 100,
+    });
+
+    expect(result.cost.limitUsd).toBe(100);
+    expect(result.cost.hasUnknownPricing).toBe(false);
+    // 3 models x 6 phases (3 fan-out phases of 3 calls + 2 single-coordinator
+    // calls counted once each, normalize/compose) — exact count isn't the
+    // point, just that real per-call costs were actually summed, not left at 0.
+    expect(result.cost.totalUsd).toBeCloseTo(0.01 * (3 + 3 + 3 + 1 + 3 + 1), 5);
+  });
+
+  it("stops the run before finishing all phases once accumulated cost exceeds the limit, without crashing", async () => {
+    const events: RunEvent[] = [];
+    const run = runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ costPerCallUsd: 1 }),
+      // 3 models x $1 in propose alone already exceeds this — critique should
+      // never start.
+      costLimitUsd: 2,
+      onEvent: (e) => events.push(e),
+    });
+
+    await expect(run).rejects.toThrow(CostLimitExceededError);
+    await expect(run).rejects.toThrow(/critique/);
+
+    const failedEvent = events.find((e) => e.type === "run_failed");
+    expect(failedEvent).toBeDefined();
+    expect((failedEvent!.data as any).reason).toBe("cost_limit_exceeded");
+    // propose itself always runs (cost is 0 before the first phase) — only
+    // the phase after crossing the limit is skipped.
+    expect(events.some((e) => e.type === "phase_completed" && e.phase === "propose")).toBe(
+      true
+    );
+    expect(
+      events.some((e) => e.type === "phase_started" && e.phase === "critique")
+    ).toBe(false);
+  });
+
+  it("no costLimitUsd set: never breaks the run regardless of accumulated cost", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ costPerCallUsd: 1000 }),
+    });
+    expect(result.cost.limitUsd).toBeUndefined();
+    expect(result.cost.totalUsd).toBeGreaterThan(0);
+  });
+
+  it("planning mode: a shared limit across parallel topics stops the whole run and still emits run_failed (fixes a pre-existing gap where an all-topics-failed run never emitted a terminal SSE event)", async () => {
+    const events: RunEvent[] = [];
+    const run = runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider({ costPerCallUsd: 1 }),
+      mode: "planning",
+      costLimitUsd: 2,
+      onEvent: (e) => events.push(e),
+    });
+
+    await expect(run).rejects.toThrow(/cost limit exceeded|all \d+ topic\(s\) failed/);
+    expect(events.some((e) => e.type === "run_failed")).toBe(true);
   });
 });

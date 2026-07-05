@@ -130,4 +130,27 @@ describe("MockProvider — every phase output must validate against @mmd/protoco
       })
     ).rejects.toThrow(/simulated failure/);
   });
+
+  it("always reports a deterministic non-zero usage/cost, even for the default options", async () => {
+    const provider = new MockProvider();
+    const result = await provider.complete(config, {
+      systemPrompt: "",
+      userPrompt: "some prompt text",
+      meta: { phase: "propose", question: "q" },
+    });
+    expect(result.usage).toBeDefined();
+    expect(result.usage!.costUsd).toBeGreaterThan(0);
+    expect(result.usage!.promptTokens).toBeGreaterThan(0);
+    expect(result.usage!.completionTokens).toBeGreaterThan(0);
+  });
+
+  it("costPerCallUsd overrides the default fake cost", async () => {
+    const provider = new MockProvider({ costPerCallUsd: 5 });
+    const result = await provider.complete(config, {
+      systemPrompt: "",
+      userPrompt: "",
+      meta: { phase: "propose", question: "q" },
+    });
+    expect(result.usage!.costUsd).toBe(5);
+  });
 });

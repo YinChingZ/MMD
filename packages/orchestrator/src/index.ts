@@ -34,6 +34,7 @@ import {
   type ModelProvider,
   type ModelConfig,
   type CompletionRequest,
+  type CompletionUsage,
   type FanoutOutcome,
 } from "@mmd/model-adapters";
 import {
@@ -111,6 +112,59 @@ export interface DeliberationInput {
    * makeRunId() call, unchanged from before this field existed.
    */
   runId?: string;
+  /**
+   * M5.1 cost circuit breaker: hard USD cap on the run's accumulated cost,
+   * checked before each phase starts (not mid-phase — in-flight calls always
+   * finish, matching the project's existing "graceful, bounded, not instant"
+   * degradation style used for quorum). Undefined means no breaker at all,
+   * which callers should treat as an explicit opt-out rather than a silent
+   * default — see apps/api's route for where a default gets applied.
+   */
+  costLimitUsd?: number;
+}
+
+/** Running total for the M5.1 cost circuit breaker, shared by reference across
+ * whatever calls happen concurrently within one run (planning mode's parallel
+ * topics all mutate the same instance). */
+export interface CostState {
+  totalUsd: number;
+  /** true once at least one completion's cost couldn't be determined (unknown provider/model or missing usage) — surfaced so the UI can say "this run's cost total is a lower bound" rather than implying full coverage. */
+  hasUnknownPricing: boolean;
+}
+
+export interface RunCostSummary {
+  totalUsd: number;
+  limitUsd?: number;
+  hasUnknownPricing: boolean;
+}
+
+function newCostState(): CostState {
+  return { totalUsd: 0, hasUnknownPricing: false };
+}
+
+function recordUsage(state: CostState, usage: CompletionUsage | undefined): void {
+  if (!usage || usage.costUsd === undefined) {
+    state.hasUnknownPricing = true;
+    return;
+  }
+  state.totalUsd += usage.costUsd;
+}
+
+function costLimitExceeded(state: CostState, costLimitUsd: number | undefined): boolean {
+  return costLimitUsd !== undefined && state.totalUsd > costLimitUsd;
+}
+
+export class CostLimitExceededError extends Error {
+  constructor(
+    phaseLabel: string,
+    public readonly estimatedUsd: number,
+    public readonly limitUsd: number
+  ) {
+    super(
+      `cost limit exceeded before "${phaseLabel}": estimated $${estimatedUsd.toFixed(4)} so far > limit $${limitUsd.toFixed(2)}`
+    );
+    this.name = "CostLimitExceededError";
+  }
 }
 
 export interface DeliberationResult {
@@ -127,6 +181,7 @@ export interface DeliberationResult {
   final: FinalAnswer;
   timings: Partial<Record<Phase, number>>;
   quorum: Partial<Record<Phase, QuorumCheck>>;
+  cost: RunCostSummary;
   // v0.2 planning mode only. standard/quick mode leaves these undefined and
   // the flat fields above (proposals/normalize/votes/final/...) populated as
   // before; planning mode leaves the flat fields as harmless empty
@@ -340,13 +395,18 @@ async function structuredCall<T>(
   provider: ModelProvider,
   config: ModelConfig,
   request: CompletionRequest,
-  schema: z.ZodType<T, z.ZodTypeDef, any>
+  schema: z.ZodType<T, z.ZodTypeDef, any>,
+  onUsage?: (usage: CompletionUsage | undefined) => void
 ): Promise<T> {
   return callStructured(async (repairNote) => {
     const req: CompletionRequest = repairNote
       ? { ...request, userPrompt: `${request.userPrompt}\n\n${repairNote}` }
       : request;
-    return provider.complete(config, req);
+    const result = await provider.complete(config, req);
+    // Every attempt costs money, including repair retries — report each one,
+    // not just the final accepted attempt.
+    onUsage?.(result.usage);
+    return result;
   }, schema);
 }
 
@@ -379,6 +439,7 @@ async function runStandardOrQuickDeliberation(
 
   const timings: Partial<Record<Phase, number>> = {};
   const quorum: Partial<Record<Phase, QuorumCheck>> = {};
+  const costState = newCostState();
 
   const emit = (type: RunEventType, phase?: Phase, data?: unknown) =>
     input.onEvent?.({
@@ -389,9 +450,20 @@ async function runStandardOrQuickDeliberation(
       data,
     });
 
+  const assertWithinCostLimit = (phase: Phase) => {
+    if (!costLimitExceeded(costState, input.costLimitUsd)) return;
+    emit("run_failed", phase, {
+      reason: "cost_limit_exceeded",
+      estimatedUsd: costState.totalUsd,
+      limitUsd: input.costLimitUsd,
+    });
+    throw new CostLimitExceededError(phase, costState.totalUsd, input.costLimitUsd!);
+  };
+
   emit("run_started", undefined, { question: input.question, mode });
 
   // --- Propose (always runs) ---
+  assertWithinCostLimit("propose");
   emit("phase_started", "propose");
   let t0 = Date.now();
   const proposeOutcome = await fanOutWithQuorum(
@@ -401,7 +473,8 @@ async function runStandardOrQuickDeliberation(
         input.provider,
         config,
         buildProposePrompt({ question: input.question, modelId: config.id }),
-        ProposalSchema
+        ProposalSchema,
+        (usage) => recordUsage(costState, usage)
       ),
     fanout
   );
@@ -424,6 +497,7 @@ async function runStandardOrQuickDeliberation(
   // --- Critique (optional per budget) ---
   let critiques: Critique[] = [];
   if (budget.phases.includes("critique")) {
+    assertWithinCostLimit("critique");
     emit("phase_started", "critique");
     t0 = Date.now();
     const critiqueOutcome = await fanOutWithQuorum(
@@ -437,7 +511,8 @@ async function runStandardOrQuickDeliberation(
             reviewerModelId: config.id,
             proposals,
           }),
-          CritiqueSchema
+          CritiqueSchema,
+          (usage) => recordUsage(costState, usage)
         ),
       fanout
     );
@@ -461,6 +536,7 @@ async function runStandardOrQuickDeliberation(
   // --- Revise (optional per budget) ---
   let revisions: RevisionSet[] = [];
   if (budget.phases.includes("revise")) {
+    assertWithinCostLimit("revise");
     emit("phase_started", "revise");
     t0 = Date.now();
     const reviseOutcome = await fanOutWithQuorum(
@@ -476,7 +552,8 @@ async function runStandardOrQuickDeliberation(
               proposals.find((p) => p.model_id === config.id)?.claims ?? [],
             reviewsOnMine: reviewsForModel(config.id, proposals, critiques),
           }),
-          RevisionSetSchema
+          RevisionSetSchema,
+          (usage) => recordUsage(costState, usage)
         ),
       fanout
     );
@@ -501,6 +578,7 @@ async function runStandardOrQuickDeliberation(
   const claimsById = new Map(finalClaims.map((c) => [c.claim_id, c]));
 
   // --- Normalize (single coordinator call) ---
+  assertWithinCostLimit("normalize");
   emit("phase_started", "normalize");
   t0 = Date.now();
   const normalize = await structuredCall(
@@ -510,7 +588,8 @@ async function runStandardOrQuickDeliberation(
       question: input.question,
       claims: finalClaims,
     }),
-    NormalizeResultSchema
+    NormalizeResultSchema,
+    (usage) => recordUsage(costState, usage)
   );
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
@@ -520,6 +599,7 @@ async function runStandardOrQuickDeliberation(
   // --- Vote (optional per budget) ---
   let votes: VoteSet[] = [];
   if (budget.phases.includes("vote")) {
+    assertWithinCostLimit("vote");
     emit("phase_started", "vote");
     t0 = Date.now();
     const voteOutcome = await fanOutWithQuorum(
@@ -536,7 +616,8 @@ async function runStandardOrQuickDeliberation(
               text: c.text,
             })),
           }),
-          VoteSetSchema
+          VoteSetSchema,
+          (usage) => recordUsage(costState, usage)
         ),
       fanout
     );
@@ -576,6 +657,7 @@ async function runStandardOrQuickDeliberation(
   const positionChanges = computePositionChanges(proposals, revisions);
 
   // --- Compose (single coordinator call) ---
+  assertWithinCostLimit("compose");
   emit("phase_started", "compose");
   t0 = Date.now();
   const final = await structuredCall(
@@ -589,12 +671,18 @@ async function runStandardOrQuickDeliberation(
       rejected,
       positionChanges,
     }),
-    FinalAnswerSchema
+    FinalAnswerSchema,
+    (usage) => recordUsage(costState, usage)
   );
   timings.compose = Date.now() - t0;
   emit("phase_completed", "compose");
 
-  emit("run_completed", undefined, { runId });
+  const cost: RunCostSummary = {
+    totalUsd: costState.totalUsd,
+    limitUsd: input.costLimitUsd,
+    hasUnknownPricing: costState.hasUnknownPricing,
+  };
+  emit("run_completed", undefined, { runId, cost });
 
   return {
     runId,
@@ -610,6 +698,7 @@ async function runStandardOrQuickDeliberation(
     final,
     timings,
     quorum,
+    cost,
   };
 }
 
@@ -622,6 +711,9 @@ interface RunTopicDeliberationParams {
   coordinator: ModelConfig;
   fanout: { timeoutMs: number; retries: number; backoffMs: number };
   onEvent?: (event: RunEvent) => void;
+  /** Shared by reference across every topic running in parallel — see DeliberationInput.costLimitUsd. */
+  costState: CostState;
+  costLimitUsd?: number;
 }
 
 /** v0.2 planning mode: the same propose->critique->revise->normalize->vote->classify
@@ -631,8 +723,18 @@ interface RunTopicDeliberationParams {
 async function runTopicDeliberation(
   params: RunTopicDeliberationParams
 ): Promise<TopicResult> {
-  const { runId, question, models, provider, topic, coordinator, fanout, onEvent } =
-    params;
+  const {
+    runId,
+    question,
+    models,
+    provider,
+    topic,
+    coordinator,
+    fanout,
+    onEvent,
+    costState,
+    costLimitUsd,
+  } = params;
 
   const timings: Partial<Record<Phase, number>> = {};
   const quorum: Partial<Record<Phase, QuorumCheck>> = {};
@@ -650,6 +752,21 @@ async function runTopicDeliberation(
       data: { topicId: topic.topic_id, ...data },
     });
 
+  const assertWithinCostLimit = (phase: Phase) => {
+    if (!costLimitExceeded(costState, costLimitUsd)) return;
+    emit("run_failed", phase, {
+      reason: "cost_limit_exceeded",
+      estimatedUsd: costState.totalUsd,
+      limitUsd: costLimitUsd,
+    });
+    throw new CostLimitExceededError(
+      `${topic.topic_id}:${phase}`,
+      costState.totalUsd,
+      costLimitUsd!
+    );
+  };
+
+  assertWithinCostLimit("propose");
   emit("phase_started", "propose");
   let t0 = Date.now();
   const proposeOutcome = await fanOutWithQuorum(
@@ -659,7 +776,8 @@ async function runTopicDeliberation(
         provider,
         config,
         buildProposePrompt({ question, modelId: config.id, topic }),
-        ProposalSchema
+        ProposalSchema,
+        (usage) => recordUsage(costState, usage)
       ),
     fanout
   );
@@ -679,6 +797,7 @@ async function runTopicDeliberation(
     failures: describeFailures(proposeOutcome),
   });
 
+  assertWithinCostLimit("critique");
   emit("phase_started", "critique");
   t0 = Date.now();
   const critiqueOutcome = await fanOutWithQuorum(
@@ -693,7 +812,8 @@ async function runTopicDeliberation(
           proposals,
           topic,
         }),
-        CritiqueSchema
+        CritiqueSchema,
+        (usage) => recordUsage(costState, usage)
       ),
     fanout
   );
@@ -713,6 +833,7 @@ async function runTopicDeliberation(
     failures: describeFailures(critiqueOutcome),
   });
 
+  assertWithinCostLimit("revise");
   emit("phase_started", "revise");
   t0 = Date.now();
   const reviseOutcome = await fanOutWithQuorum(
@@ -728,7 +849,8 @@ async function runTopicDeliberation(
             proposals.find((p) => p.model_id === config.id)?.claims ?? [],
           reviewsOnMine: reviewsForModel(config.id, proposals, critiques),
         }),
-        RevisionSetSchema
+        RevisionSetSchema,
+        (usage) => recordUsage(costState, usage)
       ),
     fanout
   );
@@ -750,19 +872,22 @@ async function runTopicDeliberation(
 
   const finalClaims = resolveFinalClaims(proposals, revisions);
 
+  assertWithinCostLimit("normalize");
   emit("phase_started", "normalize");
   t0 = Date.now();
   const normalize = await structuredCall(
     provider,
     coordinator,
     buildNormalizePrompt({ question, claims: finalClaims, topic }),
-    NormalizeResultSchema
+    NormalizeResultSchema,
+    (usage) => recordUsage(costState, usage)
   );
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
     count: normalize.candidate_claims.length,
   });
 
+  assertWithinCostLimit("vote");
   emit("phase_started", "vote");
   t0 = Date.now();
   const voteOutcome = await fanOutWithQuorum(
@@ -779,7 +904,8 @@ async function runTopicDeliberation(
             text: c.text,
           })),
         }),
-        VoteSetSchema
+        VoteSetSchema,
+        (usage) => recordUsage(costState, usage)
       ),
     fanout
   );
@@ -832,6 +958,7 @@ async function runPlanningDeliberation(
   const coordinator =
     input.models.find((m) => m.id === input.coordinatorModelId) ??
     input.models[0];
+  const costState = newCostState();
 
   const emit = (type: RunEventType, phase?: Phase, data?: unknown) =>
     input.onEvent?.({
@@ -842,17 +969,30 @@ async function runPlanningDeliberation(
       data,
     });
 
+  const assertWithinCostLimit = (step: string) => {
+    if (!costLimitExceeded(costState, input.costLimitUsd)) return;
+    emit("run_failed", undefined, {
+      step,
+      reason: "cost_limit_exceeded",
+      estimatedUsd: costState.totalUsd,
+      limitUsd: input.costLimitUsd,
+    });
+    throw new CostLimitExceededError(step, costState.totalUsd, input.costLimitUsd!);
+  };
+
   emit("run_started", undefined, { question: input.question, mode: "planning" });
 
   // --- Outline (single coordinator call — see docs/protocol.md for why this
   // doesn't need the multi-model treatment normalize does) ---
+  assertWithinCostLimit("outline");
   emit("phase_started", undefined, { step: "outline" });
   const outlineStart = Date.now();
   const outline = await structuredCall(
     input.provider,
     coordinator,
     buildOutlinePrompt({ question: input.question, maxTopics: budget.maxTopics }),
-    OutlineResultSchema
+    OutlineResultSchema,
+    (usage) => recordUsage(costState, usage)
   );
   emit("phase_completed", undefined, {
     step: "outline",
@@ -876,6 +1016,8 @@ async function runPlanningDeliberation(
         coordinator,
         fanout,
         onEvent: input.onEvent,
+        costState,
+        costLimitUsd: input.costLimitUsd,
       })
     )
   );
@@ -905,12 +1047,19 @@ async function runPlanningDeliberation(
     const detail = failedTopics
       .map((f) => `${f.topic.topic_id}: ${f.error}`)
       .join(" | ");
-    throw new Error(
-      `planning mode: all ${outline.topics.length} topic(s) failed — ${detail}`
-    );
+    const message = `planning mode: all ${outline.topics.length} topic(s) failed — ${detail}`;
+    // Previously this threw without ever emitting a terminal SSE event,
+    // leaving any listening client's connection hanging indefinitely (known
+    // gap noted in docs/protocol.md's M3 section) — the M5.1 cost breaker
+    // makes "every topic fails for the same reason" a realistic path
+    // (a shared cost limit breached partway through outline), not just a
+    // multi-model-outage edge case, so this is now fixed alongside it.
+    emit("run_failed", undefined, { failedTopics });
+    throw new Error(message);
   }
 
   // --- Section compose, per topic, in parallel ---
+  assertWithinCostLimit("section_compose");
   const sections: SectionAnswer[] = await Promise.all(
     topics.map(async (topicResult) => {
       const buckets = computeConsensusBuckets(
@@ -934,7 +1083,8 @@ async function runPlanningDeliberation(
           rejected: buckets.rejected,
           positionChanges,
         }),
-        SectionAnswerSchema
+        SectionAnswerSchema,
+        (usage) => recordUsage(costState, usage)
       );
       topicResult.timings.compose = Date.now() - sectionStart;
       return stampSectionAnswer(topicResult.topic, section);
@@ -950,10 +1100,17 @@ async function runPlanningDeliberation(
     sections,
   };
 
+  const cost: RunCostSummary = {
+    totalUsd: costState.totalUsd,
+    limitUsd: input.costLimitUsd,
+    hasUnknownPricing: costState.hasUnknownPricing,
+  };
+
   emit("run_completed", undefined, {
     runId,
     topicCount: topics.length,
     failedTopics,
+    cost,
   });
 
   return {
@@ -981,6 +1138,7 @@ async function runPlanningDeliberation(
     },
     timings: {},
     quorum: {},
+    cost,
     outline,
     topics,
     planDocument,

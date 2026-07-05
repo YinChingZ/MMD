@@ -71,6 +71,10 @@ export interface RunProviderByokEntry {
   modelId: string;
   /** Human-readable provider label surfaced via modelIdToProviderLabel (e.g. the whitelist's displayName). */
   providerLabel: string;
+  /** Provider-whitelist id ("openai" | "deepseek" | "openrouter" | "volcengine") — used for M5.1 cost pricing, distinct from providerLabel's human-readable display string. Optional so existing callers/tests that don't care about cost pricing keep working; runs.ts always supplies it in production. */
+  providerId?: string;
+  /** M5.1 follow-up: a caller-supplied $/1M-token rate, overriding @mmd/protocol's built-in approximate table for this model (never a provider's own real reported cost). */
+  pricing?: { inputPerMillion: number; outputPerMillion: number };
 }
 
 export interface RunProviderResult {
@@ -117,6 +121,8 @@ export function buildRunProvider(params: {
       provider: new OpenAICompatibleProvider({
         baseUrl: entry.baseUrl,
         apiKey: entry.apiKey,
+        providerId: entry.providerId,
+        pricing: entry.pricing,
       }),
       apiModelId: entry.modelId,
     });

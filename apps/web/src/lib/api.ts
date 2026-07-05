@@ -1,4 +1,4 @@
-import type { TopicResult } from "@mmd/orchestrator";
+import type { RunCostSummary, TopicResult } from "@mmd/orchestrator";
 import type {
   ClassifyCandidateResult,
   Critique,
@@ -43,6 +43,14 @@ export interface ModelInfo {
 export interface ProviderInfo {
   providerId: string;
   displayName: string;
+  /** M5.1 follow-up: a starting suggestion for this provider's $/1M-token rate — undefined for OpenRouter (reports real cost, nothing to guess) or if we don't have one. */
+  suggestedRate?: PricingOverride;
+}
+
+/** M5.1 follow-up: a caller-supplied $/1M-token rate, overriding @mmd/protocol's built-in approximate table for this one model. */
+export interface PricingOverride {
+  inputPerMillion: number;
+  outputPerMillion: number;
 }
 
 export interface SavedApiKeyMetadata {
@@ -50,13 +58,16 @@ export interface SavedApiKeyMetadata {
   providerId: string;
   modelId: string;
   label: string | null;
+  pricing?: PricingOverride;
   createdAt: string;
 }
 
 // Exactly one of apiKey/savedKeyId, mirroring apps/api's ByokModelEntry —
 // either a freshly-entered key (optionally opted into being saved), or a
 // reference to a previously-saved one so the browser never re-holds the
-// plaintext to reuse it.
+// plaintext to reuse it. `pricing` on the savedKeyId variant overrides that
+// saved key's own persisted rate for this run only, without changing what's
+// stored (re-add with save:true to update the stored rate itself).
 export type ByokModelInput =
   | {
       providerId: string;
@@ -64,8 +75,9 @@ export type ByokModelInput =
       apiKey: string;
       label?: string;
       save?: boolean;
+      pricing?: PricingOverride;
     }
-  | { savedKeyId: string; label?: string };
+  | { savedKeyId: string; label?: string; pricing?: PricingOverride };
 
 // Mirrors apps/api/src/repositories/results-repo.ts's getResult() shape plus
 // the runId/question/mode/status the route adds on top — not DeliberationResult
@@ -87,6 +99,7 @@ export interface RunResult {
   planDocument?: PlanDocument;
   timings: Partial<Record<Phase, number>>;
   quorum: Partial<Record<Phase, QuorumCheck>>;
+  cost?: RunCostSummary;
 }
 
 async function asJson<T>(res: Response): Promise<T> {
@@ -146,6 +159,7 @@ export async function createRun(
     mode: RunMode;
     modelIds?: string[];
     byokModels?: ByokModelInput[];
+    costLimitUsd?: number;
   }
 ): Promise<{ runId: string; status: RunStatus }> {
   const res = await fetch(`/api/conversations/${conversationId}/runs`, {

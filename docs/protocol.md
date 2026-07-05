@@ -121,6 +121,36 @@ M2 把 `apps/cli` 里已经验证过的 orchestrator 逻辑（现已提取为 `p
 - `apps/api/src/config/provider-factory.ts` 的 `buildRunProvider()` 按每次 `POST /runs` 请求构造 provider（把选中的服务端注册表模型 + 客户端自带的 BYOK 模型合并成一个 `RoutingProvider`），跟 `buildProvider()`（启动时构造一次，服务于服务端注册表）完全分开，互不影响。
 - 完全自定义 baseUrl（用户自建/小众服务）需要额外一整套 SSRF 加固（内网地址过滤、DNS rebinding 防护、重定向校验、IP 编码解析），评估后判断工作量明显更大，作为明确的后续待办，这次没有做。
 
+## M5.1：成本熔断
+
+BYOK 平台让陌生人用自己的 key 跑 run，失控调用（尤其 planning 模式最多 8 个主题、每个主题完整跑六阶段）可能在用户不知情的情况下烧穿账号额度。M5.1 在 orchestrator 层加了一个跨阶段累加的成本计数器 + 熔断检查，不是每个 provider 各自实现一遍。
+
+- **`packages/model-adapters` 的 `CompletionResult` 新增可选 `usage` 字段**（`promptTokens`/`completionTokens`/`totalTokens`/`costUsd`/`raw`）。`OpenAICompatibleProvider` 从响应体解析 `usage`，`MockProvider` 也强制返回一个确定性的假 usage（默认 `costUsd: 0.0001`，可通过 `costPerCallUsd` 覆盖）——这个项目已经三次踩过"mock 太听话，真实数据路径才暴露 bug"的坑（`stampProposal`/`stampSectionAnswer`/candidate id 前缀三个案例，见 dev-roadmap.md 的 M1/v0.2/M2 补充），这次提前用同样的纪律防一次，而不是等真实调用暴露。
+- **`packages/protocol/src/pricing.ts`：按 `providerId` 分派的计价策略，不是一张统一定价表**：
+  - `openrouter`：不查表，直接读响应里的 `usage.cost`（或 `cost_details.upstream_inference_cost`）——OpenRouter 报的是真实扣费金额，比自己算的估算更准，标记为 `precision: "exact"`。
+  - `deepseek`：按 `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`/`completion_tokens` 三档分别计价（cache hit 和 cache miss 单价相差数倍，按 `prompt_tokens` 总数算会明显偏差），tier（standard vs reasoner）从 modelId 字符串猜测，标记为 `"approximate"`。
+  - `openai`/`volcengine`：单一 blended $/1M-token 汇率（不是逐 SKU 定价表——新模型上线的速度比手工维护的表快），同样标记为 `"approximate"`。
+  - 认不出的 provider/model：`costUsd: undefined`，标记为 `"unknown"`——不阻断 run，也绝不编造一个数字去参与熔断判断。
+- **实际汇率数字单独放进 `packages/protocol/src/pricing-rates.ts`，跟计价逻辑分开**：每条汇率带 `sourceUrl`/`asOf`/`confidence` 字段，刷新一个过时的数字应该是"改一行数据"，不是"改计价逻辑代码"。这个拆分不是预先设计好的，是被用户指出"数字要查最新的、不要硬编码"之后现改的——第一版直接把汇率写死在 `pricing.ts` 的计算函数旁边，且部分数字是从 AI 搜索摘要（转述第三方聚合站点）里抄来的，没有直接核对官方文档，属于典型的"看起来合理但没验证"。
+- **核实后发现两个数字是错的，已修正（2026-07-04，直接抓取官方文档原文，不是搜索摘要）**：
+  - **DeepSeek**：原来写的是 cache hit $0.0028/1M、cache miss $0.14/1M（第三方聚合站点转述），直接抓取 `api-docs.deepseek.com/quick_start/pricing-details-usd/` 后发现真实数字是 `deepseek-chat` cache hit $0.07/1M、cache miss $0.27/1M、output $1.10/1M——cache hit 单价差了约 25 倍。
+  - **OpenAI**：原来用的是 GPT-4.1 的 $2/$8（每 1M token），直接抓取 `developers.openai.com/api/docs/pricing` 后发现 GPT-4.1 在当前定价页里已经不存在了（已被 gpt-5.x 系列取代），改用当前主力档位 gpt-5.4 的 $2.5/$15。
+  - **Volcengine**：官方文档页是 JS 渲染，直接抓取拿不到正文内容，多个第三方来源之间的数字也互相矛盾（$0.47/$2.37 vs $0.67/$3.36，以及更新的 Doubao 2.1 系列 ¥6/¥30）；最终用了多个独立来源都提到的 ¥6/¥30（按约 7.15 的近似汇率换算成 $0.84/$4.20），并在 `pricing-rates.ts` 里显式标注 `confidence: "low-confidence-secondary-sources"`，是四个 provider 里置信度最低的一个。
+- **`packages/orchestrator`**：`DeliberationInput.costLimitUsd?: number`，每个阶段开始前（不是阶段进行中——已经在飞的调用总会跑完，跟现有 quorum 的"优雅、有界、非瞬时"降级风格一致）检查累加成本是否已超阈值，超过则标记 run 为 `failed`（复用现有 `run_failed` SSE 事件 + `DeliberationQuorumError` 同款的 "throw 一个类型化 Error，run-service.ts 原有的 catch 逻辑直接生效" 路径，没有改 `apps/api` 的失败处理代码）。Planning 模式的并行 topic 共享同一个 `CostState` 实例（按引用传递），任一 topic 触发熔断后，其余 topic 的下一个阶段检查点也会立刻观察到同一个共享状态并跟着停止——不能取消已经在飞的网络请求，但能保证"最多再多花一轮在飞调用的钱"。
+- **顺带修的一个既有 bug**：planning 模式如果所有 topic 都失败，`runPlanningDeliberation` 原本直接 `throw`，从未 `emit("run_failed", ...)`，导致 SSE 连接永久挂起（这个缺口本来就记在 M3 补充一节里）。M5.1 让"所有 topic 因同一个共享成本阈值被熔断"变成了一个会真实发生的场景（不再只是罕见的多模型同时宕机边缘情况），顺带修掉了这个缺口。
+- **默认成本上限**：`apps/api` 的 `POST /runs` 路由定义 `DEFAULT_COST_LIMIT_USD = 5`，客户端不传 `costLimitUsd` 时用这个值兜底（不是"不传就不设防"）——具体数字是跟用户确认过的，不是凭空定的。`GET /runs/:id/result` 通过 `run_results` 表新增的 `cost` 列（迁移 `0004_run_results_cost.sql`）暴露 `{totalUsd, limitUsd, hasUnknownPricing}`。
+- **真实验证（2026-07-04，浏览器 + 本地 Postgres，MockProvider）**：quick 模式一次正常 run 完成后正确显示 "Cost so far: $0.0004"，`psql` 直接查库确认 `run_results.cost` 落库正确；standard 模式故意设一个极低的 `costLimitUsd` 后，run 在 propose 完成、critique 开始前被正确熔断为 `failed`，前端复用既有的 `ErrorPanel` 正确展示 "cost limit exceeded before "critique": ..."，SSE/服务端日志均无异常。`packages/protocol/test/pricing.test.ts` 的断言直接从 `pricing-rates.ts` 的导出常量算期望值，而不是把数字复制粘贴进测试——这样以后刷新汇率时测试不用跟着改。**未做的验证**：这次没有打真实 OpenRouter/DeepSeek 请求核对 `usage.cost` 的量级是否与官方账单一致（沙盒里没有可用的真实 BYOK key）；Volcengine 的汇率本身就是低置信度的次级来源估算，需要真实调用或能访问 JS 渲染页面的工具才能核实。
+
+### M5.1 follow-up：BYOK 用户自填计价（不能实时抓取，就让用户自己填）
+
+内置的 `pricing-rates.ts` 表终究只是一个静态快照，会随时间漂移（上面那次核实已经证明了这一点）。用户指出"既然没法每次都抓最新数据，不如让用户自己填"之后，加了一条独立于内置表的计价路径：
+
+- **`calculateCostUsd` 新增 `userRate` 参数，优先级：provider 真实回传成本 > `userRate` > 内置近似表 > unknown**。`userRate` 不挂在某个特定 provider 分支下，而是在 dispatch 最前面统一处理——这意味着一个完全不在白名单里的 provider，只要用户填了 `userRate`，也能被计价（内置表本来就不可能覆盖任意 provider，`userRate` 是唯一的兜底）。`PricingPrecision` 新增第四态 `"user-provided"`，跟 `"approximate"` 区分开，因为置信度来源不同（一个是我们猜的，一个是用户自己说的）。
+- **`OpenAICompatibleProvider` 新增 `pricing` 构造选项**，透传给 `calculateCostUsd` 的 `userRate` 参数——`apps/api` 的 BYOK 路径（`buildRunProvider`）按每次请求构造这个 provider 实例时把 `pricing` 传进去。
+- **随 BYOK key 一起持久化**：`workspace_api_keys` 表新增 `input_per_million`/`output_per_million`（迁移 `0005_workspace_api_keys_pricing.sql`，用 `double precision` 而不是 `numeric`——后者 node-postgres 默认按字符串返回，会悄悄违反 TS 里 `number | null` 的类型声明）。请求级别的 `pricing` 覆盖优先于已保存 key 的持久化汇率（`m.pricing ?? saved.pricing`），且只影响这一次 run，不会顺带改掉存储的值——要更新存储的值，需要重新勾选"记住"再提交一次（跟 key/label 本身的 upsert 语义一致）。
+- **前端建议值来自服务端，不是打包进前端的运行时依赖**：`apps/web` 此前所有对 `@mmd/protocol` 的引用都是 `import type`（编译期擦除，从不进入 Turbopack 的打包图）。给 `ByokModelForm` 加"建议汇率"预填功能时，第一版直接 `import { OPENAI_RATE, ... } from "@mmd/protocol"`（真实值导入），结果 `next build` 报 "Module not found: Can't resolve './budget.js'"——`packages/protocol` 的 package.json `"main"` 直接指向 `./src/index.ts`（未编译的 TS 源码），且内部用 `.js` 后缀导入 `.ts` 文件（Node ESM 的标准写法，`tsc`/`tsx`/`vitest` 都认得），但 Turbopack 打包一个来自 `node_modules` 符号链接的原始 TS 包时，不会做"`.js` 后缀映射回 `.ts` 文件"这一层解析，即使加了 `transpilePackages` 也一样（`transpilePackages` 只解决"要不要转译"，不解决这个扩展名映射问题）。修复：不让前端直接 import 计价包，而是把"建议汇率"这一份数据挪到服务端计算（`suggestedRateFor` 加进 `packages/protocol/src/pricing.ts`，`GET /api/providers` 响应里每个 provider 附带 `suggestedRate` 字段），前端照常用 `fetch` 拿——这跟 `/api/models`、`/api/providers` 一贯的"前端只拿数据，不拿运行时逻辑"的架构完全一致，比跟 Turbopack 的模块解析较劲更省事，也更符合这个项目一贯"能不加基础设施就不加"的风格。
+- **真实验证（2026-07-04，浏览器 + 本地 Postgres）**：选 provider 下拉框时，输入/输出价格框正确按 provider 切换建议值（OpenAI → 2.5/15，DeepSeek → 切到 cache-miss 档 0.27/1.1，OpenRouter → 清空，因为它没有建议值可给）；手动改成 1.23/4.56、勾选"记住"、提交一次 standard 模式 run 后，`psql` 直接查 `workspace_api_keys` 表确认 `input_per_million=1.23`/`output_per_million=4.56` 落库正确；刷新到新会话后 `SavedKeysPicker` 正确显示 "openai:gpt-4.1-mini ($1.23/$4.56 per 1M tokens)"。全 workspace 8 个包 `npm run build`/`npm run test` 均通过，214 个测试零回归。
+
 ## 使用方式
 
 ```ts

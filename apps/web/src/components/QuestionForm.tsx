@@ -6,10 +6,16 @@ import type { RunMode } from "@mmd/protocol";
 import { createRun } from "@/lib/api";
 import type { ByokEntryUI } from "@/lib/model-sources";
 import { ByokModelForm } from "./ByokModelForm";
+import { CostEstimateLine } from "./CostEstimateLine";
 import { ModeSelector } from "./ModeSelector";
 import { ModelMultiSelect } from "./ModelMultiSelect";
 import { SavedKeysPicker } from "./SavedKeysPicker";
 import { TimeEstimateLine } from "./TimeEstimateLine";
+
+// Mirrors apps/api/src/routes/runs.ts's DEFAULT_COST_LIMIT_USD — kept as an
+// independent constant since the two apps don't share a config package for
+// a single number, not because the value is meant to drift between them.
+const DEFAULT_COST_LIMIT_USD = 5;
 
 export function QuestionForm({ conversationId }: { conversationId: string }) {
   const router = useRouter();
@@ -17,6 +23,7 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
   const [mode, setMode] = useState<RunMode>("standard");
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [byokEntries, setByokEntries] = useState<ByokEntryUI[]>([]);
+  const [costLimitUsd, setCostLimitUsd] = useState(DEFAULT_COST_LIMIT_USD);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,6 +46,7 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
         byokModels: byokEntries.length
           ? byokEntries.map((e) => e.payload)
           : undefined,
+        costLimitUsd,
       });
       router.push(`/conversations/${conversationId}/runs/${runId}`);
     } catch (err) {
@@ -90,6 +98,7 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
         mode={mode}
         modelCount={modelIds.length + byokEntries.length}
       />
+      <CostEstimateLine costLimitUsd={costLimitUsd} onChange={setCostLimitUsd} />
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
