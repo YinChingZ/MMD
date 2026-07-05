@@ -4,6 +4,7 @@ import { loadApiEnv, loadEncryptionKey, loadEnvFile } from "./config/env.js";
 import { loadModelsConfig } from "./config/models-config.js";
 import { buildProvider } from "./config/provider-factory.js";
 import { createDb } from "./db/client.js";
+import { reconcileOrphanedRuns } from "./services/reconcile-runs.js";
 
 loadEnvFile(".env");
 loadEnvFile(".env.local");
@@ -11,6 +12,13 @@ loadEnvFile(".env.local");
 const env = loadApiEnv();
 const encryptionKey = loadEncryptionKey();
 const db = createDb(env.databaseUrl);
+
+const orphanedCount = await reconcileOrphanedRuns(db);
+if (orphanedCount > 0) {
+  console.log(
+    `Reconciled ${orphanedCount} run(s) left "running" by a previous process instance (marked failed).`
+  );
+}
 
 const MODELS_CONFIG_PATH = "./models.config.json";
 const modelsConfig = existsSync(MODELS_CONFIG_PATH)

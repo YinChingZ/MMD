@@ -79,20 +79,66 @@ docker compose up --build
 
 `middleware/workspace.ts` 签发的匿名 workspace cookie 在 `NODE_ENV=production`（Dockerfile 已设置）时会带上 `Secure` 属性——这是本来就有的行为，不是这次新加的。用真实 Docker 容器验证时确认了这一点：`docker compose` 跑起来后 `Set-Cookie` 头里确实带了 `Secure`。**这意味着如果生产环境不是走 HTTPS，真实浏览器根本不会把这个 cookie 存下来/带回来**（`curl` 不会帮你拦这个问题——它默认不遵守 `Secure` 语义，所以本文档下面用 `curl` 做的端到端验证不会暴露这个坑，是用推理而不是直接复现确认的这条结论）。表现出来的症状会是"每次请求都在创建一个新的匿名 workspace，用户的会话历史怎么都留不住"，且没有任何报错——很容易误判成别的 bug。Railway/Fly.io/Render 这类平台的默认公网域名本身就是 HTTPS，通常不会踩到；只有自己在裸 HTTP 反向代理/自签证书环境上部署时才需要特别注意。
 
-## 部署到 Railway（参考路径之一）
+## 部署/重启时正在跑的 run 会怎样
 
-## 部署到 Railway（参考路径之一）
+每次发布新版本本质上都是重启 `apps/api` 进程。M2 时期就知道的一个限制：如果重启发生在某个 run 正在执行（比如某个模型调用还没返回）的时候，驱动那个 run 的后台 `runDeliberation` promise 会跟着进程一起消失，`runs` 表里那一行会永远停在 `status = "running"`——断线重连的浏览器会一直收不到任何新事件、永远显示"进行中"。
 
-以下是一条具体、而非空泛的"用 Docker 部署"的教程，用 [Railway](https://railway.app) 作参考（GitHub 集成、Dockerfile 自动识别、一键 Postgres 插件，适合独立开发者）；Fly.io/Render 等平台的核心步骤是类似的（构建镜像 → 设置环境变量 → 连接托管 Postgres）。
+2026-07-05 起，`apps/api/src/services/reconcile-runs.ts` 在进程启动时（迁移已跑完、开始监听请求之前）自动处理这个情况：找出所有还是 `running` 状态的 run（此时只可能是上一个进程实例留下的，因为当前进程自己还没创建过任何 run），把它们标记为 `failed`，错误信息是 `"Interrupted by a server restart before completion."`，并补一条持久化的 `run_failed` 事件，这样断线重连的客户端能拿到真实的终止状态。**这不是断点续跑**——被打断的 run 不会恢复执行，用户需要重新发起一次；真正的跨重启可恢复性目前仍然超出这个项目的规模，不打算做。
 
-1. **新建项目**，从 GitHub 仓库导入。
-2. **添加 Postgres 插件**（Railway 的 "New" → "Database" → "PostgreSQL"），Railway 会自动生成一个 `DATABASE_URL`。
-3. **添加 apps/api 服务**：选择同一个仓库，Root Directory 留空（构建上下文必须是仓库根目录），Dockerfile Path 填 `apps/api/Dockerfile`。环境变量：
-   - `DATABASE_URL`：引用 Postgres 插件自动生成的变量（Railway 支持变量引用语法 `${{Postgres.DATABASE_URL}}`）。
-   - `ENCRYPTION_KEY`：手动生成后填入（`openssl rand -base64 32`），存进 Railway 的 Variables 面板。
-   - Railway 会自动注入 `PORT`，不需要手动设置。
-4. **添加 apps/web 服务**：同一个仓库，Dockerfile Path 填 `apps/web/Dockerfile`。Build Arguments 里设置 `API_BASE_URL` 为 apps/api 服务的 Railway 内网地址（如 `http://<api-service>.railway.internal:<port>`，具体值 Railway 会在 api 服务的 Settings → Networking 里给出）——记住这是构建期参数，改了要触发重新构建，不是改完环境变量就生效。
-5. **给 apps/web 服务开启 Public Networking**，让访客能访问；`apps/api` 服务如果只被 `apps/web` 通过内网地址访问，不需要开公网入口。
+对部署本身没有额外要求（不需要什么优雅关闭钩子），单纯是进程重新起来后自愈；唯一的影响是：如果发布时机不巧撞上正有用户在跑一个耗时的 run（standard/planning 模式实测 96-301 秒），那个 run 会被打断失败，用户需要重新提交一次。
+
+## 部署到 Railway（详细教程）
+
+用 [Railway](https://railway.app) 作参考（GitHub 集成、Dockerfile 自动识别、一键 Postgres 插件，适合独立开发者）；Fly.io/Render 等平台的核心步骤是类似的（构建镜像 → 设置环境变量 → 连接托管 Postgres）。以下步骤已经在一个真实 Railway 账号上跑通过一次（2026-07-05）：三个服务（Postgres、`api`、`web`）部署成功，`web` 的公网域名能访问，`web → api` 的内网转发（`GET /api/conversations`）返回正确的 JSON、workspace cookie 也正确带上了 `Secure`/`HttpOnly`。过程中踩到的坑（尤其是下面「`api` 的 PORT 必须手动写死」这条）已经按实际结果改写进了下面的步骤，不是最初凭官方文档猜的版本。
+
+### 准备工作
+
+- 代码已推到 GitHub（`YinChingZ/MMD`），Railway 需要授权访问这个仓库。
+- 提前生成一个 `ENCRYPTION_KEY`：`openssl rand -base64 32`，先存好，第 3 步要用。Railway 不会替你生成这个值。
+- 一个 Railway 账号（railway.app，GitHub 登录即可）。
+
+### 第一步：建 Project，加 3 个服务
+
+一个 Railway Project 里放 3 个服务：Postgres 插件、`api`、`web`。这是个 monorepo（一个仓库两个 Dockerfile），所以 `api`/`web` 都是"把同一个 GitHub 仓库导入两次"，而不是两个不同仓库：
+
+1. Railway 控制台 → "New Project" → "Deploy from GitHub repo" → 选 `YinChingZ/MMD`。这会创建出第一个服务，把它改名成 `api`。
+2. 项目内 "+ New" → "Database" → "Add PostgreSQL"，加一个托管 Postgres。
+3. 项目内 "+ New" → "GitHub Repo" → 同一个仓库 `YinChingZ/MMD` 再导入一次，创建第二个服务，改名成 `web`。
+
+### 第二步：配置 `api` 服务
+
+**Settings → Source**：Root Directory **留空不要填**——这是最容易踩的坑：Root Directory 控制的是"构建时从仓库里拉取哪些文件"，如果填成 `apps/api`，`packages/*` 根本拉不下来，`npm ci` 时 workspace 符号链接（`node_modules/@mmd/protocol -> ../packages/protocol`）就建不出来，构建会失败。Dockerfile Path 填 `apps/api/Dockerfile`。
+
+**Variables** 标签页，加两个变量：
+- `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`（Railway 的变量引用语法，直接引用 Postgres 插件生成的连接串，不用手动复制粘贴，Postgres 换密码也不用跟着改）
+- `ENCRYPTION_KEY` = 准备工作里生成的那个值
+
+**`PORT` 要手动加一个 Variable 写死（比如 `PORT` = `3000`），不要指望 Railway 自动注入的那份能被 `web` 引用到**——这是真机踩出来的坑：Railway 确实会在运行时给容器注入 `PORT`，但那份是隐式的进程环境变量，不是 Variables 面板里存着的、能被其他服务用 `${{api.PORT}}` 引用的"服务变量"。实测直接用 `${{api.PORT}}` 会解析成空，导致下一步 `web` 拼出来的内网地址变成 `http://api.railway.internal`（没有端口号，默认走 80），代理请求全部 `ECONNREFUSED`。手动在 Variables 里加一条 `PORT=3000`，它才会变成一个真正存在、可以被引用/写死的值。容器 CMD（`npm run db:migrate && npm run start`）启动时会自己跑迁移。
+
+**Networking**：这个服务不用开 Public Networking——只被 `web` 通过内网访问。
+
+### 第三步：配置 `web` 服务
+
+**Settings → Source**：Dockerfile Path 填 `apps/web/Dockerfile`。
+
+**Variables**：加一个 `API_BASE_URL`，值直接写死成 `http://api.railway.internal:3000`（端口跟第二步手动设的 `PORT` 保持一致；内网寻址格式是 `<服务名>.railway.internal`，零配置、自动 WireGuard 加密，不用开 `api` 的公网入口）。注意：`apps/web/Dockerfile` 里这个值是通过 `ARG API_BASE_URL` 声明的构建期参数——Railway 会自动把同名 Variable 当 build arg 传进去，不需要额外找什么"Build Arguments"设置；但既然是构建期烘焙进 `.next/routes-manifest.json` 的值，**改了这个 Variable 之后要确认 Deployments 页面真的触发了一次新的 build**，不是简单地热更新运行时环境变量就生效（实测：只改 Variable、没等新 build 跑完就测试，请求仍然会打到旧地址）。
+
+**Networking**：Settings → Networking → "Generate Domain"，拿到一个 `*.railway.app` 域名，自动签发/续期 HTTPS 证书——这正好满足前面"匿名 workspace cookie 要求生产环境走 HTTPS"那条硬性要求。想用自己的域名的话，在这里加自定义域名，按提示加一条 CNAME + 一条 TXT 记录到你自己的 DNS。
+
+### 第四步：首次部署与验证
+
+两个服务的 Deployments 页面都能看构建日志。重点确认：
+- `api` 的构建日志里能看到 `npm run db:migrate` 跑完（应该会打印 "Applied: 0001_init.sql, ..." 这类信息，7 个迁移文件全部成功）。
+- `api` 的运行日志里能看到 `No ./models.config.json found — using MockProvider` 这行（除非你特意挂载了模型注册表）——纯 BYOK 模式的预期状态。
+- 打开 `web` 的公网域名，走一遍"创建会话 → 提交一个 mock 模式的 run → 等到 completed → 看到结果"的完整流程，确认和本地 `npm run dev`/`docker compose` 验证过的行为一致。
+- 快速验证 `web → api` 内网转发是否打通，不用打开浏览器：`curl -i https://<你的 web 域名>/api/conversations`，期望 `200` + `{"conversations":[]}` + `Set-Cookie` 里带 `Secure`/`HttpOnly`（2026-07-05 真实部署里就是靠这条命令定位到上面那个 PORT 坑的）。如果返回一个没有 JSON 内容、纯文本的 `500 Internal Server Error`，基本可以确定是 `API_BASE_URL` 指错了内网地址/端口，回去检查第三步。
+
+### 日常运维
+
+- **发布新版本**：默认 push 到 GitHub 对应分支会自动触发两个服务重新构建部署，不用手动操作。
+- **重启会中断正在跑的 run**：见上方"部署/重启时正在跑的 run 会怎样"一节——`reconcile-runs.ts` 会在下次启动时自动把卡住的 run 标记失败，不需要额外运维动作，只是提前设好预期。
+- **看日志**：每个服务的 Deployments → 具体某次部署 → Logs，或者 Railway CLI 的 `railway logs`。
+- **回滚**：Deployments 页面里选中之前一次成功的部署，"Redeploy"。
 
 ## 验收状态
 

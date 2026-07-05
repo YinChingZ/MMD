@@ -79,18 +79,66 @@ Once it's up, visit `http://localhost:3001` and walk through "create a conversat
 
 The anonymous workspace cookie issued by `middleware/workspace.ts` gets the `Secure` attribute whenever `NODE_ENV=production` (which the Dockerfile sets) — this is pre-existing behavior, not something new added here. Running the real Docker containers confirmed it: `docker compose`'s `Set-Cookie` header does carry `Secure`. **That means a real browser will not store/send this cookie back at all if production isn't served over HTTPS** (`curl` won't catch this for you — it doesn't enforce `Secure` semantics by default, so the `curl`-based end-to-end verification below wouldn't have surfaced this; this conclusion is reasoned from the confirmed cookie header, not directly reproduced via a browser hitting plain HTTP). The symptom would be "every request creates a new anonymous workspace, conversation history never sticks around," with no error at all — easy to misdiagnose as something else. Railway/Fly.io/Render's default public domains are HTTPS out of the box, so this usually isn't an issue in practice; it only bites if you're deploying behind a bare HTTP reverse proxy or a self-signed cert setup.
 
-## Deploying to Railway (one reference path)
+## What happens to a run in flight when the server restarts/redeploys
 
-A concrete walkthrough rather than a vague "use Docker," using [Railway](https://railway.app) as the reference (GitHub integration, automatic Dockerfile detection, one-click Postgres plugin — a good fit for a solo developer); Fly.io/Render follow similar core steps (build the image → set env vars → connect a managed Postgres).
+Every deploy is, at bottom, a restart of the `apps/api` process. A known limitation since M2: if the restart happens while a run is mid-execution (say, waiting on a model call), the background `runDeliberation` promise driving it dies with the process, and that row in `runs` is left at `status = "running"` forever — a reconnecting browser never receives another event and shows "in progress" indefinitely.
 
-1. **Create a new project**, importing from the GitHub repo.
-2. **Add a Postgres plugin** ("New" → "Database" → "PostgreSQL"), which generates a `DATABASE_URL` automatically.
-3. **Add the apps/api service**: same repo, leave Root Directory blank (build context must be the repo root), set Dockerfile Path to `apps/api/Dockerfile`. Environment variables:
-   - `DATABASE_URL`: reference the Postgres plugin's generated variable (Railway supports variable references like `${{Postgres.DATABASE_URL}}`).
-   - `ENCRYPTION_KEY`: generate manually (`openssl rand -base64 32`) and store in Railway's Variables panel.
-   - Railway injects `PORT` automatically — no need to set it.
-4. **Add the apps/web service**: same repo, Dockerfile Path `apps/web/Dockerfile`. Set the `API_BASE_URL` build argument to apps/api's Railway internal address (something like `http://<api-service>.railway.internal:<port>`, which Railway shows under the api service's Settings → Networking) — remember this is build-time, so changing it needs a rebuild, not just an env var update.
-5. **Enable Public Networking on the apps/web service** so visitors can reach it; `apps/api` doesn't need a public entrypoint if it's only reached over the internal network by `apps/web`.
+As of 2026-07-05, `apps/api/src/services/reconcile-runs.ts` handles this automatically at process startup (after migrations have run, before the server accepts requests): it finds every run still `status = "running"` (which, at startup, can only be left over from a previous process instance — this process hasn't created any runs of its own yet), marks each one `failed` with the message `"Interrupted by a server restart before completion."`, and appends a persisted `run_failed` event so a reconnecting client gets a real terminal state. **This is not resumability** — the interrupted run doesn't pick back up; the user has to submit it again. True cross-restart recoverability is still out of scope for this project's scale and isn't planned.
+
+This doesn't require anything special from the deployment itself (no graceful-shutdown hook needed) — the process just self-heals on the next boot. The only user-facing effect: if a deploy happens to land while someone has a long-running run in flight (standard/planning mode observed at 96-301s), that run gets interrupted and the user has to resubmit it.
+
+## Deploying to Railway (detailed tutorial)
+
+Using [Railway](https://railway.app) as the reference (GitHub integration, automatic Dockerfile detection, one-click Postgres plugin — a good fit for a solo developer); Fly.io/Render follow similar core steps (build the image → set env vars → connect a managed Postgres). The steps below have been run for real against a live Railway account (2026-07-05): all three services (Postgres, `api`, `web`) deployed successfully, `web`'s public domain is reachable, and the `web → api` internal proxy (`GET /api/conversations`) returns correct JSON with the workspace cookie carrying `Secure`/`HttpOnly` as expected. The gotchas hit along the way — especially the "`api`'s PORT has to be pinned manually" note below — have been folded into the steps as written now; this isn't the original docs-only guess anymore.
+
+### Before you start
+
+- The code is already on GitHub (`YinChingZ/MMD`); Railway needs access to that repo.
+- Generate an `ENCRYPTION_KEY` ahead of time: `openssl rand -base64 32` — save it, step 2 needs it. Railway won't generate this value for you.
+- A Railway account (railway.app, GitHub login works).
+
+### Step 1: create a Project with 3 services
+
+One Railway Project holds 3 services: the Postgres plugin, `api`, and `web`. This is a monorepo (one repo, two Dockerfiles), so `api`/`web` are the *same* GitHub repo imported twice, not two different repos:
+
+1. Railway dashboard → "New Project" → "Deploy from GitHub repo" → pick `YinChingZ/MMD`. This creates the first service — rename it `api`.
+2. Inside the project, "+ New" → "Database" → "Add PostgreSQL" for a managed Postgres.
+3. Inside the project, "+ New" → "GitHub Repo" → the same `YinChingZ/MMD` repo again, creating a second service — rename it `web`.
+
+### Step 2: configure the `api` service
+
+**Settings → Source**: leave Root Directory **blank** — this is the easiest thing to get wrong. Root Directory controls which files get pulled into the build; set it to `apps/api` and `packages/*` never make it into the build context, so `npm ci` can't create the workspace symlink (`node_modules/@mmd/protocol -> ../packages/protocol`) and the build fails. Set Dockerfile Path to `apps/api/Dockerfile`.
+
+**Variables** tab, add two:
+- `DATABASE_URL` = `${{Postgres.DATABASE_URL}}` (Railway's variable-reference syntax — points straight at the Postgres plugin's generated connection string, no copy-pasting, and it stays correct if Postgres credentials ever rotate)
+- `ENCRYPTION_KEY` = the value generated above
+
+**Manually add a `PORT` variable and pin it (e.g. `PORT` = `3000`) — don't count on referencing Railway's auto-injected one from `web`.** This is a real gotcha found by actually deploying it: Railway does inject `PORT` into the container's runtime environment, but that's an implicit process env var, not something stored in the Variables panel that other services can reference via `${{api.PORT}}`. In practice, `${{api.PORT}}` resolved to empty, so `web`'s constructed internal URL ended up as `http://api.railway.internal` (no port, defaulting to 80), and every proxied request failed with `ECONNREFUSED`. Manually setting `PORT` as a real Variable makes it an actual referenceable/pinnable value. The container's `CMD` (`npm run db:migrate && npm run start`) runs migrations on its own at boot.
+
+**Networking**: no Public Networking needed here — only `web` talks to this service, over the internal network.
+
+### Step 3: configure the `web` service
+
+**Settings → Source**: set Dockerfile Path to `apps/web/Dockerfile`.
+
+**Variables**: add `API_BASE_URL` set to `http://api.railway.internal:3000` (matching whatever you pinned `PORT` to in step 2; internal addressing is `<service-name>.railway.internal`, zero-config, encrypted over WireGuard automatically — no need to expose `api` publicly). Note: `apps/web/Dockerfile` declares this as a build-time `ARG API_BASE_URL` — Railway automatically passes a matching Variable through as that build arg, no separate "build arguments" setting to hunt for. But since the value gets baked into `.next/routes-manifest.json` at build time, **confirm the Deployments tab actually shows a fresh build** after changing this Variable — it's not something a runtime env var refresh alone would pick up (confirmed the hard way: testing right after changing the Variable but before the new build finished still hit the old baked-in address).
+
+**Networking**: Settings → Networking → "Generate Domain" for a `*.railway.app` domain with automatic HTTPS issuance/renewal — which happens to satisfy the earlier requirement that the anonymous workspace cookie needs HTTPS in production. For a custom domain, add it here and follow the prompts to add a CNAME + a TXT record on your own DNS.
+
+### Step 4: first deploy and verification
+
+Both services' Deployments tabs show build logs. Worth confirming:
+- `api`'s build log shows `npm run db:migrate` completing (should print something like "Applied: 0001_init.sql, ..." for all 7 migrations).
+- `api`'s runtime log shows `No ./models.config.json found — using MockProvider` (unless you deliberately mounted a model registry) — the expected state for pure BYOK mode.
+- Open `web`'s public domain and walk the full flow — create a conversation → submit a mock-mode run → wait for `completed` → see the result — confirming it matches the behavior already verified against `npm run dev`/`docker compose`.
+- Quick way to check the `web → api` internal proxy without opening a browser: `curl -i https://<your web domain>/api/conversations`, expecting `200` + `{"conversations":[]}` + a `Set-Cookie` header carrying `Secure`/`HttpOnly` (this is exactly the command that surfaced the PORT gotcha above during the 2026-07-05 real deploy). A plain-text `500 Internal Server Error` with no JSON body means `API_BASE_URL` is pointing at the wrong internal address/port — go back and check step 3.
+
+### Day-to-day operations
+
+- **Shipping a new version**: pushing to the tracked GitHub branch auto-triggers a rebuild/redeploy of both services by default — no manual step needed.
+- **Restarts interrupt in-flight runs**: see "What happens to a run in flight when the server restarts/redeploys" above — `reconcile-runs.ts` automatically marks any stuck run failed on the next boot; no extra ops action needed, just set expectations up front.
+- **Logs**: each service's Deployments → a specific deployment → Logs, or the Railway CLI's `railway logs`.
+- **Rollback**: pick a previously-successful deployment on the Deployments tab and hit "Redeploy".
 
 ## Verification status
 
