@@ -52,6 +52,27 @@ def test_provider_supports_standard_mode():
     assert len(response["mmd"]["votes"]) == 2
 
 
+def test_provider_supports_planning_mode_with_plan_content():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "Plan the next milestone."}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_mode": "planning",
+                "return_trace": True,
+            },
+        )
+    )
+
+    assert "# Plan Document:" in _content(response)
+    assert "## Executive Summary" in _content(response)
+    assert "## Backend" in _content(response)
+    assert response["mmd"]["mode"] == "planning"
+    assert response["mmd"]["plan_document"]["sections"][0]["topic_id"] == "backend"
+
+
 def test_provider_requires_analysis_models():
     provider = MMDLiteLLMProvider(client=ScriptedClient())
     with pytest.raises(ValueError):

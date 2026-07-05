@@ -8,7 +8,7 @@
 
 **M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。
 
-当前 `litellm-integration` branch 的技术方向已经从“继续自建 Backend API / Web MVP”调整为 **LiteLLM-first**：把 MMD 协议核心改造成 LiteLLM 生态里的开源 Fusion-like router/provider 能力，一切优先服务 LiteLLM 的适配便利、upstream 接受度和开源社区影响力。详见 [docs/litellm-integration.md](docs/litellm-integration.md) 和 [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md)。
+当前 `litellm-integration` branch 的技术方向已经从“继续自建 Backend API / Web MVP”调整为 **LiteLLM-first open-source Fusion replacement**：把 MMD 协议核心改造成 LiteLLM 生态里的开源 Fusion-like router/provider 能力，一切优先服务 Fusion 级默认可用性、LiteLLM 适配便利、upstream 接受度和开源社区影响力。主线技术文档见 [docs/fusion-replacement-mainline.md](docs/fusion-replacement-mainline.md)，转向背景见 [docs/litellm-integration.md](docs/litellm-integration.md)。
 
 ## 六阶段协议
 
@@ -38,6 +38,7 @@ python/
   mmd_litellm/          # M2'：LiteLLM-shaped Python/Pydantic PoC
 docs/
   protocol.md           # 协议规则文档
+  fusion-replacement-mainline.md # LiteLLM Fusion replacement 主线
   litellm-integration.md # LiteLLM 集成转向设计
 ```
 
@@ -98,7 +99,7 @@ npm run build   # 各 workspace 的 TypeScript 构建
 uv run --project python --extra test pytest
 ```
 
-当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
+当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）、planning mode（Outline → 按 topic 并行 standard → Section Compose）和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
 本地 LiteLLM Proxy HTTP smoke（使用 scripted mock panel，无需真实模型 key）：
 
@@ -106,11 +107,20 @@ uv run --project python --extra test pytest
 uv run --project python --extra proxy python python/scripts/proxy_smoke.py
 ```
 
-接下来的 M2' 开发顺序：真实模型 Proxy smoke → Python planning mode → LiteLLM Router/callback 接入 → upstream readiness 清理。
+真实模型 Proxy HTTP smoke harness（需要先设置对应 provider key，例如 `OPENROUTER_API_KEY`）：
+
+```bash
+export MMD_SMOKE_ANALYSIS_MODELS="openrouter/openai/gpt-4o-mini,openrouter/google/gemini-flash-1.5"
+export MMD_SMOKE_COORDINATOR_MODEL="openrouter/openai/gpt-4o-mini"
+uv run --project python --extra proxy python python/scripts/proxy_real_smoke.py
+```
+
+真实模型 smoke 已用 OpenRouter panel 跑通 quick mode，并验证 `mmd.trace_version === 1`。接下来的 M2' 开发顺序：LiteLLM Router/callback 接入 → upstream readiness 清理。
 
 ## 相关文档
 
 - [docs/protocol.md](docs/protocol.md) — 协议规则的落地说明
+- [docs/fusion-replacement-mainline.md](docs/fusion-replacement-mainline.md) — LiteLLM Fusion replacement 主线技术文档
 - [docs/litellm-integration.md](docs/litellm-integration.md) — 本 branch 的 LiteLLM 集成转向设计
 - [docs/prior-art.md](docs/prior-art.md) — 与 OpenRouter Fusion Router、litesquad、LiteLLM 生态的对比分析
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — 里程碑规划与风险对照表

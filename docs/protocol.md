@@ -128,6 +128,6 @@ import {
 
 ## LiteLLM Python port 状态（M2'）
 
-`litellm-integration` branch 现在已有 `python/mmd_litellm` 作为 Python/Pydantic port。它已经覆盖 quick mode、standard mode、quorum/partial、structured repair、run-scoped id、显式 vote 分类和 LiteLLM custom provider 外壳。协议约束仍以本文档和 TypeScript `packages/protocol` 为行为基线；Python 测试必须继续对齐这些规则。
+`litellm-integration` branch 现在已有 `python/mmd_litellm` 作为 Python/Pydantic port。它已经覆盖 quick mode、standard mode、planning mode、quorum/partial、structured repair、run-scoped id、显式 vote 分类和 LiteLLM custom provider 外壳。协议约束仍以本文档和 TypeScript `packages/protocol` 为行为基线；Python 测试必须继续对齐这些规则。
 
 Trace 返回契约已经固定为 opt-in：默认 `return_trace=false` 时只返回普通 OpenAI-compatible `choices[].message.content`；当 `return_trace=true` 时，LiteLLM Proxy HTTP 响应顶层包含 `mmd` metadata，且 `mmd.trace_version === 1`、`mmd.protocol === "mmd.v1"`。该 trace 必须能追溯 candidate/source/vote/classification/quorum/failure，不能进入默认正文。

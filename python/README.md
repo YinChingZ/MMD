@@ -32,15 +32,17 @@ litellm_settings:
       custom_handler: mmd_handler.mmd_custom_llm
 ```
 
-The PoC currently implements quick and standard modes:
+The PoC currently implements quick, standard, and planning modes:
 
 ```text
 quick:    Propose -> Normalize -> Compose
 standard: Propose -> Critique -> Revise -> Normalize -> Vote -> Compose
+planning: Outline -> per-topic standard deliberation -> Section Compose
 ```
 
-Planning orchestration is intentionally left for the next milestone after the
-provider shape and standard protocol port are stable.
+Planning returns the full plan document as normal assistant content, while
+`return_trace=true` exposes the outline, per-topic traces, failed topics, and
+`plan_document` in top-level `mmd` metadata.
 
 When `return_trace=true`, the Proxy response includes top-level provider-specific
 `mmd` metadata with `trace_version: 1` and `protocol: "mmd.v1"`. The default
@@ -58,3 +60,23 @@ uv run --project python --extra proxy python python/scripts/proxy_smoke.py
 ```
 
 The smoke test asserts the HTTP response includes `mmd.trace_version == 1`.
+
+## Real-model Proxy smoke
+
+Use the real-model smoke harness when provider keys are available in your
+environment. It writes a temporary LiteLLM config, starts a local Proxy, calls
+`/chat/completions`, and asserts that the response keeps the trace contract.
+
+```bash
+export OPENROUTER_API_KEY=...
+export MMD_SMOKE_ANALYSIS_MODELS="openrouter/openai/gpt-4o-mini,openrouter/google/gemini-flash-1.5"
+export MMD_SMOKE_COORDINATOR_MODEL="openrouter/openai/gpt-4o-mini"
+
+uv run --project python --extra proxy python python/scripts/proxy_real_smoke.py
+```
+
+Optional knobs: `MMD_SMOKE_MODE` (`quick`, `standard`, or `planning`; default
+`quick`), `MMD_SMOKE_QUESTION`, `MMD_SMOKE_PER_MODEL_TIMEOUT`,
+`MMD_SMOKE_HTTP_TIMEOUT`, `MMD_SMOKE_MAX_TOPICS`, `MMD_SMOKE_QUORUM_RATIO`, and
+`MMD_SMOKE_MAX_REPAIR_ATTEMPTS`. If `MMD_SMOKE_ANALYSIS_MODELS` is not set, the
+script exits successfully with a `skipped` JSON payload.

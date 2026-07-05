@@ -8,7 +8,7 @@ Multiple LLMs deliberate through a six-phase protocol — Propose → Critique �
 
 **M0 (protocol hardening) + M1 (CLI prototype) + M1.5 (convergence check, go decision) + v0.2 (planning mode for long-form output) are all complete**, and all of them have been validated end-to-end with real models (not just mocks). `apps/cli` supports three modes: `standard` (all six phases, default), `quick` (skips critique/revise/vote), and `planning` (splits the question into topics, for long-form/comprehensive planning output).
 
-The `litellm-integration` branch is now **LiteLLM-first**: it pivots the next milestone away from a standalone Backend API / Web MVP and toward an open-source Fusion-like router/provider capability optimized for LiteLLM integration convenience, upstream acceptance, and community impact. See [docs/litellm-integration.md](docs/litellm-integration.md) and [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) for the detailed plan.
+The `litellm-integration` branch is now **LiteLLM-first open-source Fusion replacement**: it pivots the next milestone away from a standalone Backend API / Web MVP and toward an open-source Fusion-like router/provider optimized for Fusion-level usability, LiteLLM integration convenience, upstream acceptance, and community impact. The mainline technical plan is [docs/fusion-replacement-mainline.md](docs/fusion-replacement-mainline.md); the integration pivot background is [docs/litellm-integration.md](docs/litellm-integration.md).
 
 ## The six-phase protocol
 
@@ -45,6 +45,7 @@ python/
 docs/
   protocol.md           # protocol rules (Chinese)
   protocol.en.md         # protocol rules (English)
+  fusion-replacement-mainline.md # LiteLLM Fusion replacement mainline (Chinese)
   litellm-integration.md # LiteLLM integration pivot design (Chinese)
 ```
 
@@ -105,7 +106,7 @@ npm run build   # TypeScript build across all workspaces
 uv run --project python --extra test pytest
 ```
 
-The Python PoC now includes the `mmd/fusion` custom provider shell, Pydantic protocol core, quick mode, standard mode, and OpenAI-compatible responses. When `return_trace=true`, the LiteLLM Proxy HTTP response includes provider-specific MMD trace metadata at the top-level `mmd` field with `trace_version: 1`; the default `return_trace=false` path keeps normal `choices[].message.content` unchanged.
+The Python PoC now includes the `mmd/fusion` custom provider shell, Pydantic protocol core, quick mode, standard mode, planning mode, and OpenAI-compatible responses. When `return_trace=true`, the LiteLLM Proxy HTTP response includes provider-specific MMD trace metadata at the top-level `mmd` field with `trace_version: 1`; the default `return_trace=false` path keeps normal `choices[].message.content` unchanged.
 
 Local LiteLLM Proxy HTTP smoke test (scripted mock panel, no real model keys):
 
@@ -113,12 +114,23 @@ Local LiteLLM Proxy HTTP smoke test (scripted mock panel, no real model keys):
 uv run --project python --extra proxy python python/scripts/proxy_smoke.py
 ```
 
-Next M2' development order: real-model Proxy smoke → Python planning mode → LiteLLM Router/callback integration → upstream readiness cleanup.
+Real-model LiteLLM Proxy HTTP smoke harness (requires provider keys such as
+`OPENROUTER_API_KEY` to be set first):
+
+```bash
+export MMD_SMOKE_ANALYSIS_MODELS="openrouter/openai/gpt-4o-mini,openrouter/google/gemini-flash-1.5"
+export MMD_SMOKE_COORDINATOR_MODEL="openrouter/openai/gpt-4o-mini"
+uv run --project python --extra proxy python python/scripts/proxy_real_smoke.py
+```
+
+The real-model smoke has passed quick mode with an OpenRouter panel and verified
+`mmd.trace_version === 1`. Next M2' development order: LiteLLM Router/callback integration → upstream readiness cleanup.
 
 ## Related docs
 
 - [docs/protocol.en.md](docs/protocol.en.md) — how the protocol constraints are implemented
 - [docs/protocol.md](docs/protocol.md) — the same, in Chinese
+- [docs/fusion-replacement-mainline.md](docs/fusion-replacement-mainline.md) — LiteLLM Fusion replacement mainline technical plan (Chinese)
 - [docs/litellm-integration.md](docs/litellm-integration.md) — LiteLLM integration pivot design (Chinese)
 - [docs/prior-art.en.md](docs/prior-art.en.md) — how MMD compares to OpenRouter Fusion Router, litesquad, and the LiteLLM ecosystem
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — milestone plan and risk register (Chinese)

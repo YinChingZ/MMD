@@ -43,6 +43,7 @@ class MMDLiteLLMProvider(CustomLLM):
             "quorum_ratio",
             "per_model_timeout",
             "max_repair_attempts",
+            "max_topics",
             "return_trace",
         ):
             if key in kwargs:
@@ -61,12 +62,13 @@ class MMDLiteLLMProvider(CustomLLM):
             quorum_ratio=optional_params.get("quorum_ratio", 0.66),
             per_model_timeout=optional_params.get("per_model_timeout", 40.0),
             max_repair_attempts=optional_params.get("max_repair_attempts", 2),
+            max_topics=optional_params.get("max_topics", 8),
             return_trace=optional_params.get("return_trace", False),
         )
         result = await run_deliberation(config, self.client)
         metadata = result.trace_payload() if config.return_trace else None
         response = openai_chat_completion_response(
-            content=result.final.final_answer,
+            content=result.response_content(),
             model=public_model,
             metadata=metadata,
         )

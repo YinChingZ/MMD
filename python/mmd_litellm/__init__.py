@@ -12,6 +12,7 @@ from .orchestrator import (
     DeliberationResult,
     QuorumNotMetError,
     run_deliberation,
+    run_planning_deliberation,
     run_quick_deliberation,
     run_standard_deliberation,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "meets_quorum",
     "parse_scoped_id",
     "run_deliberation",
+    "run_planning_deliberation",
     "run_quick_deliberation",
     "run_standard_deliberation",
     "scoped_id",

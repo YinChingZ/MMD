@@ -128,6 +128,6 @@ import {
 
 ## LiteLLM Python Port Status (M2')
 
-The `litellm-integration` branch now has `python/mmd_litellm` as the Python/Pydantic port. It covers quick mode, standard mode, quorum/partial handling, structured repair, run-scoped ids, explicit-vote classification, and the LiteLLM custom provider shell. This document and the TypeScript `packages/protocol` package remain the behavioral baseline; Python tests must continue to match these rules.
+The `litellm-integration` branch now has `python/mmd_litellm` as the Python/Pydantic port. It covers quick mode, standard mode, planning mode, quorum/partial handling, structured repair, run-scoped ids, explicit-vote classification, and the LiteLLM custom provider shell. This document and the TypeScript `packages/protocol` package remain the behavioral baseline; Python tests must continue to match these rules.
 
 The trace return contract is now opt-in and versioned: by default (`return_trace=false`) the response only uses normal OpenAI-compatible `choices[].message.content`; when `return_trace=true`, the LiteLLM Proxy HTTP response includes top-level `mmd` metadata with `mmd.trace_version === 1` and `mmd.protocol === "mmd.v1"`. That trace must preserve candidate/source/vote/classification/quorum/failure auditability without entering the default answer content.
