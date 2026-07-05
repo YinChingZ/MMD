@@ -11,14 +11,16 @@ dependencies = [
 litellm = [
   "litellm>=1.70",
 ]
+proxy = [
+  "litellm[proxy]>=1.70",
+]
 test = [
   "pytest>=8.0",
 ]
 dev = [
-  "mmd-litellm[litellm,test]",
+  "mmd-litellm[proxy,test]",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-

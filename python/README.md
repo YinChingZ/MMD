@@ -29,7 +29,7 @@ model_list:
 litellm_settings:
   custom_provider_map:
     - provider: mmd
-      custom_handler: mmd_litellm.custom_handler.mmd_custom_llm
+      custom_handler: mmd_handler.mmd_custom_llm
 ```
 
 The PoC currently implements quick and standard modes:
@@ -41,3 +41,13 @@ standard: Propose -> Critique -> Revise -> Normalize -> Vote -> Compose
 
 Planning orchestration is intentionally left for the next milestone after the
 provider shape and standard protocol port are stable.
+
+## Proxy smoke test
+
+The LiteLLM Proxy loads `custom_handler` modules relative to the config file, so
+the examples directory includes tiny handler shims. Run the local HTTP smoke
+test with a deterministic scripted panel:
+
+```bash
+uv run --project python --extra proxy python python/scripts/proxy_smoke.py
+```

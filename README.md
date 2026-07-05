@@ -100,6 +100,12 @@ uv run --project python --extra test pytest
 
 当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）和 OpenAI-compatible response。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
+本地 LiteLLM Proxy HTTP smoke（使用 scripted mock panel，无需真实模型 key）：
+
+```bash
+uv run --project python --extra proxy python python/scripts/proxy_smoke.py
+```
+
 ## 相关文档
 
 - [docs/protocol.md](docs/protocol.md) — 协议规则的落地说明

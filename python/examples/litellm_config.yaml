@@ -15,4 +15,4 @@ model_list:
 litellm_settings:
   custom_provider_map:
     - provider: mmd
-      custom_handler: mmd_litellm.custom_handler.mmd_custom_llm
+      custom_handler: mmd_handler.mmd_custom_llm

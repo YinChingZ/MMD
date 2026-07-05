@@ -1,0 +1,18 @@
+model_list:
+  - model_name: mmd-fusion-mock
+    litellm_params:
+      model: mmd/fusion
+      analysis_models:
+        - scripted/model-a
+        - scripted/model-b
+      coordinator_model: scripted/model-a
+      mmd_mode: standard
+      quorum_ratio: 0.66
+      per_model_timeout: 10
+      max_repair_attempts: 1
+      return_trace: true
+
+litellm_settings:
+  custom_provider_map:
+    - provider: mmd
+      custom_handler: proxy_smoke_handler.mmd_custom_llm
