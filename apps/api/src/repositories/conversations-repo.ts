@@ -34,6 +34,18 @@ export async function getConversation(
   return row ? toSummary(row) : undefined;
 }
 
+/**
+ * Relies on the M5.3 `ON DELETE CASCADE` migration (0006) to remove every
+ * dependent row (runs, and each run's claims/reviews/candidates/votes/
+ * run_results/run_events) — no manual dependency-ordered deletes here.
+ */
+export async function deleteConversation(
+  db: Kysely<Database>,
+  id: string
+): Promise<void> {
+  await db.deleteFrom("conversations").where("id", "=", id).execute();
+}
+
 export async function listConversations(
   db: Kysely<Database>,
   workspaceId: string

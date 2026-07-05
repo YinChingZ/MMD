@@ -82,6 +82,11 @@ export async function runsRoutes(
 
   fastify.post<{ Params: { id: string } }>(
     "/api/conversations/:id/runs",
+    // M5.3: cheap DB-writes-and-concurrent-runs guard, independent of the
+    // M5.1 cost circuit breaker (that one protects the caller's own BYOK
+    // budget; this one protects the platform from a single workspace
+    // hammering run creation).
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const conversation = await getConversation(deps.db, request.params.id);
       if (!conversation || conversation.workspaceId !== request.workspaceId) {

@@ -44,6 +44,26 @@ export async function touchLastSeen(
     .execute();
 }
 
+/**
+ * M5.3 cleanup: deletes every workspace whose last_seen_at is older than
+ * `olderThanDays`, and (via the 0006 ON DELETE CASCADE migration) every
+ * conversation/run/claim/review/candidate/vote/run_result/run_event/saved
+ * key underneath it. Returns the deleted ids for logging — call sites don't
+ * need to re-query to find out what happened.
+ */
+export async function deleteStaleWorkspaces(
+  db: Kysely<Database>,
+  olderThanDays: number
+): Promise<string[]> {
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+  const rows = await db
+    .deleteFrom("workspaces")
+    .where("last_seen_at", "<", cutoff)
+    .returning("id")
+    .execute();
+  return rows.map((r) => r.id);
+}
+
 function toWorkspaceRow(row: Selectable<WorkspacesTable>): WorkspaceRow {
   return {
     id: row.id,

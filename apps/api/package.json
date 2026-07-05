@@ -7,11 +7,13 @@
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:cleanup": "tsx src/db/cleanup.ts",
     "test": "vitest run",
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
+    "@fastify/rate-limit": "^11.1.0",
     "@mmd/model-adapters": "*",
     "@mmd/orchestrator": "*",
     "@mmd/prompts": "*",

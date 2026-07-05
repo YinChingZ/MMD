@@ -5,7 +5,11 @@ import type { Kysely } from "kysely";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Database } from "../src/db/client.js";
 import { appendRunEvent, listRunEventsSince } from "../src/repositories/events-repo.js";
-import { createConversation, getConversation } from "../src/repositories/conversations-repo.js";
+import {
+  createConversation,
+  deleteConversation,
+  getConversation,
+} from "../src/repositories/conversations-repo.js";
 import { getResult, saveResult } from "../src/repositories/results-repo.js";
 import {
   createRun,
@@ -14,7 +18,10 @@ import {
   markRunCompleted,
   markRunFailed,
 } from "../src/repositories/runs-repo.js";
-import { createWorkspace } from "../src/repositories/workspaces-repo.js";
+import {
+  createWorkspace,
+  deleteStaleWorkspaces,
+} from "../src/repositories/workspaces-repo.js";
 import { hasTestDatabase, setupTestDb, truncateAll } from "./db-helpers.js";
 
 const describeIfDb = hasTestDatabase() ? describe : describe.skip;
@@ -242,5 +249,104 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
       0
     );
     expect(voteRows.length).toBe(totalVotesAcrossTopics);
+  });
+
+  it("deleteConversation cascades to the run and every dependent table (M5.3), without touching another workspace's data", async () => {
+    const conversation = await createConversation(db, workspaceId);
+    const models = [
+      { id: "model_a", provider: "mock" },
+      { id: "model_b", provider: "mock" },
+      { id: "model_c", provider: "mock" },
+    ];
+    const result = await runDeliberation({
+      question: "Should a small team adopt a monorepo?",
+      models,
+      provider: new MockProvider(),
+      runId: "run_test_cascade_delete",
+    });
+    await createRun(db, {
+      id: result.runId,
+      conversationId: conversation.id,
+      workspaceId,
+      question: result.question,
+      mode: result.mode,
+      modelConfig: models,
+      budget: result.budget,
+    });
+    await saveResult(db, result);
+    await appendRunEvent(db, {
+      runId: result.runId,
+      seq: 1,
+      event: {
+        type: "run_started",
+        runId: result.runId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    // A second, unrelated workspace/conversation/run — proves the cascade
+    // only touches the deleted conversation's own tree.
+    const otherWorkspaceId = (await createWorkspace(db)).id;
+    const otherConversation = await createConversation(db, otherWorkspaceId);
+    const otherResult = await runDeliberation({
+      question: "Unrelated question",
+      models,
+      provider: new MockProvider(),
+      runId: "run_test_cascade_other",
+    });
+    await createRun(db, {
+      id: otherResult.runId,
+      conversationId: otherConversation.id,
+      workspaceId: otherWorkspaceId,
+      question: otherResult.question,
+      mode: otherResult.mode,
+      modelConfig: models,
+      budget: otherResult.budget,
+    });
+    await saveResult(db, otherResult);
+
+    await deleteConversation(db, conversation.id);
+
+    expect(await getConversation(db, conversation.id)).toBeUndefined();
+    expect(await getRun(db, result.runId)).toBeUndefined();
+    for (const table of [
+      "claims",
+      "reviews",
+      "candidates",
+      "votes",
+      "run_results",
+      "run_events",
+    ] as const) {
+      const rows = await db
+        .selectFrom(table)
+        .selectAll()
+        .where("run_id", "=", result.runId)
+        .execute();
+      expect(rows).toEqual([]);
+    }
+
+    // The other workspace's conversation/run/result must be untouched.
+    expect(await getConversation(db, otherConversation.id)).toBeDefined();
+    expect(await getRun(db, otherResult.runId)).toBeDefined();
+    expect(await getResult(db, otherResult.runId)).toBeDefined();
+  });
+
+  it("deleteStaleWorkspaces removes only workspaces whose last_seen_at is older than the threshold, cascading to their conversations/runs", async () => {
+    const staleWorkspaceId = workspaceId;
+    await db
+      .updateTable("workspaces")
+      .set({ last_seen_at: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000) })
+      .where("id", "=", staleWorkspaceId)
+      .execute();
+    const staleConversation = await createConversation(db, staleWorkspaceId);
+
+    const freshWorkspaceId = (await createWorkspace(db)).id;
+    const freshConversation = await createConversation(db, freshWorkspaceId);
+
+    const deletedIds = await deleteStaleWorkspaces(db, 30);
+
+    expect(deletedIds).toEqual([staleWorkspaceId]);
+    expect(await getConversation(db, staleConversation.id)).toBeUndefined();
+    expect(await getConversation(db, freshConversation.id)).toBeDefined();
   });
 });

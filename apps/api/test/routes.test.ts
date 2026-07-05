@@ -757,4 +757,102 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
       await expensiveApp.close();
     }
   });
+
+  it("M5.3: DELETE /api/conversations/:id removes the conversation (and cascades to its runs), 404s afterward", async () => {
+    const conversation = await createConversationViaApi(app);
+    const createRunRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: { question: "Q?", mode: "quick" },
+      headers: { cookie: conversation.cookie },
+    });
+    const { runId } = createRunRes.json();
+    await pollUntilSettled(app, runId, conversation.cookie);
+
+    const deleteRes = await app.inject({
+      method: "DELETE",
+      url: `/api/conversations/${conversation.id}`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(deleteRes.statusCode).toBe(204);
+
+    const getConversationRes = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${conversation.id}`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(getConversationRes.statusCode).toBe(404);
+
+    const getRunRes = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(getRunRes.statusCode).toBe(404);
+  });
+
+  it("M5.3: DELETE /api/conversations/:id 404s (and doesn't delete) a conversation belonging to another workspace", async () => {
+    const ownerConversation = await createConversationViaApi(app);
+
+    const strangerRes = await app.inject({
+      method: "GET",
+      url: "/api/conversations",
+    });
+    const strangerCookie = extractWorkspaceCookie(strangerRes)!;
+
+    const deleteRes = await app.inject({
+      method: "DELETE",
+      url: `/api/conversations/${ownerConversation.id}`,
+      headers: { cookie: strangerCookie },
+    });
+    expect(deleteRes.statusCode).toBe(404);
+
+    const stillThereRes = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${ownerConversation.id}`,
+      headers: { cookie: ownerConversation.cookie },
+    });
+    expect(stillThereRes.statusCode).toBe(200);
+  });
+
+  it("M5.3: rate-limits POST /api/conversations/:id/runs per workspace, returning 429 past the threshold", async () => {
+    const conversation = await createConversationViaApi(app);
+
+    const responses = [];
+    for (let i = 0; i < 11; i++) {
+      responses.push(
+        await app.inject({
+          method: "POST",
+          url: `/api/conversations/${conversation.id}/runs`,
+          payload: { question: `Q${i}?`, mode: "quick" },
+          headers: { cookie: conversation.cookie },
+        })
+      );
+    }
+
+    const statusCodes = responses.map((r) => r.statusCode);
+    expect(statusCodes.slice(0, 10)).toEqual(Array(10).fill(201));
+    expect(statusCodes[10]).toBe(429);
+
+    // A different workspace isn't affected by the first workspace's limit.
+    const otherConversation = await createConversationViaApi(app);
+    const otherRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${otherConversation.id}/runs`,
+      payload: { question: "Q?", mode: "quick" },
+      headers: { cookie: otherConversation.cookie },
+    });
+    expect(otherRes.statusCode).toBe(201);
+
+    // Drain every triggered run to completion before the test ends — the
+    // 429 responses aside, the other 11 real (mock) runs kicked off async
+    // work that must not still be in flight when afterEach tears down the
+    // db/app, or its writes race the next test's truncateAll.
+    await Promise.all([
+      ...responses
+        .slice(0, 10)
+        .map((r) => pollUntilSettled(app, r.json().runId, conversation.cookie)),
+      pollUntilSettled(app, otherRes.json().runId, otherConversation.cookie),
+    ]);
+  });
 });

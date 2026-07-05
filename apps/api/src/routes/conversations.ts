@@ -4,6 +4,7 @@ import type { AppDeps } from "../app.js";
 import { resolveWorkspace } from "../middleware/workspace.js";
 import {
   createConversation,
+  deleteConversation,
   getConversation,
   listConversations,
 } from "../repositories/conversations-repo.js";
@@ -51,6 +52,18 @@ export async function conversationsRoutes(
       }
       const runs = await listRunsForConversation(deps.db, request.params.id);
       return reply.send({ ...conversation, runs });
+    }
+  );
+
+  fastify.delete<{ Params: { id: string } }>(
+    "/api/conversations/:id",
+    async (request, reply) => {
+      const conversation = await getConversation(deps.db, request.params.id);
+      if (!conversation || conversation.workspaceId !== request.workspaceId) {
+        return reply.code(404).send({ error: "conversation not found" });
+      }
+      await deleteConversation(deps.db, request.params.id);
+      return reply.code(204).send();
     }
   );
 }
