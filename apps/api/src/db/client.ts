@@ -42,6 +42,7 @@ export interface RunsTable {
   error: string | null;
   created_at: Generated<Date>;
   completed_at: Date | null;
+  share_token: string | null;
 }
 
 export interface RunEventsTable {

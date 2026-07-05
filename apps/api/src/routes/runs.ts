@@ -5,7 +5,11 @@ import type { AppDeps } from "../app.js";
 import { buildRunProvider } from "../config/provider-factory.js";
 import { resolveWorkspace } from "../middleware/workspace.js";
 import { getConversation } from "../repositories/conversations-repo.js";
-import { getRun } from "../repositories/runs-repo.js";
+import {
+  getOrCreateShareToken,
+  getRun,
+  revokeShareToken,
+} from "../repositories/runs-repo.js";
 import { getResult } from "../repositories/results-repo.js";
 import {
   getDecryptedApiKey,
@@ -256,6 +260,36 @@ export async function runsRoutes(
         status: run.status,
         ...result,
       });
+    }
+  );
+
+  fastify.post<{ Params: { id: string } }>(
+    "/api/runs/:id/share",
+    async (request, reply) => {
+      const run = await getRun(deps.db, request.params.id);
+      if (!run || run.workspaceId !== request.workspaceId) {
+        return reply.code(404).send({ error: "run not found" });
+      }
+      if (run.status === "running") {
+        return reply.code(409).send({ status: "running" });
+      }
+      if (run.status === "failed") {
+        return reply.code(422).send({ status: "failed", error: run.error });
+      }
+      const token = await getOrCreateShareToken(deps.db, run.id);
+      return reply.send({ token });
+    }
+  );
+
+  fastify.delete<{ Params: { id: string } }>(
+    "/api/runs/:id/share",
+    async (request, reply) => {
+      const run = await getRun(deps.db, request.params.id);
+      if (!run || run.workspaceId !== request.workspaceId) {
+        return reply.code(404).send({ error: "run not found" });
+      }
+      await revokeShareToken(deps.db, run.id);
+      return reply.code(204).send();
     }
   );
 }

@@ -2,18 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { getRunResult, type RunResult } from "@/lib/api";
-import { formatRunCost } from "@/lib/cost";
 import { deriveRunProgress } from "@/lib/progress";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useRunStatus } from "@/hooks/useRunStatus";
-import { ConsensusPanel } from "@/components/ConsensusPanel";
-import { DiscussionProcess } from "@/components/DiscussionProcess";
 import { ErrorPanel } from "@/components/ErrorPanel";
-import { FinalAnswerPanel } from "@/components/FinalAnswerPanel";
 import { PhaseProgress } from "@/components/PhaseProgress";
-import { PlanDocumentView } from "@/components/PlanDocumentView";
 import { PlanningPhaseProgress } from "@/components/PlanningPhaseProgress";
+import { RunResultView } from "@/components/RunResultView";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
+import { ShareButton } from "@/components/ShareButton";
 
 export function RunPageClient({ runId }: { runId: string }) {
   const { run, loading } = useRunStatus(runId);
@@ -64,28 +61,8 @@ export function RunPageClient({ runId }: { runId: string }) {
 
       {run.status === "completed" && result && (
         <>
-          {result.cost && (
-            <p className="text-sm text-gray-500">{formatRunCost(result.cost)}</p>
-          )}
-          {result.planDocument ? (
-            <PlanDocumentView planDocument={result.planDocument} topics={result.topics ?? []} />
-          ) : (
-            <>
-              <FinalAnswerPanel text={result.final.final_answer} />
-              <ConsensusPanel
-                candidates={result.normalize.candidate_claims}
-                classifications={result.classifications}
-                proposals={result.proposals}
-                revisions={result.revisions}
-              />
-              <DiscussionProcess
-                proposals={result.proposals}
-                critiques={result.critiques}
-                revisions={result.revisions}
-                votes={result.votes}
-              />
-            </>
-          )}
+          <ShareButton runId={runId} />
+          <RunResultView result={result} />
         </>
       )}
     </div>

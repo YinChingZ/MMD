@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { ConversationSidebar } from "@/components/ConversationSidebar";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -8,13 +7,14 @@ export const metadata: Metadata = {
   description: "Multiple LLMs propose, critique, revise, and vote toward a transparent consensus answer.",
 };
 
+// Deliberately bare — the sidebar/conversation-list chrome lives in
+// app/(app)/layout.tsx instead, so the public app/share/[token] page (M5.5,
+// outside that route group) never renders any workspace-identity actions
+// like "+ New conversation" for an anonymous visitor.
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body className="flex min-h-screen flex-col text-gray-900 md:flex-row">
-        <ConversationSidebar />
-        <main className="flex-1 p-4 md:p-8">{children}</main>
-      </body>
+      <body className="text-gray-900">{children}</body>
     </html>
   );
 }

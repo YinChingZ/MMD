@@ -855,4 +855,170 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
       pollUntilSettled(app, otherRes.json().runId, otherConversation.cookie),
     ]);
   });
+
+  it("M5.5: shares a completed run — the public link works with no cookie at all, and never leaks workspaceId or the token itself", async () => {
+    const conversation = await createConversationViaApi(app);
+    const createRunRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: { question: "Should a small team adopt a monorepo?", mode: "quick" },
+      headers: { cookie: conversation.cookie },
+    });
+    const { runId } = createRunRes.json();
+    await pollUntilSettled(app, runId, conversation.cookie);
+
+    const shareRes = await app.inject({
+      method: "POST",
+      url: `/api/runs/${runId}/share`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(shareRes.statusCode).toBe(200);
+    const { token } = shareRes.json();
+    expect(typeof token).toBe("string");
+    expect(token.length).toBeGreaterThan(20);
+
+    // No cookie header at all — a real incognito-mode visitor.
+    const publicRes = await app.inject({
+      method: "GET",
+      url: `/api/share/${token}`,
+    });
+    expect(publicRes.statusCode).toBe(200);
+    expect(publicRes.headers["set-cookie"]).toBeUndefined();
+    const body = publicRes.json();
+    expect(body.question).toBe("Should a small team adopt a monorepo?");
+    expect(body.final.final_answer.length).toBeGreaterThan(0);
+    expect(body.workspaceId).toBeUndefined();
+    expect(body.shareToken).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(token);
+
+    // Calling share again returns the same token, not a new one.
+    const shareAgainRes = await app.inject({
+      method: "POST",
+      url: `/api/runs/${runId}/share`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(shareAgainRes.json().token).toBe(token);
+
+    // Revoke: the same link 404s afterward.
+    const revokeRes = await app.inject({
+      method: "DELETE",
+      url: `/api/runs/${runId}/share`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(revokeRes.statusCode).toBe(204);
+
+    const afterRevokeRes = await app.inject({
+      method: "GET",
+      url: `/api/share/${token}`,
+    });
+    expect(afterRevokeRes.statusCode).toBe(404);
+  });
+
+  it("M5.5: 404s an unknown/never-issued share token", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/share/not-a-real-token",
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("M5.5: 404s creating or revoking a share link for a run belonging to another workspace", async () => {
+    const owner = await createConversationViaApi(app);
+    const createRunRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${owner.id}/runs`,
+      payload: { question: "Q?", mode: "quick" },
+      headers: { cookie: owner.cookie },
+    });
+    const { runId } = createRunRes.json();
+    await pollUntilSettled(app, runId, owner.cookie);
+
+    const strangerRes = await app.inject({ method: "GET", url: "/api/conversations" });
+    const strangerCookie = extractWorkspaceCookie(strangerRes)!;
+
+    const shareRes = await app.inject({
+      method: "POST",
+      url: `/api/runs/${runId}/share`,
+      headers: { cookie: strangerCookie },
+    });
+    expect(shareRes.statusCode).toBe(404);
+
+    const revokeRes = await app.inject({
+      method: "DELETE",
+      url: `/api/runs/${runId}/share`,
+      headers: { cookie: strangerCookie },
+    });
+    expect(revokeRes.statusCode).toBe(404);
+  });
+
+  it("M5.5: rejects sharing a run that's still running (409) or failed (422)", async () => {
+    const slowProvider: ResolvedProvider = {
+      provider: new MockProvider({ latencyMs: 300 }),
+      availableModelIds: ["model_a", "model_b", "model_c"],
+      isMock: true,
+      modelIdToProviderLabel: () => "mock",
+    };
+    const slowApp = buildApp({
+      db,
+      resolvedProvider: slowProvider,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      logger: false,
+    });
+    await slowApp.ready();
+    try {
+      const conversation = await createConversationViaApi(slowApp);
+      const createRunRes = await slowApp.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: { question: "Q?", mode: "quick" },
+        headers: { cookie: conversation.cookie },
+      });
+      const { runId } = createRunRes.json();
+
+      const shareWhileRunningRes = await slowApp.inject({
+        method: "POST",
+        url: `/api/runs/${runId}/share`,
+        headers: { cookie: conversation.cookie },
+      });
+      expect(shareWhileRunningRes.statusCode).toBe(409);
+
+      await pollUntilSettled(slowApp, runId, conversation.cookie);
+    } finally {
+      await slowApp.close();
+    }
+
+    const failingProvider: ResolvedProvider = {
+      provider: new MockProvider({ failModelIds: new Set(["model_b", "model_c"]) }),
+      availableModelIds: ["model_a", "model_b", "model_c"],
+      isMock: true,
+      modelIdToProviderLabel: () => "mock",
+    };
+    const failApp = buildApp({
+      db,
+      resolvedProvider: failingProvider,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      logger: false,
+    });
+    await failApp.ready();
+    try {
+      const conversation = await createConversationViaApi(failApp);
+      const createRunRes = await failApp.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: { question: "Q?", mode: "standard" },
+        headers: { cookie: conversation.cookie },
+      });
+      const { runId } = createRunRes.json();
+      await pollUntilSettled(failApp, runId, conversation.cookie);
+
+      const shareFailedRes = await failApp.inject({
+        method: "POST",
+        url: `/api/runs/${runId}/share`,
+        headers: { cookie: conversation.cookie },
+      });
+      expect(shareFailedRes.statusCode).toBe(422);
+    } finally {
+      await failApp.close();
+    }
+  });
 });

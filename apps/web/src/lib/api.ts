@@ -179,3 +179,25 @@ export async function getRunResult(id: string): Promise<RunResult> {
   const res = await fetch(`/api/runs/${id}/result`);
   return asJson<RunResult>(res);
 }
+
+// M5.5: idempotent — returns the same token if this run was already shared.
+export async function createShareLink(runId: string): Promise<{ token: string }> {
+  const res = await fetch(`/api/runs/${runId}/share`, { method: "POST" });
+  return asJson<{ token: string }>(res);
+}
+
+export async function revokeShareLink(runId: string): Promise<void> {
+  const res = await fetch(`/api/runs/${runId}/share`, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `request failed with status ${res.status}`);
+  }
+}
+
+// The public, cookie-free read path (see apps/api/src/routes/share.ts) —
+// same response shape as getRunResult, fetched by token instead of runId/an
+// authenticated workspace.
+export async function getSharedRun(token: string): Promise<RunResult> {
+  const res = await fetch(`/api/share/${token}`);
+  return asJson<RunResult>(res);
+}

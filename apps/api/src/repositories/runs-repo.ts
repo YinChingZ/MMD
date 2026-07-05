@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import type { ModelConfig } from "@mmd/model-adapters";
 import type { RunBudget, RunMode } from "@mmd/protocol";
@@ -94,6 +95,61 @@ export async function listRunsForConversation(
     .orderBy("created_at", "asc")
     .execute();
   return rows.map(toRunRow);
+}
+
+/**
+ * Idempotent: returns the existing token if this run was already shared,
+ * rather than minting (and orphaning) a new one on every click of "Share".
+ * Same token format/length as workspaces-repo.ts's session token — 256 bits
+ * makes guessing infeasible, so unlike M5.3's rate-limited endpoints this
+ * doesn't need its own throttling.
+ */
+export async function getOrCreateShareToken(
+  db: Kysely<Database>,
+  runId: string
+): Promise<string> {
+  const existing = await db
+    .selectFrom("runs")
+    .select("share_token")
+    .where("id", "=", runId)
+    .executeTakeFirst();
+  if (existing?.share_token) return existing.share_token;
+
+  const token = randomBytes(32).toString("hex");
+  await db
+    .updateTable("runs")
+    .set({ share_token: token })
+    .where("id", "=", runId)
+    .execute();
+  return token;
+}
+
+export async function revokeShareToken(
+  db: Kysely<Database>,
+  runId: string
+): Promise<void> {
+  await db
+    .updateTable("runs")
+    .set({ share_token: null })
+    .where("id", "=", runId)
+    .execute();
+}
+
+/**
+ * The public, cookie-free lookup path (see routes/share.ts) — deliberately
+ * separate from getRun so nothing here ever accidentally exposes
+ * workspaceId/share_token itself to an anonymous caller.
+ */
+export async function getRunByShareToken(
+  db: Kysely<Database>,
+  token: string
+): Promise<RunRow | undefined> {
+  const row = await db
+    .selectFrom("runs")
+    .selectAll()
+    .where("share_token", "=", token)
+    .executeTakeFirst();
+  return row ? toRunRow(row) : undefined;
 }
 
 function toRunRow(row: Selectable<RunsTable>): RunRow {

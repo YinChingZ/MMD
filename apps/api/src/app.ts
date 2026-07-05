@@ -10,6 +10,7 @@ import { eventsRoutes } from "./routes/events.js";
 import { modelsRoutes } from "./routes/models.js";
 import { providersRoutes } from "./routes/providers.js";
 import { runsRoutes } from "./routes/runs.js";
+import { shareRoutes } from "./routes/share.js";
 import { workspaceRoutes } from "./routes/workspace.js";
 import { RunBroadcaster } from "./sse/broadcaster.js";
 import { RunService } from "./services/run-service.js";
@@ -61,6 +62,7 @@ export function buildApp(params: BuildAppParams): FastifyInstance {
   app.register((instance) => modelsRoutes(instance, deps));
   app.register((instance) => providersRoutes(instance, deps));
   app.register((instance) => workspaceRoutes(instance, deps));
+  app.register((instance) => shareRoutes(instance, deps));
 
   return app;
 }
