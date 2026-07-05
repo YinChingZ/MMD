@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { RunMode } from "@mmd/protocol";
 import { createRun } from "@/lib/api";
-import type { ByokEntryUI } from "@/lib/model-sources";
+import { buildCreateRunPayload, type ByokEntryUI } from "@/lib/model-sources";
 import { ByokModelForm } from "./ByokModelForm";
 import { CostEstimateLine } from "./CostEstimateLine";
 import { ModeSelector } from "./ModeSelector";
@@ -39,15 +39,16 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
     setSubmitting(true);
     setError(null);
     try {
-      const { runId } = await createRun(conversationId, {
-        question: question.trim(),
-        mode,
-        modelIds,
-        byokModels: byokEntries.length
-          ? byokEntries.map((e) => e.payload)
-          : undefined,
-        costLimitUsd,
-      });
+      const { runId } = await createRun(
+        conversationId,
+        buildCreateRunPayload({
+          question: question.trim(),
+          mode,
+          modelIds,
+          byokEntries,
+          costLimitUsd,
+        })
+      );
       router.push(`/conversations/${conversationId}/runs/${runId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../src/lib/api";
-import { mergeModelSources, type ByokEntryUI } from "../src/lib/model-sources";
+import {
+  buildCreateRunPayload,
+  mergeModelSources,
+  type ByokEntryUI,
+} from "../src/lib/model-sources";
 
 function legacyModel(overrides: Partial<ModelInfo> = {}): ModelInfo {
   return {
@@ -89,5 +93,43 @@ describe("mergeModelSources", () => {
 
   it("returns an empty list when there are no legacy models and no byok entries", () => {
     expect(mergeModelSources([], [], [])).toEqual([]);
+  });
+});
+
+describe("buildCreateRunPayload", () => {
+  it("omits modelIds (rather than sending []) for a pure-BYOK submission with no legacy models checked", () => {
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "standard",
+      modelIds: [],
+      byokEntries: [byokEntry()],
+      costLimitUsd: 5,
+    });
+    expect(payload.modelIds).toBeUndefined();
+    expect(payload.byokModels).toEqual([byokEntry().payload]);
+  });
+
+  it("omits byokModels (rather than sending []) when no byok entries were added", () => {
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "standard",
+      modelIds: ["model_a"],
+      byokEntries: [],
+      costLimitUsd: 5,
+    });
+    expect(payload.modelIds).toEqual(["model_a"]);
+    expect(payload.byokModels).toBeUndefined();
+  });
+
+  it("includes both when legacy models and byok entries are mixed", () => {
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "standard",
+      modelIds: ["model_a"],
+      byokEntries: [byokEntry()],
+      costLimitUsd: 5,
+    });
+    expect(payload.modelIds).toEqual(["model_a"]);
+    expect(payload.byokModels).toEqual([byokEntry().payload]);
   });
 });

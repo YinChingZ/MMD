@@ -1,3 +1,4 @@
+import type { RunMode } from "@mmd/protocol";
 import type { ByokModelInput, ModelInfo } from "./api";
 
 // UI-only representation of a BYOK entry the user has added but not yet
@@ -19,6 +20,38 @@ export interface MergedModelRow {
   // Legacy rows are checkboxes (can be unchecked); byok rows are always
   // included once added (removed via the byok list itself, not unchecked).
   checked: boolean;
+}
+
+/**
+ * Builds createRun()'s request body. modelIds/byokModels must be omitted
+ * (not sent as `[]`) when empty — apps/api's Zod schema allows either field
+ * to be entirely absent, but rejects an explicitly empty array with
+ * "Array must contain at least 1 element(s)". A pure-BYOK submission (no
+ * legacy checkboxes selected) was hitting exactly this before, since
+ * `modelIds` was always sent as the literal (possibly empty) state array.
+ */
+export function buildCreateRunPayload(params: {
+  question: string;
+  mode: RunMode;
+  modelIds: string[];
+  byokEntries: ByokEntryUI[];
+  costLimitUsd: number;
+}): {
+  question: string;
+  mode: RunMode;
+  modelIds?: string[];
+  byokModels?: ByokModelInput[];
+  costLimitUsd: number;
+} {
+  return {
+    question: params.question,
+    mode: params.mode,
+    modelIds: params.modelIds.length ? params.modelIds : undefined,
+    byokModels: params.byokEntries.length
+      ? params.byokEntries.map((e) => e.payload)
+      : undefined,
+    costLimitUsd: params.costLimitUsd,
+  };
 }
 
 /** Combines server-registry models (checkbox rows) and user-added BYOK entries (always-checked rows) into one list for display. */
