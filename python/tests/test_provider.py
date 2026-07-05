@@ -26,6 +26,8 @@ def test_provider_returns_openai_compatible_response_with_trace():
     assert response["object"] == "chat.completion"
     assert response["model"] == "mmd/fusion"
     assert _content(response) == "Use a small TypeScript monorepo for this project."
+    assert response["mmd"]["trace_version"] == 1
+    assert response["mmd"]["protocol"] == "mmd.v1"
     assert response["mmd"]["mode"] == "quick"
     assert response["mmd"]["quorum"]["propose"]["met"] is True
 
@@ -45,6 +47,7 @@ def test_provider_supports_standard_mode():
     )
 
     assert _content(response) == "Use a small TypeScript monorepo for this project."
+    assert response["mmd"]["trace_version"] == 1
     assert response["mmd"]["mode"] == "standard"
     assert len(response["mmd"]["votes"]) == 2
 

@@ -98,13 +98,15 @@ npm run build   # 各 workspace 的 TypeScript 构建
 uv run --project python --extra test pytest
 ```
 
-当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）和 OpenAI-compatible response。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
+当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
 本地 LiteLLM Proxy HTTP smoke（使用 scripted mock panel，无需真实模型 key）：
 
 ```bash
 uv run --project python --extra proxy python python/scripts/proxy_smoke.py
 ```
+
+接下来的 M2' 开发顺序：真实模型 Proxy smoke → Python planning mode → LiteLLM Router/callback 接入 → upstream readiness 清理。
 
 ## 相关文档
 

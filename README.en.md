@@ -40,6 +40,8 @@ packages/
   protocol/             # zod schemas + pure functions for consensus classification / quorum / ids / budget
   model-adapters/       # provider adapters: mock, OpenAI-compatible, quorum-aware fan-out
   prompts/              # prompt construction for the six phases
+python/
+  mmd_litellm/          # M2': LiteLLM-shaped Python/Pydantic PoC
 docs/
   protocol.md           # protocol rules (Chinese)
   protocol.en.md         # protocol rules (English)
@@ -96,6 +98,22 @@ Edit `models.config.json` and fill in a real `modelId` / `baseUrl` for each mode
 npm run test    # unit tests across all workspaces
 npm run build   # TypeScript build across all workspaces
 ```
+
+### LiteLLM PoC (M2')
+
+```bash
+uv run --project python --extra test pytest
+```
+
+The Python PoC now includes the `mmd/fusion` custom provider shell, Pydantic protocol core, quick mode, standard mode, and OpenAI-compatible responses. When `return_trace=true`, the LiteLLM Proxy HTTP response includes provider-specific MMD trace metadata at the top-level `mmd` field with `trace_version: 1`; the default `return_trace=false` path keeps normal `choices[].message.content` unchanged.
+
+Local LiteLLM Proxy HTTP smoke test (scripted mock panel, no real model keys):
+
+```bash
+uv run --project python --extra proxy python python/scripts/proxy_smoke.py
+```
+
+Next M2' development order: real-model Proxy smoke → Python planning mode → LiteLLM Router/callback integration → upstream readiness cleanup.
 
 ## Related docs
 

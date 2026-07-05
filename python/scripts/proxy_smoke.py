@@ -61,7 +61,24 @@ def main() -> None:
     content = response["choices"][0]["message"]["content"]
     if "LiteLLM-shaped Python provider" not in content:
         raise AssertionError(f"unexpected response content: {content}")
-    print(json.dumps({"ok": True, "model": response["model"], "content": content}))
+    trace = response.get("mmd")
+    if not isinstance(trace, dict):
+        raise AssertionError(f"missing mmd trace metadata: {response}")
+    if trace.get("trace_version") != 1 or trace.get("protocol") != "mmd.v1":
+        raise AssertionError(f"unexpected mmd trace contract: {trace}")
+    if trace.get("mode") != "standard":
+        raise AssertionError(f"unexpected mmd mode in trace: {trace.get('mode')}")
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "model": response["model"],
+                "content": content,
+                "trace_version": trace["trace_version"],
+                "mode": trace["mode"],
+            }
+        )
+    )
 
 
 def _free_port() -> int:
@@ -120,4 +137,3 @@ if __name__ == "__main__":
     except Exception as error:
         print(f"proxy smoke failed: {error}", file=sys.stderr)
         raise
-

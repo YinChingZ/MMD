@@ -42,6 +42,11 @@ standard: Propose -> Critique -> Revise -> Normalize -> Vote -> Compose
 Planning orchestration is intentionally left for the next milestone after the
 provider shape and standard protocol port are stable.
 
+When `return_trace=true`, the Proxy response includes top-level provider-specific
+`mmd` metadata with `trace_version: 1` and `protocol: "mmd.v1"`. The default
+`return_trace=false` path keeps the normal OpenAI-compatible answer content
+unchanged.
+
 ## Proxy smoke test
 
 The LiteLLM Proxy loads `custom_handler` modules relative to the config file, so
@@ -51,3 +56,5 @@ test with a deterministic scripted panel:
 ```bash
 uv run --project python --extra proxy python python/scripts/proxy_smoke.py
 ```
+
+The smoke test asserts the HTTP response includes `mmd.trace_version == 1`.

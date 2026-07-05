@@ -105,7 +105,12 @@ class DeliberationResult(BaseModel):
     failures: dict[str, list[PhaseFailure]] = Field(default_factory=dict)
 
     def trace_payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"final"})
+        payload = self.model_dump(mode="json", exclude={"final"})
+        return {
+            "trace_version": 1,
+            "protocol": "mmd.v1",
+            **payload,
+        }
 
 
 class QuorumNotMetError(RuntimeError):
