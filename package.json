@@ -8,6 +8,6 @@
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present"
+    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/model-adapters && npm run build --workspace=packages/prompts && npm run build --workspace=packages/orchestrator && npm run build --workspace=apps/cli && npm run build --workspace=apps/api && npm run build --workspace=apps/web"
   }
 }
