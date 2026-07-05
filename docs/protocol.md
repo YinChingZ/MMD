@@ -89,7 +89,9 @@ Planning 模式在 Propose 之前多一个 **Outline** 阶段：一次 coordinat
 
 ### 真实耗时基线（截至本文档更新时）
 
-用真实模型（Volcengine/DeepSeek 系列推理模型）跑过的窄问题（standard 模式）单次耗时在 96-250 秒之间，远高于 `STANDARD_BUDGET` 里当初凭 mock 猜测的 p50 60s / p95 120s 目标——这两个数字还没有用真实数据校准，是已知的后续待办，不在这次 v0.2 改动范围内。Planning 模式因为每个主题都要跑完整六阶段，单个主题的耗时预期和 standard 模式的单次 run 类似，多个主题并行执行，所以总耗时约等于"最慢的那个主题"而不是"耗时总和"。
+用真实模型（Volcengine/DeepSeek 系列推理模型）跑过的窄问题（standard 模式）单次耗时在 96-250 秒之间；换成跨厂商组合（OpenRouter 统一接入）后在 164-301 秒之间。Planning 模式因为每个主题都要跑完整六阶段，单个主题的耗时预期和 standard 模式的单次 run 类似，多个主题并行执行，所以总耗时约等于"最慢的那个主题"而不是"耗时总和"。
+
+**2026-07-05 回填**：`STANDARD_BUDGET`/`PLANNING_BUDGET` 的 `targetP50Ms`/`targetP95Ms` 已用上面的真实观测区间回填为 150s/300s（样本量小，不是严格百分位，取观测区间中段/上界），不再是 M0 阶段凭空猜的 60s/120s。`targetP95Ms` 同时是 `fanOutWithQuorum` 单次模型调用的默认超时（见 `packages/orchestrator/src/index.ts`），300s 对单次调用而言明显宽松于实际需要，但目前没有单独的分阶段耗时数据来校准更紧的超时值，宁可偏宽松也不误杀真实调用。quick mode 的 `targetP50Ms`/`targetP95Ms`（20s/40s）还没有真实数据，维持原样。
 
 换成真正跨厂商的组合（OpenAI GPT-5.5 / DeepSeek v4 Pro / Google Gemini 3.1 Pro，经 OpenRouter 统一接入）后，单次 standard 模式耗时在 164-301 秒之间，量级和之前同厂商组合接近，没有明显变慢或变快。
 

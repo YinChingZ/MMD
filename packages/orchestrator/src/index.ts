@@ -998,6 +998,10 @@ async function runPlanningDeliberation(
     step: "outline",
     count: outline.topics.length,
     timeMs: Date.now() - outlineStart,
+    topics: outline.topics.map((topic) => ({
+      topic_id: topic.topic_id,
+      title: topic.title,
+    })),
   });
 
   // --- Per-topic deliberation, in parallel (Promise.all one level up from

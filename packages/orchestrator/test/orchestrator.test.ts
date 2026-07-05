@@ -182,6 +182,31 @@ describe("runDeliberation — v0.2 planning mode", () => {
     expect(result.planDocument?.executive_summary).toBe(expectedSummary);
   });
 
+  it("emits the outline's topic_id/title list on its phase_completed event, not just a count", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider(),
+      mode: "planning",
+      onEvent: (e) => events.push(e),
+    });
+
+    const outlineCompleted = events.find(
+      (e) =>
+        e.type === "phase_completed" &&
+        (e.data as { step?: string })?.step === "outline"
+    );
+    expect(outlineCompleted).toBeDefined();
+    const data = outlineCompleted?.data as {
+      count: number;
+      topics: { topic_id: string; title: string }[];
+    };
+    expect(data.topics).toEqual(
+      result.outline?.topics.map((t) => ({ topic_id: t.topic_id, title: t.title }))
+    );
+  });
+
   it("overrides a section-compose call's self-reported topic_id with ground truth (found via real-model testing: real models invent their own topic_id instead of echoing the one given)", async () => {
     const result = await runDeliberation({
       question: "Plan a project",

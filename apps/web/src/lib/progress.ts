@@ -23,6 +23,7 @@ export interface FlatProgress {
 }
 
 export interface TopicProgress {
+  title?: string;
   phases: Partial<Record<Phase, PhaseStatus>>;
   failed: boolean;
   error?: string;
@@ -38,9 +39,9 @@ export type RunProgress = FlatProgress | PlanningProgress;
 
 /**
  * Derives phase-by-phase status from the raw SSE event log. Planning mode's
- * outline step never lists topic titles in its event payload (only a count),
- * so per-topic rows are keyed and labeled by the opaque topic_id emitted on
- * every per-topic event until GET /result's outline.topics gives real titles.
+ * per-topic rows are keyed by the opaque topic_id emitted on every per-topic
+ * event; titles are backfilled from the outline step's phase_completed event
+ * (data.topics) as soon as it arrives, ahead of GET /result.
  */
 export function deriveRunProgress(
   events: RunEventMessage[],
@@ -70,10 +71,19 @@ export function deriveRunProgress(
   };
 
   for (const event of events) {
-    const data = (event.data ?? {}) as { step?: string; error?: string };
+    const data = (event.data ?? {}) as {
+      step?: string;
+      error?: string;
+      topics?: { topic_id: string; title: string }[];
+    };
     if (!event.topicId && data.step === "outline") {
       if (event.type === "phase_started") outline = "in_progress";
-      else if (event.type === "phase_completed") outline = "done";
+      else if (event.type === "phase_completed") {
+        outline = "done";
+        for (const topic of data.topics ?? []) {
+          getTopic(topic.topic_id).title = topic.title;
+        }
+      }
       continue;
     }
     if (!event.topicId) continue;

@@ -27,10 +27,7 @@ export function PlanningPhaseProgress({ progress }: { progress: PlanningProgress
       {topics.map(([topicId, topic]) => (
         <div key={topicId} className="rounded border border-gray-200 p-2">
           <div className="mb-1 flex items-center justify-between text-xs text-gray-500">
-            {/* Topic titles aren't emitted over SSE (only topic_id) — the
-                human-readable title only becomes available once GET /result's
-                outline.topics arrives after completion. */}
-            <span>{topicId}</span>
+            <span>{topic.title ?? topicId}</span>
             {topic.failed && (
               <span className="text-red-600">
                 failed{topic.error ? `: ${topic.error}` : ""}

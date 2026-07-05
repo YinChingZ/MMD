@@ -23,15 +23,25 @@ export interface RunBudget {
   maxTopics?: number;
 }
 
-// 目标基线数字待 M1 用真实数据校准，这里先给出协议约定的起始值。
+// 回填自 docs/protocol.md「真实耗时基线」一节：同厂商组合单次 run 耗时
+// 96-250s，跨厂商组合（OpenRouter 统一接入）164-301s，样本量小、不是严格
+// 意义上的百分位统计，取整个观测区间的中段/上界作为 p50/p95。
+// 注意 targetP95Ms 同时是 fanOutWithQuorum 单次模型调用的默认超时
+// （见 packages/orchestrator/src/index.ts 的 timeoutMs），比整个 run 的
+// p95 宽松是刻意的——单个 phase 里一次模型调用的耗时远小于全部六阶段的
+// 总耗时，用整 run 的 p95 当单次调用超时只会让真正卡死的调用更晚被发现，
+// 但目前没有单独的分阶段耗时数据来校准更紧的超时值，先用这个偏宽松但不
+// 会误杀真实调用的值。
 export const STANDARD_BUDGET: RunBudget = {
   modelCount: 3,
   critiqueRounds: 1,
-  targetP50Ms: 60_000,
-  targetP95Ms: 120_000,
+  targetP50Ms: 150_000,
+  targetP95Ms: 300_000,
   phases: [...PHASES],
 };
 
+// quick mode 还没有用真实模型基准测过（见 docs/protocol.md），维持 M0
+// 时期的猜测值，不跟着 standard/planning 一起回填。
 // quick mode: 2 模型，跳过 critique/revise/vote。normalize 阶段保留，
 // 因为没有显式投票时，仍需要用 candidate 的 source_claim_ids 覆盖了几个
 // 模型来推断共识强度（每个来源模型视为一票隐含 approve），否则 compose
@@ -51,8 +61,8 @@ export const QUICK_MODE_BUDGET: RunBudget = {
 export const PLANNING_BUDGET: RunBudget = {
   modelCount: 3,
   critiqueRounds: 1,
-  targetP50Ms: 60_000,
-  targetP95Ms: 120_000,
+  targetP50Ms: 150_000,
+  targetP95Ms: 300_000,
   phases: [...PHASES],
   maxTopics: 8,
 };

@@ -53,6 +53,29 @@ describe("deriveRunProgress — planning mode", () => {
     expect(progress.topics.get("topic_2")?.phases.propose).toBe("in_progress");
   });
 
+  it("backfills topic titles from the outline step's phase_completed event", () => {
+    const events = [
+      event({
+        seq: 1,
+        type: "phase_completed",
+        phase: undefined,
+        data: {
+          step: "outline",
+          count: 2,
+          topics: [
+            { topic_id: "topic_1", title: "Backend framework choice" },
+            { topic_id: "topic_2", title: "Deployment strategy" },
+          ],
+        },
+      }),
+      event({ seq: 2, type: "phase_started", phase: "propose", topicId: "topic_1" }),
+    ];
+    const progress = deriveRunProgress(events, "planning");
+    if (progress.kind !== "planning") throw new Error("expected planning");
+    expect(progress.topics.get("topic_1")?.title).toBe("Backend framework choice");
+    expect(progress.topics.get("topic_2")?.title).toBe("Deployment strategy");
+  });
+
   it("marks a topic failed without touching other topics", () => {
     const events = [
       event({ type: "phase_completed", phase: undefined, topicId: "topic_1", data: { step: "topic", failed: true, error: "quorum not met" } }),

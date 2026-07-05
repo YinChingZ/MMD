@@ -381,9 +381,9 @@ M0、M1、M1.5、v0.2、M2、M3、M4（BYOK 平台）均已完成并通过真实
 其他已知的、不阻塞 M5.2 但值得记录的后续待办：
 - M5.1 的计价策略还没有用真实模型调用验证过准确性（沙盒里没有可用的真实 BYOK key）——接入真实模型后第一件事应该是核对 OpenRouter 的 `usage.cost` 和 OpenAI/Volcengine 的 blended 汇率近似值分别与真实账单差多少。
 - BYOK 完全自定义 baseUrl（需要内网地址过滤、DNS rebinding 防护、重定向校验、IP 编码解析等 SSRF 加固）、Anthropic/Google 专用 adapter、加密密钥轮换机制——见上方"M4 第一阶段补充"一节（其中"删除已保存 key 的接口"已经并入 M5.3 的删除能力一起做）。
-- `STANDARD_BUDGET`/`PLANNING_BUDGET` 的 p50/p95 目标数字还是 M0 阶段凭空猜的，需要用已经收集到的真实耗时数据回填；M3 的前端预估耗时文案已经改用真实基线数字，但协议层的常量本身还没回填。
+- ~~`STANDARD_BUDGET`/`PLANNING_BUDGET` 的 p50/p95 目标数字还是 M0 阶段凭空猜的~~——2026-07-05 已用 `docs/protocol.md`「真实耗时基线」的观测区间回填为 150s/300s，详见该文档「2026-07-05 回填」一节；quick mode 因为还没有真实数据，维持原样未动。
 - disputed 分类路径已经在 planning 模式的真实数据里被触发过一次（后端技术栈选型的 Java vs Node.js 分歧，见上文 v0.2 一节），且是跨厂商组合下出现的，同厂商组合没出现过。目前的结论：**问题的抽象层级比模型组合更重要**——宽泛的主观辩论（996、球星之争）即使换了跨厂商模型也趋向收敛，但具体到有明确技术权衡的实现细节（该用哪个框架/工具），模型之间确实会产生有论据支撑的真实分歧。
 - M2 的一个已知限制：API 进程在 run 执行中途重启会让该 run 永久卡在 `running` 状态（见上方"M2 补充"一节）。真正的跨重启可恢复性留到有实际需求时再做。
 - M2 刻意没有引入 Redis（单进程内存 SSE 广播器 + Postgres 已够用），如果未来需要多实例部署 `apps/api`，事件广播需要改成跨进程方案（Redis pub/sub 或等价机制），这会是那时候的前置工作，不是现在的技术债。
 - ~~planning 模式"所有 topic 全部失败"时 orchestrator 从不发出终止 SSE 事件的缺口~~——已在 M5.1 里顺带修掉（成本熔断让这个场景从"多模型同时宕机的边缘情况"变成了会真实发生的路径，见上方"M5.1 成本熔断 — 实际结果"一节）。
-- planning 模式实时进度里，每个 topic 在 outline 完成之前只能显示 model 自己起的 `topic_id`（如 `"3"`），没有可读标题——要等整个 run 跑完、`GET /result` 的 `outline.topics` 返回后才知道标题。如果想在运行过程中就显示可读标题，需要给 outline 的 `phase_completed` 事件补上 topics 列表（目前只带了 `count`），这是后端的小改动，不在 M3 范围内。
+- ~~planning 模式实时进度里，每个 topic 在 outline 完成之前只能显示 model 自己起的 `topic_id`，没有可读标题~~——2026-07-05 已修：`packages/orchestrator/src/index.ts` 的 outline `phase_completed` 事件补上了 `topics: [{topic_id, title}]`（原来只带 `count`），`apps/web` 的 `progress.ts`/`PlanningPhaseProgress.tsx` 相应改为一收到这个事件就回填标题，不用再等 run 跑完、`GET /result` 返回。
