@@ -15,5 +15,39 @@ services:
       timeout: 2s
       retries: 15
 
+  # M5.4: `docker compose up --build` is the one-command way to verify the
+  # containerized images actually work end to end (see apps/api/Dockerfile
+  # and apps/web/Dockerfile for why a plain "docker build" per app needs the
+  # repo root as build context). Not meant to replace `npm run dev` for
+  # everyday local development — that loop (tsx watch, Next dev server) is
+  # faster to iterate on than a container rebuild.
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://mmd:mmd@postgres:5432/mmd
+      # Same key generation the docs recommend for a real deploy — see
+      # docs/deployment.md. Required; there is no insecure default.
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?set ENCRYPTION_KEY in a .env file at the repo root - see docs/deployment.md, generate with: openssl rand -base64 32}"
+      PORT: 3000
+    ports:
+      - "3000:3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Baked in at build time, not runtime — see apps/web/Dockerfile.
+        API_BASE_URL: http://api:3000
+    depends_on:
+      - api
+    ports:
+      - "3001:3000"
+
 volumes:
   mmd_pgdata:

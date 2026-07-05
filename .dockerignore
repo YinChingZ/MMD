@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/tsconfig.tsbuildinfo
+.git
+.claude
+*.log
+.env
+.env.local
+apps/*/models.config.json
