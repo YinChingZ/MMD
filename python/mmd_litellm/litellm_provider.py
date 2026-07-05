@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 from .client import LiteLLMCompletionClient
-from .orchestrator import CompletionClient, DeliberationConfig, run_quick_deliberation
+from .orchestrator import CompletionClient, DeliberationConfig, run_deliberation
 from .response import openai_chat_completion_response
 
 try:
@@ -63,7 +63,7 @@ class MMDLiteLLMProvider(CustomLLM):
             max_repair_attempts=optional_params.get("max_repair_attempts", 2),
             return_trace=optional_params.get("return_trace", False),
         )
-        result = await run_quick_deliberation(config, self.client)
+        result = await run_deliberation(config, self.client)
         metadata = result.trace_payload() if config.return_trace else None
         response = openai_chat_completion_response(
             content=result.final.final_answer,
@@ -117,4 +117,3 @@ def _maybe_litellm_response(response: dict) -> Any:
 
 
 mmd_custom_llm = MMDLiteLLMProvider()
-

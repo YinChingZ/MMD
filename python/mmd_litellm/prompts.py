@@ -5,7 +5,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .schemas import FinalAnswer, NormalizeResult, Proposal
+from .schemas import (
+    Critique,
+    FinalAnswer,
+    NormalizeResult,
+    Proposal,
+    RevisionSet,
+    VoteSet,
+)
 
 
 class CompletionRequest(BaseModel):
@@ -72,6 +79,119 @@ def build_normalize_prompt(
     )
 
 
+def build_critique_prompt(
+    *, question: str, reviewer_model_id: str, proposals: list[Proposal]
+) -> CompletionRequest:
+    targets = [
+        {
+            "claim_id": claim.claim_id,
+            "text": claim.text,
+            "model_id": proposal.model_id,
+        }
+        for proposal in proposals
+        for claim in proposal.claims
+        if proposal.model_id != reviewer_model_id
+    ]
+    system_prompt = "\n\n".join(
+        [
+            "You are reviewing claims proposed by other independent models in a multi-model deliberation.",
+            "For each claim from another model, decide: support, challenge, or refine.",
+            "Every challenge must include a concrete reason; do not challenge a claim just because of phrasing or style differences.",
+            "Rate severity as minor, major, or critical, reflecting how much the claim would change the final answer if the challenge were ignored.",
+            "You do not need to review your own claims; they have been excluded from the list below.",
+            "Return ONLY JSON matching this schema, no prose outside the JSON:",
+            describe_schema(Critique, "Critique"),
+        ]
+    )
+    return CompletionRequest(
+        system_prompt=system_prompt,
+        user_prompt="\n\n".join(
+            [
+                f"Question: {question}",
+                "Claims to review:",
+                json.dumps(targets, indent=2),
+            ]
+        ),
+        meta={
+            "phase": "critique",
+            "reviewer_model_id": reviewer_model_id,
+            "targets": targets,
+        },
+    )
+
+
+def build_revise_prompt(
+    *,
+    question: str,
+    model_id: str,
+    own_claims: list[dict[str, Any]],
+    reviews_on_mine: list[dict[str, Any]],
+) -> CompletionRequest:
+    system_prompt = "\n\n".join(
+        [
+            "Other models have reviewed your claims from the previous round. Decide, per claim, whether to keep, revise, withdraw, or adopt another model's position.",
+            "You must explicitly say whether you were persuaded by a specific review, citing it via influenced_by.",
+            "Do not abandon an objection you still believe is important just to reach agreement; disagreement is a legitimate outcome.",
+            "Return ONLY JSON matching this schema, no prose outside the JSON:",
+            describe_schema(RevisionSet, "RevisionSet"),
+        ]
+    )
+    return CompletionRequest(
+        system_prompt=system_prompt,
+        user_prompt="\n\n".join(
+            [
+                f"Question: {question}",
+                "Your claims from the previous round:",
+                json.dumps(own_claims, indent=2),
+                "Reviews you received:",
+                json.dumps(reviews_on_mine, indent=2),
+            ]
+        ),
+        meta={
+            "phase": "revise",
+            "model_id": model_id,
+            "own_claims": [
+                {"claim_id": claim["claim_id"], "text": claim["text"]}
+                for claim in own_claims
+            ],
+            "reviews": [
+                {
+                    "reviewer_model_id": review["reviewer_model_id"],
+                    "target_claim_id": review["target_claim_id"],
+                    "stance": review["stance"],
+                }
+                for review in reviews_on_mine
+            ],
+        },
+    )
+
+
+def build_vote_prompt(
+    *, question: str, model_id: str, candidates: list[dict[str, str]]
+) -> CompletionRequest:
+    system_prompt = "\n\n".join(
+        [
+            "Vote on each candidate consensus claim.",
+            "Distinguish approve from approve_with_conditions; use the latter when you would only accept it with a stated caveat.",
+            "If you vote object, you must also set objection_severity (minor, major, or critical) and explain in reason why this blocks the main conclusion.",
+            "Abstain only when you have no informed opinion, not as a way to avoid taking a position.",
+            "Return ONLY JSON matching this schema, no prose outside the JSON:",
+            describe_schema(VoteSet, "VoteSet"),
+        ]
+    )
+    return CompletionRequest(
+        system_prompt=system_prompt,
+        user_prompt="\n\n".join(
+            [
+                f"Question: {question}",
+                "Candidates:",
+                json.dumps(candidates, indent=2),
+            ]
+        ),
+        meta={"phase": "vote", "model_id": model_id, "candidates": candidates},
+    )
+
+
 def build_compose_prompt(
     *,
     question: str,
@@ -114,4 +234,3 @@ def build_compose_prompt(
             "position_changes": position_changes,
         },
     )
-

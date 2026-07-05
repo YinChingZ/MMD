@@ -98,7 +98,7 @@ npm run build   # 各 workspace 的 TypeScript 构建
 uv run --project python --extra test pytest
 ```
 
-当前 Python PoC 先实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）和 OpenAI-compatible response。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
+当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）和 OpenAI-compatible response。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
 ## 相关文档
 

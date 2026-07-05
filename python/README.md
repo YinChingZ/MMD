@@ -23,7 +23,7 @@ model_list:
         - openai/gpt-4.1-mini
         - anthropic/claude-3-5-haiku
       coordinator_model: openai/gpt-4.1-mini
-      mmd_mode: quick
+      mmd_mode: standard
       return_trace: false
 
 litellm_settings:
@@ -32,12 +32,12 @@ litellm_settings:
       custom_handler: mmd_litellm.custom_handler.mmd_custom_llm
 ```
 
-The first PoC implements quick mode:
+The PoC currently implements quick and standard modes:
 
 ```text
-Propose -> Normalize -> Compose
+quick:    Propose -> Normalize -> Compose
+standard: Propose -> Critique -> Revise -> Normalize -> Vote -> Compose
 ```
 
-Full standard/planning orchestration is intentionally left for the next
-milestone after the provider shape and Python protocol port are stable.
-
+Planning orchestration is intentionally left for the next milestone after the
+provider shape and standard protocol port are stable.

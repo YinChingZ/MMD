@@ -10,16 +10,22 @@ from .ids import make_run_id, scoped_id
 from .prompts import (
     CompletionRequest,
     build_compose_prompt,
+    build_critique_prompt,
     build_normalize_prompt,
     build_propose_prompt,
+    build_revise_prompt,
+    build_vote_prompt,
 )
 from .quorum import QuorumCheck, check_quorum
 from .schemas import (
     Ballot,
     CandidateClaim,
+    Critique,
     FinalAnswer,
     NormalizeResult,
     Proposal,
+    RevisionSet,
+    VoteSet,
 )
 from .structured import call_structured
 
@@ -72,6 +78,12 @@ class FanoutOutcome(BaseModel):
     failures: list[PhaseFailure]
 
 
+class StructuredFanoutOutcome(BaseModel):
+    values: list[Any]
+    quorum: QuorumCheck
+    failures: list[PhaseFailure]
+
+
 class ResolvedClaim(BaseModel):
     claim_id: str
     text: str
@@ -81,9 +93,12 @@ class ResolvedClaim(BaseModel):
 class DeliberationResult(BaseModel):
     run_id: str
     question: str
-    mode: Literal["quick"]
+    mode: Literal["quick", "standard"]
     proposals: list[Proposal]
+    critiques: list[Critique] = Field(default_factory=list)
+    revisions: list[RevisionSet] = Field(default_factory=list)
     normalize: NormalizeResult
+    votes: list[VoteSet] = Field(default_factory=list)
     classifications: dict[str, ClassifyCandidateResult]
     final: FinalAnswer
     quorum: dict[str, QuorumCheck]
@@ -149,6 +164,18 @@ def _stamp_proposal(run_id: str, model_id: str, proposal: Proposal) -> Proposal:
     return proposal.model_copy(update={"model_id": model_id, "claims": claims})
 
 
+def _stamp_critique(model_id: str, critique: Critique) -> Critique:
+    return critique.model_copy(update={"reviewer_model_id": model_id})
+
+
+def _stamp_revision_set(model_id: str, revision_set: RevisionSet) -> RevisionSet:
+    return revision_set.model_copy(update={"model_id": model_id})
+
+
+def _stamp_vote_set(model_id: str, vote_set: VoteSet) -> VoteSet:
+    return vote_set.model_copy(update={"model_id": model_id})
+
+
 async def _fanout_propose(
     *,
     client: CompletionClient,
@@ -187,16 +214,140 @@ async def _fanout_propose(
     return FanoutOutcome(proposals=proposals, quorum=quorum, failures=failures)
 
 
-def _resolved_claims(proposals: list[Proposal]) -> list[ResolvedClaim]:
-    return [
-        ResolvedClaim(
-            claim_id=claim.claim_id,
-            text=claim.text,
-            model_id=proposal.model_id,
-        )
+async def _fanout_structured(
+    *,
+    client: CompletionClient,
+    config: DeliberationConfig,
+    schema: type[T],
+    build_request,
+    stamp,
+) -> StructuredFanoutOutcome:
+    async def call_one(model: str) -> tuple[str, T | Exception]:
+        try:
+            value = await _call_model_structured(
+                client=client,
+                model=model,
+                request=build_request(model),
+                schema=schema,
+                timeout=config.per_model_timeout,
+                max_repair_attempts=config.max_repair_attempts,
+            )
+            return model, stamp(model, value)
+        except Exception as error:  # fan-out records per-model failures
+            return model, error
+
+    results = await asyncio.gather(
+        *(call_one(model) for model in config.analysis_models)
+    )
+    values: list[Any] = []
+    failures: list[PhaseFailure] = []
+    for model, result in results:
+        if isinstance(result, Exception):
+            failures.append(PhaseFailure(model_id=model, message=str(result)))
+        else:
+            values.append(result)
+
+    quorum = check_quorum(len(values), len(config.analysis_models), config.quorum_ratio)
+    return StructuredFanoutOutcome(values=values, quorum=quorum, failures=failures)
+
+
+def _resolved_claims(
+    proposals: list[Proposal], revisions: list[RevisionSet] | None = None
+) -> list[ResolvedClaim]:
+    revision_by_claim_id = {
+        revision.original_claim_id: revision
+        for revision_set in revisions or []
+        for revision in revision_set.revisions
+    }
+    resolved: list[ResolvedClaim] = []
+    for proposal in proposals:
+        for claim in proposal.claims:
+            revision = revision_by_claim_id.get(claim.claim_id)
+            if revision and revision.decision == "withdraw":
+                continue
+            resolved.append(
+                ResolvedClaim(
+                    claim_id=claim.claim_id,
+                    text=(
+                        revision.revised_text
+                        if revision and revision.revised_text
+                        else claim.text
+                    ),
+                    model_id=proposal.model_id,
+                )
+            )
+    return resolved
+
+
+def _reviews_for_model(
+    model_id: str, proposals: list[Proposal], critiques: list[Critique]
+) -> list[dict[str, Any]]:
+    own_claim_ids = {
+        claim.claim_id
+        for proposal in proposals
+        if proposal.model_id == model_id
+        for claim in proposal.claims
+    }
+    reviews: list[dict[str, Any]] = []
+    for critique in critiques:
+        for review in critique.reviews:
+            if review.target_claim_id in own_claim_ids:
+                payload = review.model_dump()
+                payload["reviewer_model_id"] = critique.reviewer_model_id
+                reviews.append(payload)
+    return reviews
+
+
+def _own_claims_for_model(
+    model_id: str, proposals: list[Proposal]
+) -> list[dict[str, Any]]:
+    for proposal in proposals:
+        if proposal.model_id == model_id:
+            return [claim.model_dump(mode="json") for claim in proposal.claims]
+    return []
+
+
+def _position_changes(
+    proposals: list[Proposal], revisions: list[RevisionSet]
+) -> list[dict[str, str]]:
+    original_by_model_and_claim = {
+        (proposal.model_id, claim.claim_id): claim.text
         for proposal in proposals
         for claim in proposal.claims
-    ]
+    }
+    changes: list[dict[str, str]] = []
+    for revision_set in revisions:
+        for revision in revision_set.revisions:
+            if revision.decision == "keep":
+                continue
+            original = original_by_model_and_claim.get(
+                (revision_set.model_id, revision.original_claim_id),
+                revision.original_claim_id,
+            )
+            changed_to = revision.revised_text
+            if changed_to is None:
+                changed_to = (
+                    "(withdrawn)"
+                    if revision.decision == "withdraw"
+                    else "(adopted another model's claim)"
+                )
+            changes.append(
+                {
+                    "model_id": revision_set.model_id,
+                    "changed_from": original,
+                    "changed_to": changed_to,
+                    "reason": revision.reason_for_change,
+                }
+            )
+    return changes
+
+
+def _ballots_by_candidate(votes: list[VoteSet]) -> dict[str, list[Ballot]]:
+    ballots: dict[str, list[Ballot]] = {}
+    for vote_set in votes:
+        for ballot in vote_set.votes:
+            ballots.setdefault(ballot.candidate_id, []).append(ballot)
+    return ballots
 
 
 def _implied_ballots_from_coverage(
@@ -315,3 +466,158 @@ async def run_quick_deliberation(
         quorum={"propose": propose_outcome.quorum},
         failures={"propose": propose_outcome.failures},
     )
+
+
+async def run_standard_deliberation(
+    config: DeliberationConfig, client: CompletionClient
+) -> DeliberationResult:
+    if config.mmd_mode != "standard":
+        raise ValueError("run_standard_deliberation requires mmd_mode='standard'")
+
+    run_id = make_run_id()
+    coordinator = config.coordinator_model or config.analysis_models[0]
+    quorum: dict[str, QuorumCheck] = {}
+    failures: dict[str, list[PhaseFailure]] = {}
+
+    propose_outcome = await _fanout_propose(
+        client=client,
+        config=config,
+        run_id=run_id,
+    )
+    quorum["propose"] = propose_outcome.quorum
+    failures["propose"] = propose_outcome.failures
+    if not propose_outcome.quorum.met:
+        raise QuorumNotMetError(
+            "propose", propose_outcome.quorum, propose_outcome.failures
+        )
+
+    critique_outcome = await _fanout_structured(
+        client=client,
+        config=config,
+        schema=Critique,
+        build_request=lambda model: build_critique_prompt(
+            question=config.question,
+            reviewer_model_id=model,
+            proposals=propose_outcome.proposals,
+        ),
+        stamp=_stamp_critique,
+    )
+    critiques = [
+        value for value in critique_outcome.values if isinstance(value, Critique)
+    ]
+    quorum["critique"] = critique_outcome.quorum
+    failures["critique"] = critique_outcome.failures
+    if not critique_outcome.quorum.met:
+        raise QuorumNotMetError(
+            "critique", critique_outcome.quorum, critique_outcome.failures
+        )
+
+    revise_outcome = await _fanout_structured(
+        client=client,
+        config=config,
+        schema=RevisionSet,
+        build_request=lambda model: build_revise_prompt(
+            question=config.question,
+            model_id=model,
+            own_claims=_own_claims_for_model(model, propose_outcome.proposals),
+            reviews_on_mine=_reviews_for_model(
+                model, propose_outcome.proposals, critiques
+            ),
+        ),
+        stamp=_stamp_revision_set,
+    )
+    revisions = [
+        value for value in revise_outcome.values if isinstance(value, RevisionSet)
+    ]
+    quorum["revise"] = revise_outcome.quorum
+    failures["revise"] = revise_outcome.failures
+    if not revise_outcome.quorum.met:
+        raise QuorumNotMetError(
+            "revise", revise_outcome.quorum, revise_outcome.failures
+        )
+
+    claims = _resolved_claims(propose_outcome.proposals, revisions)
+    claim_payload = [claim.model_dump() for claim in claims]
+    normalize = await _call_model_structured(
+        client=client,
+        model=coordinator,
+        request=build_normalize_prompt(
+            question=config.question,
+            claims=claim_payload,
+        ),
+        schema=NormalizeResult,
+        timeout=config.per_model_timeout,
+        max_repair_attempts=config.max_repair_attempts,
+    )
+
+    vote_outcome = await _fanout_structured(
+        client=client,
+        config=config,
+        schema=VoteSet,
+        build_request=lambda model: build_vote_prompt(
+            question=config.question,
+            model_id=model,
+            candidates=[
+                {"candidate_id": candidate.candidate_id, "text": candidate.text}
+                for candidate in normalize.candidate_claims
+            ],
+        ),
+        stamp=_stamp_vote_set,
+    )
+    votes = [value for value in vote_outcome.values if isinstance(value, VoteSet)]
+    quorum["vote"] = vote_outcome.quorum
+    failures["vote"] = vote_outcome.failures
+    if not vote_outcome.quorum.met:
+        raise QuorumNotMetError("vote", vote_outcome.quorum, vote_outcome.failures)
+
+    ballot_map = _ballots_by_candidate(votes)
+    classifications: dict[str, ClassifyCandidateResult] = {}
+    for candidate in normalize.candidate_claims:
+        classifications[candidate.candidate_id] = classify_candidate(
+            ballot_map.get(candidate.candidate_id, []),
+            expected_voter_count=len(config.analysis_models),
+        )
+
+    strong, qualified, disputed, rejected = _consensus_buckets(
+        normalize, classifications
+    )
+    final = await _call_model_structured(
+        client=client,
+        model=coordinator,
+        request=build_compose_prompt(
+            question=config.question,
+            strong_consensus=strong,
+            qualified_consensus=qualified,
+            disputed=disputed,
+            rejected=rejected,
+            position_changes=_position_changes(propose_outcome.proposals, revisions),
+        ),
+        schema=FinalAnswer,
+        timeout=config.per_model_timeout,
+        max_repair_attempts=config.max_repair_attempts,
+    )
+
+    return DeliberationResult(
+        run_id=run_id,
+        question=config.question,
+        mode="standard",
+        proposals=propose_outcome.proposals,
+        critiques=critiques,
+        revisions=revisions,
+        normalize=normalize,
+        votes=votes,
+        classifications=classifications,
+        final=final,
+        quorum=quorum,
+        failures=failures,
+    )
+
+
+async def run_deliberation(
+    config: DeliberationConfig, client: CompletionClient
+) -> DeliberationResult:
+    if config.mmd_mode == "quick":
+        return await run_quick_deliberation(config, client)
+    if config.mmd_mode == "standard":
+        return await run_standard_deliberation(config, client)
+    raise NotImplementedError(f"unsupported mmd_mode: {config.mmd_mode}")

@@ -30,6 +30,25 @@ def test_provider_returns_openai_compatible_response_with_trace():
     assert response["mmd"]["quorum"]["propose"]["met"] is True
 
 
+def test_provider_supports_standard_mode():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_mode": "standard",
+                "return_trace": True,
+            },
+        )
+    )
+
+    assert _content(response) == "Use a small TypeScript monorepo for this project."
+    assert response["mmd"]["mode"] == "standard"
+    assert len(response["mmd"]["votes"]) == 2
+
+
 def test_provider_requires_analysis_models():
     provider = MMDLiteLLMProvider(client=ScriptedClient())
     with pytest.raises(ValueError):
@@ -54,4 +73,3 @@ def test_provider_rejects_recursive_invocation():
                 },
             )
         )
-
