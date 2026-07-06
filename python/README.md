@@ -23,7 +23,11 @@ model_list:
         - openai/gpt-4.1-mini
         - anthropic/claude-3-5-haiku
       coordinator_model: openai/gpt-4.1-mini
-      mmd_mode: standard
+      preset: balanced
+      mmd_mode: quick
+      max_completion_tokens: 1200
+      temperature: 0.4
+      coordinator_temperature: 0.1
       return_trace: false
 
 litellm_settings:
@@ -61,6 +65,26 @@ payload for application consumption. It includes consensus summary,
 disagreements, model coverage, notable unique points, limitations, and does not
 require an extra model call.
 
+Advanced config is supported for LiteLLM/Fusion parity. `preset=cheap`,
+`balanced`, or `strong` caps the configured panel to 2, 3, or 5 models and sets
+per-model timeout defaults of 30, 60, or 120 seconds; it does not expand hardcoded
+vendor models. `max_analysis_models`, `max_completion_tokens`, panel
+`temperature`, low default `coordinator_temperature`, `reasoning`,
+`model_params`, `analysis_model_params`, and `coordinator_model_params` are
+forwarded to the underlying LiteLLM calls.
+
+Provider-facing errors are typed without requiring the LiteLLM runtime extra:
+invalid request/config errors raise `MMDProviderBadRequestError` with status 400,
+quorum failures raise `MMDProviderQuorumError` with quorum details, and runtime
+failures raise `MMDProviderAPIError` with status 500.
+
+Provider-managed tools are supported as a passthrough. `tools`, `tool_choice`,
+and `max_tool_calls` are forwarded to panel phases by default; set
+`coordinator_tools_enabled=true` to also forward them to outline/normalize/compose
+coordinator phases. Trace and logging payloads include a `tooling` summary with
+availability and limits only; MMD does not yet execute a local function-calling
+tool loop.
+
 ## Proxy smoke test
 
 The LiteLLM Proxy loads `custom_handler` modules relative to the config file, so
@@ -89,6 +113,8 @@ uv run --project python --extra proxy python python/scripts/proxy_real_smoke.py
 
 Optional knobs: `MMD_SMOKE_MODE` (`quick`, `standard`, or `planning`; default
 `quick`), `MMD_SMOKE_QUESTION`, `MMD_SMOKE_PER_MODEL_TIMEOUT`,
-`MMD_SMOKE_HTTP_TIMEOUT`, `MMD_SMOKE_MAX_TOPICS`, `MMD_SMOKE_QUORUM_RATIO`, and
-`MMD_SMOKE_MAX_REPAIR_ATTEMPTS`. If `MMD_SMOKE_ANALYSIS_MODELS` is not set, the
-script exits successfully with a `skipped` JSON payload.
+`MMD_SMOKE_HTTP_TIMEOUT`, `MMD_SMOKE_MAX_TOPICS`, `MMD_SMOKE_QUORUM_RATIO`,
+`MMD_SMOKE_MAX_REPAIR_ATTEMPTS`, `MMD_SMOKE_PRESET`,
+`MMD_SMOKE_MAX_COMPLETION_TOKENS`, `MMD_SMOKE_TEMPERATURE`, and
+`MMD_SMOKE_COORDINATOR_TEMPERATURE`. If `MMD_SMOKE_ANALYSIS_MODELS` is not set,
+the script exits successfully with a `skipped` JSON payload.

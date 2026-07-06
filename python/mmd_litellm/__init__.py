@@ -6,6 +6,12 @@ from .consensus import (
     ConsensusThresholds,
     classify_candidate,
 )
+from .errors import (
+    MMDProviderAPIError,
+    MMDProviderBadRequestError,
+    MMDProviderError,
+    MMDProviderQuorumError,
+)
 from .ids import make_run_id, parse_scoped_id, scoped_id
 from .orchestrator import (
     DeliberationConfig,
@@ -24,6 +30,10 @@ __all__ = [
     "DEFAULT_CONSENSUS_THRESHOLDS",
     "DeliberationConfig",
     "DeliberationResult",
+    "MMDProviderAPIError",
+    "MMDProviderBadRequestError",
+    "MMDProviderError",
+    "MMDProviderQuorumError",
     "QuorumCheck",
     "QuorumNotMetError",
     "check_quorum",

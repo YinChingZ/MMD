@@ -5,8 +5,21 @@ import inspect
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import ValidationError
+
 from .client import LiteLLMCompletionClient
-from .orchestrator import CompletionClient, DeliberationConfig, run_deliberation
+from .errors import (
+    MMDProviderAPIError,
+    MMDProviderBadRequestError,
+    MMDProviderError,
+    MMDProviderQuorumError,
+)
+from .orchestrator import (
+    CompletionClient,
+    DeliberationConfig,
+    QuorumNotMetError,
+    run_deliberation,
+)
 from .response import openai_chat_completion_response
 
 try:
@@ -43,15 +56,36 @@ class MMDLiteLLMProvider(CustomLLM):
 
     async def acompletion(self, *args: Any, **kwargs: Any) -> Any:
         public_model = _extract_model(args, kwargs)
+        try:
+            return await self._acompletion_impl(public_model, kwargs)
+        except MMDProviderError:
+            raise
+        except Exception as error:
+            raise _provider_api_error(public_model, error) from error
+
+    async def _acompletion_impl(self, public_model: str, kwargs: dict[str, Any]) -> Any:
         optional_params = dict(kwargs.get("optional_params") or {})
         for key in (
             "analysis_models",
             "coordinator_model",
+            "preset",
             "mmd_mode",
             "quorum_ratio",
             "per_model_timeout",
             "max_repair_attempts",
             "max_topics",
+            "max_analysis_models",
+            "max_completion_tokens",
+            "temperature",
+            "coordinator_temperature",
+            "reasoning",
+            "tools",
+            "tool_choice",
+            "max_tool_calls",
+            "coordinator_tools_enabled",
+            "model_params",
+            "analysis_model_params",
+            "coordinator_model_params",
             "return_trace",
             "return_analysis",
             "mmd_log_trace",
@@ -60,23 +94,18 @@ class MMDLiteLLMProvider(CustomLLM):
             if key in kwargs:
                 optional_params[key] = kwargs[key]
 
-        depth = optional_params.get("mmd_deliberation_depth", 0)
-        if depth and int(depth) >= 1:
-            raise ValueError("recursive MMD invocation is not allowed")
-
-        question = _extract_user_question(kwargs.get("messages") or [])
-        config = DeliberationConfig(
-            question=question,
-            analysis_models=optional_params.get("analysis_models") or [],
-            coordinator_model=optional_params.get("coordinator_model"),
-            mmd_mode=optional_params.get("mmd_mode", "quick"),
-            quorum_ratio=optional_params.get("quorum_ratio", 0.66),
-            per_model_timeout=optional_params.get("per_model_timeout", 40.0),
-            max_repair_attempts=optional_params.get("max_repair_attempts", 2),
-            max_topics=optional_params.get("max_topics", 8),
-            return_trace=optional_params.get("return_trace", False),
+        config = _build_config(
+            public_model=public_model,
+            kwargs=kwargs,
+            optional_params=optional_params,
         )
-        result = await run_deliberation(config, self.client)
+        try:
+            result = await run_deliberation(config, self.client)
+        except QuorumNotMetError as error:
+            raise _provider_quorum_error(public_model, error) from error
+        except Exception as error:
+            raise _provider_api_error(public_model, error) from error
+
         metadata = result.trace_payload() if config.return_trace else None
         analysis = (
             result.analysis_payload()
@@ -104,6 +133,59 @@ class MMDLiteLLMProvider(CustomLLM):
         return _maybe_litellm_response(response)
 
 
+def _build_config(
+    *,
+    public_model: str,
+    kwargs: dict[str, Any],
+    optional_params: dict[str, Any],
+) -> DeliberationConfig:
+    try:
+        depth = optional_params.get("mmd_deliberation_depth", 0)
+        if depth and int(depth) >= 1:
+            raise ValueError("recursive MMD invocation is not allowed")
+
+        question = _extract_user_question(kwargs.get("messages") or [])
+        return DeliberationConfig(
+            question=question,
+            analysis_models=optional_params.get("analysis_models") or [],
+            coordinator_model=optional_params.get("coordinator_model"),
+            preset=optional_params.get("preset"),
+            mmd_mode=optional_params.get("mmd_mode", "quick"),
+            quorum_ratio=optional_params.get("quorum_ratio", 0.66),
+            per_model_timeout=optional_params.get("per_model_timeout"),
+            max_repair_attempts=optional_params.get("max_repair_attempts", 2),
+            max_topics=optional_params.get("max_topics", 8),
+            max_analysis_models=optional_params.get("max_analysis_models"),
+            max_completion_tokens=optional_params.get("max_completion_tokens"),
+            temperature=optional_params.get("temperature"),
+            coordinator_temperature=optional_params.get(
+                "coordinator_temperature", 0.1
+            ),
+            reasoning=optional_params.get("reasoning"),
+            tools=optional_params.get("tools") or [],
+            tool_choice=optional_params.get("tool_choice"),
+            max_tool_calls=optional_params.get("max_tool_calls"),
+            coordinator_tools_enabled=optional_params.get(
+                "coordinator_tools_enabled", False
+            ),
+            model_params=optional_params.get("model_params") or {},
+            analysis_model_params=optional_params.get("analysis_model_params") or {},
+            coordinator_model_params=optional_params.get(
+                "coordinator_model_params"
+            )
+            or {},
+            return_trace=optional_params.get("return_trace", False),
+        )
+    except MMDProviderError:
+        raise
+    except (TypeError, ValueError, ValidationError) as error:
+        raise MMDProviderBadRequestError(
+            f"invalid MMD provider request: {error}",
+            model=public_model,
+            details={"cause": type(error).__name__},
+        ) from error
+
+
 def _extract_model(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     model = kwargs.get("model")
     if model is None and args:
@@ -128,6 +210,30 @@ def _extract_user_question(messages: list[dict[str, Any]]) -> str:
             if text:
                 return text
     raise ValueError("MMD provider requires at least one user message with text content")
+
+
+def _provider_quorum_error(
+    public_model: str, error: QuorumNotMetError
+) -> MMDProviderQuorumError:
+    return MMDProviderQuorumError(
+        str(error),
+        model=public_model,
+        details={
+            "phase": error.phase,
+            "quorum": error.quorum.model_dump(mode="json"),
+            "failures": [
+                failure.model_dump(mode="json") for failure in error.failures
+            ],
+        },
+    )
+
+
+def _provider_api_error(public_model: str, error: Exception) -> MMDProviderAPIError:
+    return MMDProviderAPIError(
+        f"MMD provider execution failed: {error}",
+        model=public_model,
+        details={"cause": type(error).__name__},
+    )
 
 
 def _maybe_litellm_response(response: dict) -> Any:

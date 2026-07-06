@@ -106,7 +106,7 @@ npm run build   # TypeScript build across all workspaces
 uv run --project python --extra test pytest
 ```
 
-The Python PoC now includes the `mmd/fusion` custom provider shell, Pydantic protocol core, quick mode, standard mode, planning mode, and OpenAI-compatible responses. When `return_trace=true`, the LiteLLM Proxy HTTP response includes provider-specific MMD trace metadata at the top-level `mmd` field with `trace_version: 1`; the default `return_trace=false` path keeps normal `choices[].message.content` unchanged.
+The Python PoC now includes the `mmd/fusion` custom provider shell, Pydantic protocol core, quick mode, standard mode, planning mode, Router-aware internal calls, usage aggregation, first-pass advanced config, typed provider error mapping, first-pass provider-managed tools compatibility, and OpenAI-compatible responses. When `return_trace=true`, the LiteLLM Proxy HTTP response includes provider-specific MMD trace metadata at the top-level `mmd` field with `trace_version: 1`; the default `return_trace=false` path keeps normal `choices[].message.content` unchanged.
 
 Local LiteLLM Proxy HTTP smoke test (scripted mock panel, no real model keys):
 

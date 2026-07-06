@@ -40,11 +40,19 @@ class LiteLLMCompletionClient:
         else:
             acompletion = self.router.acompletion
 
+        call_kwargs = dict(request.litellm_params)
+        metadata = {"mmd_deliberation_depth": 1, **request.meta}
+        request_metadata = call_kwargs.pop("metadata", None)
+        if isinstance(request_metadata, dict):
+            metadata = {**request_metadata, **metadata}
+        if timeout is not None:
+            call_kwargs["timeout"] = timeout
+
         response = await acompletion(
             model=model,
             messages=request.to_messages(),
-            timeout=timeout,
-            metadata={"mmd_deliberation_depth": 1, **request.meta},
+            metadata=metadata,
+            **call_kwargs,
         )
         return CompletionOutput(
             text=_extract_content(response),

@@ -239,12 +239,15 @@ OpenAI-compatible response
 - response `usage` 聚合第一版（含 trace 中的阶段/模型级 usage events 和 usage unavailable 标记）。
 - opt-in `mmd_log_trace` callback/logging payload（默认不返回完整 trace，也不写入日志；开启后写入瘦身审计 trace）。
 - `return_analysis=true` 轻量 `mmd_analysis` payload（与完整 `mmd` trace 分离，面向应用层消费）。
+- Fusion parity config 第一版：`preset` 控制已配置 panel 的模型上限和默认 timeout，支持 `max_analysis_models`、`max_completion_tokens`、panel `temperature`、coordinator 低温默认、`reasoning` 和 provider-specific `model_params` 透传。
+- provider 异常映射第一版：配置/请求错误映射为 `MMDProviderBadRequestError`（400），quorum 失败映射为 `MMDProviderQuorumError`（500，含 phase/quorum/failures），结构化输出耗尽和其他运行期错误映射为 `MMDProviderAPIError`（500）。
+- tools compatibility 第一版：`tools` / `tool_choice` / `max_tool_calls` 可透传给 panel models；`coordinator_tools_enabled=true` 时才透传给 coordinator；trace/logging 只标记 tool availability 和限制，不记录或混入 tool result。
 
 当前缺口：
 
-- preset / auto panel 尚未实现。
-- provider 异常映射和 callback/logging 生产形态还需继续贴近 LiteLLM upstream。
-- tool / web search 尚未实现。
+- auto panel / provider key-aware preset expansion 尚未实现；当前 preset 不硬编码厂商模型，只约束用户已配置的 `analysis_models`。
+- callback/logging 生产形态和异常类命名/构造还需继续贴近 LiteLLM upstream。
+- 只支持 provider-managed tools/web search 参数透传；MMD 自己执行 function-calling tool loop 尚未实现。
 
 ## 6. 接下来开发主线
 
@@ -318,6 +321,8 @@ OpenAI-compatible response
 - `reasoning` / provider-specific params 可透传。
 - mode-specific timeout defaults。
 
+第一版已实现：`preset` 作为本地配置 preset，不展开具体厂商模型；`cheap/balanced/strong` 分别把已配置 `analysis_models` 截断到 2/3/5 个，并给出 30/60/120 秒的 per-model timeout 默认值。未设置 preset 时，timeout 默认按 mode 取 `quick=40s`、`standard=90s`、`planning=120s`。`max_completion_tokens`、`reasoning`、全局 `model_params`、`analysis_model_params` 和 `coordinator_model_params` 会通过 LiteLLM client 透传到底层 panel/coordinator 调用。
+
 ### M2'.5 Tool / web search compatibility
 
 目标：补齐 Fusion 泛用性的最大缺口。
@@ -328,6 +333,8 @@ OpenAI-compatible response
 - 可配置 coordinator 是否可用 tools。
 - max_tool_calls 或等价限制。
 - trace 中标记 tool availability，而不是把 tool result 混入不可追溯正文。
+
+第一版已实现：`tools`、`tool_choice`、`max_tool_calls` 默认只透传给 panel 阶段（propose/critique/revise/vote）；`coordinator_tools_enabled=true` 时也透传给 outline/normalize/compose/section_compose 等 coordinator 阶段。`return_trace=true` 和 `mmd_log_trace=true` 的 payload 都包含 `tooling` 摘要，仅记录 enabled_for_panel、enabled_for_coordinator、tool_count、tool_choice、max_tool_calls，不包含任何 tool result。当前边界是 provider-managed tools/web search；普通 function-calling 需要应用侧或 LiteLLM/provider 完成工具执行，MMD 还不自建 tool loop。
 
 ### M2'.6 Upstream readiness
 
@@ -455,10 +462,10 @@ coordinator_model: openrouter/deepseek/deepseek-v4-pro
 
 按当前状态，下一步不是继续讨论定位，而是进入工程主线：
 
-1. Advanced config：preset、预算/熔断、max token 限制。
-2. provider 异常映射和 callback/logging upstream 形态清理。
-3. 跑通 mock Proxy smoke 和真实 OpenRouter quick smoke。
-4. Upstream readiness：配置字段、目录和测试形态清理。
+1. callback/logging upstream 形态清理，并决定 typed MMD provider errors 如何贴到 LiteLLM `BadRequestError` / `APIError`。
+2. Upstream readiness：配置字段、目录和测试形态清理，决定 PR 还是 external provider package。
+3. 补真实模型覆盖：advanced config + tools compatibility + OpenRouter quick/standard/planning smoke。
+4. provider key-aware preset expansion / auto panel。
 
 Router-first 和 usage 聚合已把 MMD 从“能通过 LiteLLM custom provider 调用”推进到“LiteLLM-native Fusion replacement”的轨道上；接下来重点是生产审计、默认体验和 upstream 形态。
 

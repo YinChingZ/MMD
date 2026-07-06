@@ -73,11 +73,19 @@ def main() -> None:
     mode = os.environ.get("MMD_SMOKE_MODE", "quick")
     if mode not in {"quick", "standard", "planning"}:
         raise ValueError("MMD_SMOKE_MODE must be quick, standard, or planning")
+    preset = os.environ.get("MMD_SMOKE_PRESET")
+    if preset is not None and preset not in {"cheap", "balanced", "strong"}:
+        raise ValueError("MMD_SMOKE_PRESET must be cheap, balanced, or strong")
 
-    per_model_timeout = _float_env("MMD_SMOKE_PER_MODEL_TIMEOUT", 120)
+    per_model_timeout = _optional_float_env("MMD_SMOKE_PER_MODEL_TIMEOUT")
+    if per_model_timeout is None and preset is None:
+        per_model_timeout = 120
     max_repair_attempts = _int_env("MMD_SMOKE_MAX_REPAIR_ATTEMPTS", 2)
     quorum_ratio = _float_env("MMD_SMOKE_QUORUM_RATIO", 0.66)
     max_topics = _int_env("MMD_SMOKE_MAX_TOPICS", 3)
+    max_completion_tokens = _optional_int_env("MMD_SMOKE_MAX_COMPLETION_TOKENS")
+    temperature = _optional_float_env("MMD_SMOKE_TEMPERATURE")
+    coordinator_temperature = _optional_float_env("MMD_SMOKE_COORDINATOR_TEMPERATURE")
     request_timeout = _float_env("MMD_SMOKE_HTTP_TIMEOUT", 600)
     question = os.environ.get(
         "MMD_SMOKE_QUESTION",
@@ -96,11 +104,15 @@ def main() -> None:
         model_name=model_name,
         analysis_models=analysis_models,
         coordinator_model=coordinator_model,
+        preset=preset,
         mode=mode,
         quorum_ratio=quorum_ratio,
         per_model_timeout=per_model_timeout,
         max_repair_attempts=max_repair_attempts,
         max_topics=max_topics,
+        max_completion_tokens=max_completion_tokens,
+        temperature=temperature,
+        coordinator_temperature=coordinator_temperature,
     )
     with tempfile.TemporaryDirectory(prefix="mmd-real-smoke-") as temp_dir:
         config_path = Path(temp_dir) / "litellm_real_smoke.yaml"
@@ -213,6 +225,20 @@ def _int_env(name: str, default: int) -> int:
     return int(value)
 
 
+def _optional_float_env(name: str) -> float | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_int_env(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    return int(value)
+
+
 def _yaml_list(values: list[str], indent: int) -> list[str]:
     prefix = " " * indent
     return [f"{prefix}- {_yaml_scalar(value)}" for value in values]
@@ -227,11 +253,15 @@ def _config_yaml(
     model_name: str,
     analysis_models: list[str],
     coordinator_model: str,
+    preset: str | None,
     mode: str,
     quorum_ratio: float,
-    per_model_timeout: float,
+    per_model_timeout: float | None,
     max_repair_attempts: int,
     max_topics: int,
+    max_completion_tokens: int | None,
+    temperature: float | None,
+    coordinator_temperature: float | None,
 ) -> str:
     lines = [
         "model_list:",
@@ -241,11 +271,27 @@ def _config_yaml(
         "      analysis_models:",
         *_yaml_list(analysis_models, 8),
         f"      coordinator_model: {_yaml_scalar(coordinator_model)}",
+        *([f"      preset: {_yaml_scalar(preset)}"] if preset is not None else []),
         f"      mmd_mode: {_yaml_scalar(mode)}",
         f"      quorum_ratio: {quorum_ratio}",
-        f"      per_model_timeout: {per_model_timeout}",
+        *(
+            [f"      per_model_timeout: {per_model_timeout}"]
+            if per_model_timeout is not None
+            else []
+        ),
         f"      max_repair_attempts: {max_repair_attempts}",
         f"      max_topics: {max_topics}",
+        *(
+            [f"      max_completion_tokens: {max_completion_tokens}"]
+            if max_completion_tokens is not None
+            else []
+        ),
+        *([f"      temperature: {temperature}"] if temperature is not None else []),
+        *(
+            [f"      coordinator_temperature: {coordinator_temperature}"]
+            if coordinator_temperature is not None
+            else []
+        ),
         "      return_trace: true",
         "",
         "litellm_settings:",

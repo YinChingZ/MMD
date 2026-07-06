@@ -6,10 +6,16 @@ model_list:
         - openai/gpt-4.1-mini
         - anthropic/claude-3-5-haiku
       coordinator_model: openai/gpt-4.1-mini
-      mmd_mode: standard
+      preset: balanced
+      mmd_mode: quick
       quorum_ratio: 0.66
-      per_model_timeout: 40
       max_repair_attempts: 2
+      max_completion_tokens: 1200
+      temperature: 0.4
+      coordinator_temperature: 0.1
+      model_params:
+        extra_body:
+          mmd_example: true
       return_trace: false
 
 litellm_settings:

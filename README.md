@@ -99,7 +99,7 @@ npm run build   # 各 workspace 的 TypeScript 构建
 uv run --project python --extra test pytest
 ```
 
-当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）、planning mode（Outline → 按 topic 并行 standard → Section Compose）、Router-aware 内部调用、usage 聚合、opt-in `return_analysis` payload、opt-in `mmd_log_trace` callback payload 和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
+当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）、planning mode（Outline → 按 topic 并行 standard → Section Compose）、Router-aware 内部调用、usage 聚合、advanced config 第一版、typed provider error mapping、provider-managed tools compatibility 第一版、opt-in `return_analysis` payload、opt-in `mmd_log_trace` callback payload 和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
 本地 LiteLLM Proxy HTTP smoke（使用 scripted mock panel，无需真实模型 key）：
 

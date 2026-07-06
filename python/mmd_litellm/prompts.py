@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .schemas import (
     Critique,
@@ -22,12 +22,20 @@ class CompletionRequest(BaseModel):
     system_prompt: str
     user_prompt: str
     meta: dict[str, Any]
+    litellm_params: dict[str, Any] = Field(default_factory=dict)
 
     def to_messages(self) -> list[dict[str, str]]:
         return [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": self.user_prompt},
         ]
+
+    def with_litellm_params(self, params: dict[str, Any]) -> CompletionRequest:
+        if not params:
+            return self
+        return self.model_copy(
+            update={"litellm_params": {**self.litellm_params, **params}}
+        )
 
 
 def describe_schema(schema: type[BaseModel], name: str) -> str:

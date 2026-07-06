@@ -37,6 +37,28 @@ from .schemas import (
 from .structured import call_structured
 
 T = TypeVar("T", bound=BaseModel)
+MMDMode = Literal["quick", "standard", "planning"]
+PresetName = Literal["cheap", "balanced", "strong"]
+PANEL_PHASES = {"propose", "critique", "revise", "vote"}
+MODE_TIMEOUT_DEFAULTS: dict[str, float] = {
+    "quick": 40.0,
+    "standard": 90.0,
+    "planning": 120.0,
+}
+PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
+    "cheap": {
+        "max_analysis_models": 2,
+        "per_model_timeout": 30.0,
+    },
+    "balanced": {
+        "max_analysis_models": 3,
+        "per_model_timeout": 60.0,
+    },
+    "strong": {
+        "max_analysis_models": 5,
+        "per_model_timeout": 120.0,
+    },
+}
 
 
 class CompletionClient(Protocol):
@@ -50,15 +72,50 @@ class DeliberationConfig(BaseModel):
     question: str = Field(min_length=1)
     analysis_models: list[str] = Field(min_length=1)
     coordinator_model: str | None = None
-    mmd_mode: Literal["quick", "standard", "planning"] = "quick"
+    preset: PresetName | None = None
+    mmd_mode: MMDMode = "quick"
     quorum_ratio: float = Field(default=0.66, gt=0, le=1)
-    per_model_timeout: float | None = Field(default=40.0, gt=0)
+    per_model_timeout: float | None = Field(default=None, gt=0)
     max_repair_attempts: int = Field(default=2, ge=0)
     max_topics: int = Field(default=8, ge=1, le=8)
+    max_analysis_models: int = Field(default=8, ge=1, le=8)
+    max_completion_tokens: int | None = Field(default=None, gt=0)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    coordinator_temperature: float | None = Field(default=0.1, ge=0, le=2)
+    reasoning: Any | None = None
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    tool_choice: Any | None = None
+    max_tool_calls: int | None = Field(default=None, ge=0)
+    coordinator_tools_enabled: bool = False
+    model_params: dict[str, Any] = Field(default_factory=dict)
+    analysis_model_params: dict[str, Any] = Field(default_factory=dict)
+    coordinator_model_params: dict[str, Any] = Field(default_factory=dict)
     return_trace: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_advanced_config_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        values = dict(data)
+        preset = values.get("preset")
+        preset_defaults = PRESET_DEFAULTS.get(preset, {})
+        for key, value in preset_defaults.items():
+            if values.get(key) is None:
+                values[key] = value
+        if values.get("max_analysis_models") is None:
+            values.pop("max_analysis_models", None)
+
+        mode = values.get("mmd_mode") or "quick"
+        if values.get("per_model_timeout") is None:
+            values["per_model_timeout"] = MODE_TIMEOUT_DEFAULTS.get(
+                mode, MODE_TIMEOUT_DEFAULTS["quick"]
+            )
+        return values
+
     @model_validator(mode="after")
-    def reject_recursive_models(self) -> DeliberationConfig:
+    def validate_and_limit_models(self) -> DeliberationConfig:
         configured = [*self.analysis_models]
         if self.coordinator_model:
             configured.append(self.coordinator_model)
@@ -72,12 +129,60 @@ class DeliberationConfig(BaseModel):
                 "analysis/coordinator models must be real base models, not MMD aliases: "
                 + ", ".join(recursive)
             )
+        if len(self.analysis_models) > self.max_analysis_models:
+            self.analysis_models = self.analysis_models[: self.max_analysis_models]
         return self
+
+    def call_params_for_phase(self, phase: str) -> dict[str, Any]:
+        params = dict(self.model_params)
+        if self.max_completion_tokens is not None:
+            params["max_completion_tokens"] = self.max_completion_tokens
+        if self.reasoning is not None:
+            params["reasoning"] = self.reasoning
+
+        if phase in PANEL_PHASES:
+            if self.temperature is not None:
+                params["temperature"] = self.temperature
+            params.update(self.analysis_model_params)
+        else:
+            if self.coordinator_temperature is not None:
+                params["temperature"] = self.coordinator_temperature
+            params.update(self.coordinator_model_params)
+
+        if self.tools and (
+            phase in PANEL_PHASES or self.coordinator_tools_enabled
+        ):
+            params["tools"] = self.tools
+            if self.tool_choice is not None:
+                params["tool_choice"] = self.tool_choice
+            if self.max_tool_calls is not None:
+                params["max_tool_calls"] = self.max_tool_calls
+
+        return {key: value for key, value in params.items() if value is not None}
+
+    def tool_trace_info(self) -> ToolTraceInfo:
+        return ToolTraceInfo(
+            enabled_for_panel=bool(self.tools),
+            enabled_for_coordinator=bool(
+                self.tools and self.coordinator_tools_enabled
+            ),
+            tool_count=len(self.tools),
+            tool_choice=self.tool_choice,
+            max_tool_calls=self.max_tool_calls,
+        )
 
 
 class PhaseFailure(BaseModel):
     model_id: str
     message: str
+
+
+class ToolTraceInfo(BaseModel):
+    enabled_for_panel: bool = False
+    enabled_for_coordinator: bool = False
+    tool_count: int = 0
+    tool_choice: Any | None = None
+    max_tool_calls: int | None = None
 
 
 class UsageEvent(BaseModel):
@@ -201,7 +306,7 @@ class FailedTopic(BaseModel):
 class DeliberationResult(BaseModel):
     run_id: str
     question: str
-    mode: Literal["quick", "standard", "planning"]
+    mode: MMDMode
     proposals: list[Proposal]
     critiques: list[Critique] = Field(default_factory=list)
     revisions: list[RevisionSet] = Field(default_factory=list)
@@ -216,6 +321,7 @@ class DeliberationResult(BaseModel):
     failed_topics: list[FailedTopic] = Field(default_factory=list)
     plan_document: PlanDocument | None = None
     usage: UsageSummary = Field(default_factory=UsageSummary)
+    tooling: ToolTraceInfo = Field(default_factory=ToolTraceInfo)
 
     def trace_payload(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"final"}, exclude_none=True)
@@ -248,6 +354,7 @@ class DeliberationResult(BaseModel):
                 for phase, failures in self.failures.items()
             },
             "usage": self.usage.model_dump(mode="json"),
+            "tooling": self.tooling.model_dump(mode="json", exclude_none=True),
         }
         if self.topics:
             payload["topics"] = [
@@ -420,12 +527,15 @@ async def _call_model_structured(
     schema: type[T],
     timeout: float | None,
     max_repair_attempts: int,
+    call_params: dict[str, Any] | None = None,
 ) -> T:
+    base_request = request.with_litellm_params(call_params or {})
+
     async def complete(repair_note: str | None) -> str:
-        next_request = request
+        next_request = base_request
         if repair_note:
-            next_request = request.model_copy(
-                update={"user_prompt": f"{request.user_prompt}\n\n{repair_note}"}
+            next_request = base_request.model_copy(
+                update={"user_prompt": f"{base_request.user_prompt}\n\n{repair_note}"}
             )
         output = await client.acomplete(model, next_request, timeout=timeout)
         return coerce_completion_output(output).text
@@ -489,6 +599,7 @@ async def _fanout_propose(
                 schema=Proposal,
                 timeout=config.per_model_timeout,
                 max_repair_attempts=config.max_repair_attempts,
+                call_params=config.call_params_for_phase("propose"),
             )
             return model, _stamp_proposal(
                 run_id, model, proposal, topic.topic_id if topic else None
@@ -523,13 +634,17 @@ async def _fanout_structured(
 ) -> StructuredFanoutOutcome:
     async def call_one(model: str) -> tuple[str, T | Exception]:
         try:
+            request = build_request(model)
             value = await _call_model_structured(
                 client=client,
                 model=model,
-                request=build_request(model),
+                request=request,
                 schema=schema,
                 timeout=config.per_model_timeout,
                 max_repair_attempts=config.max_repair_attempts,
+                call_params=config.call_params_for_phase(
+                    str(request.meta.get("phase", "unknown"))
+                ),
             )
             return model, stamp(model, value)
         except Exception as error:  # fan-out records per-model failures
@@ -822,6 +937,7 @@ async def run_quick_deliberation(
         schema=NormalizeResult,
         timeout=config.per_model_timeout,
         max_repair_attempts=config.max_repair_attempts,
+        call_params=config.call_params_for_phase("normalize"),
     )
 
     claims_by_id = {claim.claim_id: claim for claim in claims}
@@ -850,6 +966,7 @@ async def run_quick_deliberation(
         schema=FinalAnswer,
         timeout=config.per_model_timeout,
         max_repair_attempts=config.max_repair_attempts,
+        call_params=config.call_params_for_phase("compose"),
     )
 
     return DeliberationResult(
@@ -863,6 +980,7 @@ async def run_quick_deliberation(
         quorum={"propose": propose_outcome.quorum},
         failures={"propose": propose_outcome.failures},
         usage=usage_tracker.summary(),
+        tooling=config.tool_trace_info(),
     )
 
 
@@ -948,6 +1066,7 @@ async def run_standard_deliberation(
         schema=NormalizeResult,
         timeout=config.per_model_timeout,
         max_repair_attempts=config.max_repair_attempts,
+        call_params=config.call_params_for_phase("normalize"),
     )
 
     vote_outcome = await _fanout_structured(
@@ -995,6 +1114,7 @@ async def run_standard_deliberation(
         schema=FinalAnswer,
         timeout=config.per_model_timeout,
         max_repair_attempts=config.max_repair_attempts,
+        call_params=config.call_params_for_phase("compose"),
     )
 
     return DeliberationResult(
@@ -1011,6 +1131,7 @@ async def run_standard_deliberation(
         quorum=quorum,
         failures=failures,
         usage=usage_tracker.summary(),
+        tooling=config.tool_trace_info(),
     )
 
 
@@ -1097,6 +1218,7 @@ async def _run_topic_deliberation(
         schema=NormalizeResult,
         timeout=config.per_model_timeout,
         max_repair_attempts=config.max_repair_attempts,
+        call_params=config.call_params_for_phase("normalize"),
     )
 
     vote_outcome = await _fanout_structured(
@@ -1161,6 +1283,7 @@ async def run_planning_deliberation(
         schema=OutlineResult,
         timeout=config.per_model_timeout,
         max_repair_attempts=config.max_repair_attempts,
+        call_params=config.call_params_for_phase("outline"),
     )
 
     topic_outcomes = await asyncio.gather(
@@ -1213,6 +1336,7 @@ async def run_planning_deliberation(
             schema=SectionAnswer,
             timeout=config.per_model_timeout,
             max_repair_attempts=config.max_repair_attempts,
+            call_params=config.call_params_for_phase("section_compose"),
         )
         return _stamp_section_answer(topic_result.topic, section)
 
@@ -1250,6 +1374,7 @@ async def run_planning_deliberation(
         failed_topics=failed_topics,
         plan_document=plan_document,
         usage=usage_tracker.summary(),
+        tooling=config.tool_trace_info(),
     )
 
 

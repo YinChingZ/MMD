@@ -3,6 +3,11 @@ import asyncio
 import pytest
 
 from mmd_litellm.client import TokenUsage
+from mmd_litellm.errors import (
+    MMDProviderAPIError,
+    MMDProviderBadRequestError,
+    MMDProviderQuorumError,
+)
 from mmd_litellm.litellm_provider import MMDLiteLLMProvider
 from mmd_litellm.prompts import CompletionRequest
 from tests.test_orchestrator import ScriptedClient, UsageScriptedClient
@@ -291,6 +296,123 @@ def test_provider_uses_router_when_client_is_not_injected():
     ]
 
 
+def test_provider_forwards_advanced_config_to_router_calls():
+    router = FakeRouter()
+    provider = MMDLiteLLMProvider(router=router)
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": [
+                    "router/model-a",
+                    "router/model-b",
+                    "router/model-c",
+                ],
+                "coordinator_model": "router/coordinator",
+                "preset": "cheap",
+                "max_completion_tokens": 321,
+                "temperature": 0.8,
+                "reasoning": {"effort": "low"},
+                "model_params": {"extra_body": {"route": "mmd"}},
+                "analysis_model_params": {"top_p": 0.9},
+                "coordinator_model_params": {"top_p": 0.2},
+            },
+        )
+    )
+
+    assert _content(response) == "Use a small TypeScript monorepo for this project."
+    assert [call["model"] for call in router.calls] == [
+        "router/model-a",
+        "router/model-b",
+        "router/coordinator",
+        "router/coordinator",
+    ]
+    assert all(call["timeout"] == 30.0 for call in router.calls)
+    for call in router.calls[:2]:
+        assert call["temperature"] == 0.8
+        assert call["top_p"] == 0.9
+        assert call["max_completion_tokens"] == 321
+        assert call["reasoning"] == {"effort": "low"}
+        assert call["extra_body"] == {"route": "mmd"}
+    for call in router.calls[2:]:
+        assert call["temperature"] == 0.1
+        assert call["top_p"] == 0.2
+        assert call["max_completion_tokens"] == 321
+        assert call["reasoning"] == {"effort": "low"}
+        assert call["extra_body"] == {"route": "mmd"}
+
+
+def test_provider_forwards_tools_to_panel_and_trace_only_marks_availability():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Provider-managed web search.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    router = FakeRouter()
+    provider = MMDLiteLLMProvider(router=router)
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            tools=[tool],
+            tool_choice="auto",
+            optional_params={
+                "analysis_models": ["router/model-a", "router/model-b"],
+                "coordinator_model": "router/coordinator",
+                "max_tool_calls": 2,
+                "return_trace": True,
+            },
+        )
+    )
+
+    for call in router.calls[:2]:
+        assert call["tools"] == [tool]
+        assert call["tool_choice"] == "auto"
+        assert call["max_tool_calls"] == 2
+    for call in router.calls[2:]:
+        assert "tools" not in call
+        assert "tool_choice" not in call
+        assert "max_tool_calls" not in call
+    assert response["mmd"]["tooling"] == {
+        "enabled_for_panel": True,
+        "enabled_for_coordinator": False,
+        "tool_count": 1,
+        "tool_choice": "auto",
+        "max_tool_calls": 2,
+    }
+
+
+def test_provider_can_forward_tools_to_coordinator_when_enabled():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Provider-managed web search.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    router = FakeRouter()
+    provider = MMDLiteLLMProvider(router=router)
+    asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["router/model-a", "router/model-b"],
+                "coordinator_model": "router/coordinator",
+                "tools": [tool],
+                "coordinator_tools_enabled": True,
+            },
+        )
+    )
+
+    assert all(call["tools"] == [tool] for call in router.calls)
+
+
 def test_provider_prefers_explicit_client_over_router():
     router = FakeRouter()
     provider = MMDLiteLLMProvider(
@@ -365,7 +487,7 @@ def test_provider_return_analysis_supports_planning_topics():
 
 def test_provider_requires_analysis_models():
     provider = MMDLiteLLMProvider(client=ScriptedClient())
-    with pytest.raises(ValueError):
+    with pytest.raises(MMDProviderBadRequestError) as exc_info:
         asyncio.run(
             provider.acompletion(
                 model="mmd/fusion",
@@ -373,10 +495,15 @@ def test_provider_requires_analysis_models():
             )
         )
 
+    error = exc_info.value
+    assert error.status_code == 400
+    assert error.error_payload()["type"] == "bad_request_error"
+    assert error.error_payload()["model"] == "mmd/fusion"
+
 
 def test_provider_rejects_recursive_invocation():
     provider = MMDLiteLLMProvider(client=ScriptedClient())
-    with pytest.raises(ValueError):
+    with pytest.raises(MMDProviderBadRequestError) as exc_info:
         asyncio.run(
             provider.acompletion(
                 model="mmd/fusion",
@@ -387,3 +514,56 @@ def test_provider_rejects_recursive_invocation():
                 },
             )
         )
+
+    assert exc_info.value.status_code == 400
+    assert "recursive MMD invocation is not allowed" in str(exc_info.value)
+
+
+def test_provider_maps_quorum_failure_to_provider_api_error():
+    provider = MMDLiteLLMProvider(
+        client=ScriptedClient(fail_models={"model_b", "model_c"})
+    )
+    with pytest.raises(MMDProviderQuorumError) as exc_info:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b", "model_c"],
+                },
+            )
+        )
+
+    error = exc_info.value
+    payload = error.error_payload()
+    assert error.status_code == 500
+    assert payload["code"] == "mmd_quorum_not_met"
+    assert payload["mmd"]["phase"] == "propose"
+    assert payload["mmd"]["quorum"]["respondent_count"] == 1
+    assert payload["mmd"]["quorum"]["required"] == 2
+    assert [failure["model_id"] for failure in payload["mmd"]["failures"]] == [
+        "model_b",
+        "model_c",
+    ]
+
+
+def test_provider_maps_structured_output_failure_to_api_error():
+    provider = MMDLiteLLMProvider(
+        client=UsageScriptedClient(invalid_json_once={("normalize", "model_a")})
+    )
+    with pytest.raises(MMDProviderAPIError) as exc_info:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                    "max_repair_attempts": 0,
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.status_code == 500
+    assert error.error_payload()["code"] == "mmd_api_error"
+    assert error.error_payload()["mmd"]["cause"] == "ValueError"

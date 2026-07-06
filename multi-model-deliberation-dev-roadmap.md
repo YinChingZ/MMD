@@ -11,7 +11,7 @@
 | M1 CLI 原型 | ✅ 完成 | `apps/cli`，mock provider 和真实 OpenAI 兼容 API 都跑通过 |
 | M1.5 收敛验证关卡 | ✅ 完成，Go 决策 | 见下方"M1.5 实际结果" |
 | v0.2 Planning Mode（长输出支持） | ✅ 完成 | 不在原路线图里，M1.5 之后新增，见下方专门一节 |
-| M2' LiteLLM-first 集成转向 | 进行中 | 主线已明确为 open-source Fusion replacement；已落地 Python/Pydantic PoC、quick/standard/planning mode、LiteLLM custom provider、mock Proxy HTTP smoke、真实模型 Proxy smoke、versioned `return_trace` contract、Router-aware client、usage 聚合、opt-in `mmd_log_trace` callback payload 和 opt-in `return_analysis` payload；下一步是 advanced config、upstream readiness |
+| M2' LiteLLM-first 集成转向 | 进行中 | 主线已明确为 open-source Fusion replacement；已落地 Python/Pydantic PoC、quick/standard/planning mode、LiteLLM custom provider、mock Proxy HTTP smoke、真实模型 Proxy smoke、versioned `return_trace` contract、Router-aware client、usage 聚合、opt-in `mmd_log_trace` callback payload、opt-in `return_analysis` payload、advanced config 第一版、typed provider error mapping 和 provider-managed tools compatibility 第一版；下一步是 callback/logging upstream 形态、真实模型覆盖和 upstream readiness |
 | M3 Web MVP | 暂停主线 | 降级为后续 demo / trace viewer，不再作为下一阶段核心目标 |
 | M4 产品化基础 | 暂停主线 | 优先复用 LiteLLM Proxy 的 key、预算、日志、路由能力 |
 
@@ -195,12 +195,12 @@ M0、M1、M1.5 均已完成并给出 Go 决策，v0.2 Planning Mode 作为 TypeS
 
 接下来按以下顺序推进：
 
-1. **Advanced config + upstream 清理**：Router-aware 内部调用、usage 聚合、opt-in callback trace 和轻量 `return_analysis` 已落地，下一步补 preset/预算/熔断/max token、provider 异常映射和 callback/logging upstream 形态。
-2. **Advanced config**：补 preset、预算/熔断、max token 限制和 planning 真实模型验证。
-3. **Upstream readiness**：整理目录、命名、错误类型、配置字段和测试形态，决定提交 LiteLLM upstream PR 还是先发布 external custom provider package。
+1. **Upstream 清理**：Router-aware 内部调用、usage 聚合、opt-in callback trace、轻量 `return_analysis`、advanced config 第一版和 typed provider error mapping 已落地，下一步整理 callback/logging upstream 形态和 LiteLLM 原生异常适配边界。
+2. **真实模型覆盖**：补 advanced config + tools compatibility 的 OpenRouter quick/standard/planning smoke。
+3. **Upstream readiness**：整理目录、命名、配置字段和测试形态，决定提交 LiteLLM upstream PR 还是先发布 external custom provider package。
 
 其他已知的、不阻塞 M2' 但值得记录的后续待办：
 - `STANDARD_BUDGET`/`PLANNING_BUDGET` 的 p50/p95 目标数字还是 M0 阶段凭空猜的，需要用已经收集到的真实耗时数据回填。
 - disputed 分类路径已经在 planning 模式的真实数据里被触发过一次（后端技术栈选型的 Java vs Node.js 分歧，见上文 v0.2 一节），且是跨厂商组合下出现的，同厂商组合没出现过。目前的结论：**问题的抽象层级比模型组合更重要**——宽泛的主观辩论（996、球星之争）即使换了跨厂商模型也趋向收敛，但具体到有明确技术权衡的实现细节（该用哪个框架/工具），模型之间确实会产生有论据支撑的真实分歧。这对 M2' 有产品含义：LiteLLM 版应优先把 `planning` 定位成技术规划/架构决策增强能力，而不是只宣传“多个模型吵架”这种粗粒度场景。
-- LiteLLM 集成版已明确第一版 trace 返回位置：默认 response 保持 OpenAI-compatible；`return_trace=true` 时顶层 `mmd` metadata 返回 claim/review/vote/classification/quorum/failure trace；`mmd_log_trace=true` 时把瘦身审计 payload 写入 callback/logging。后续还需要把 callback/logging 形态继续贴近 LiteLLM upstream，便于生产环境审计。
+- LiteLLM 集成版已明确第一版 trace 返回位置：默认 response 保持 OpenAI-compatible；`return_trace=true` 时顶层 `mmd` metadata 返回 claim/review/vote/classification/quorum/failure trace；`mmd_log_trace=true` 时把瘦身审计 payload 写入 callback/logging。Advanced config 第一版已支持 preset/模型上限/max token/temperature/reasoning/provider-specific params 透传；typed provider error mapping 已区分 bad request、quorum 和运行期 API error；provider-managed tools compatibility 第一版已支持 tools/tool_choice/max_tool_calls 透传和 trace 标记。后续还需要把 callback/logging 形态继续贴近 LiteLLM upstream，便于生产环境审计。
 - OpenRouter Fusion 默认 panel/judge 可使用 web_search/web_fetch，MMD 当前仍主要是纯推理协议。进入 LiteLLM 后，tool/web search 应作为 M2'.4 之后的增强方向。

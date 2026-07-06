@@ -331,6 +331,119 @@ def test_config_rejects_recursive_mmd_models():
         )
 
 
+def test_config_applies_preset_model_cap_and_timeout_defaults():
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b", "model_c", "model_d"],
+        preset="balanced",
+    )
+
+    assert config.analysis_models == ["model_a", "model_b", "model_c"]
+    assert config.max_analysis_models == 3
+    assert config.per_model_timeout == 60.0
+
+
+def test_config_uses_mode_specific_timeout_without_preset():
+    quick = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+    )
+    standard = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        mmd_mode="standard",
+    )
+    planning = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        mmd_mode="planning",
+    )
+
+    assert quick.per_model_timeout == 40.0
+    assert standard.per_model_timeout == 90.0
+    assert planning.per_model_timeout == 120.0
+
+
+def test_config_builds_role_specific_litellm_call_params():
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        max_completion_tokens=512,
+        temperature=0.7,
+        reasoning={"effort": "low"},
+        model_params={"extra_body": {"provider_flag": True}},
+        analysis_model_params={"top_p": 0.9},
+        coordinator_model_params={"seed": 42},
+    )
+
+    assert config.call_params_for_phase("propose") == {
+        "extra_body": {"provider_flag": True},
+        "max_completion_tokens": 512,
+        "reasoning": {"effort": "low"},
+        "temperature": 0.7,
+        "top_p": 0.9,
+    }
+    assert config.call_params_for_phase("compose") == {
+        "extra_body": {"provider_flag": True},
+        "max_completion_tokens": 512,
+        "reasoning": {"effort": "low"},
+        "temperature": 0.1,
+        "seed": 42,
+    }
+
+
+def test_config_forwards_tools_to_panel_by_default():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search provider-managed context.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        tools=[tool],
+        tool_choice="auto",
+        max_tool_calls=2,
+    )
+
+    panel_params = config.call_params_for_phase("propose")
+    coordinator_params = config.call_params_for_phase("compose")
+    assert panel_params["tools"] == [tool]
+    assert panel_params["tool_choice"] == "auto"
+    assert panel_params["max_tool_calls"] == 2
+    assert "tools" not in coordinator_params
+    assert config.tool_trace_info().model_dump(exclude_none=True) == {
+        "enabled_for_panel": True,
+        "enabled_for_coordinator": False,
+        "tool_count": 1,
+        "tool_choice": "auto",
+        "max_tool_calls": 2,
+    }
+
+
+def test_config_can_enable_tools_for_coordinator():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search provider-managed context.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        tools=[tool],
+        coordinator_tools_enabled=True,
+    )
+
+    assert config.call_params_for_phase("compose")["tools"] == [tool]
+    assert config.tool_trace_info().enabled_for_coordinator is True
+
+
 def test_standard_mode_runs_full_protocol_with_explicit_votes():
     result = asyncio.run(
         run_standard_deliberation(
