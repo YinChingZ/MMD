@@ -99,7 +99,7 @@ npm run build   # 各 workspace 的 TypeScript 构建
 uv run --project python --extra test pytest
 ```
 
-当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）、planning mode（Outline → 按 topic 并行 standard → Section Compose）和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
+当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）、planning mode（Outline → 按 topic 并行 standard → Section Compose）、Router-aware 内部调用、usage 聚合和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
 
 本地 LiteLLM Proxy HTTP smoke（使用 scripted mock panel，无需真实模型 key）：
 
@@ -115,7 +115,7 @@ export MMD_SMOKE_COORDINATOR_MODEL="openrouter/openai/gpt-4o-mini"
 uv run --project python --extra proxy python python/scripts/proxy_real_smoke.py
 ```
 
-真实模型 smoke 已用 OpenRouter panel 跑通 quick mode，并验证 `mmd.trace_version === 1`。接下来的 M2' 开发顺序：LiteLLM Router/callback 接入 → upstream readiness 清理。
+真实模型 smoke 已用 OpenRouter panel 跑通 quick mode，并验证 `mmd.trace_version === 1`。接下来的 M2' 开发顺序：callback/logging trace 落点 → advanced config → upstream readiness 清理。
 
 ## 相关文档
 

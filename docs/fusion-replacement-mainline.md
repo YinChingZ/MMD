@@ -235,11 +235,11 @@ OpenAI-compatible response
 - `return_trace=true` 顶层 `mmd.trace_version === 1`。
 - 递归保护。
 - provider 前缀 preflight。
+- Router-aware completion client（显式 `router` 注入优先，未注入时 fallback 到 `litellm.acompletion`）。
+- response `usage` 聚合第一版（含 trace 中的阶段/模型级 usage events 和 usage unavailable 标记）。
 
 当前缺口：
 
-- 内部调用仍主要通过 `litellm.acompletion`，尚未 Router-first。
-- usage aggregation 还是占位。
 - callback/logging trace 尚未落地。
 - `return_analysis` 尚未实现。
 - preset / auto panel 尚未实现。
@@ -452,14 +452,13 @@ coordinator_model: openrouter/deepseek/deepseek-v4-pro
 
 按当前状态，下一步不是继续讨论定位，而是进入工程主线：
 
-1. 新增 Router-aware completion client。
-2. provider 层支持传入 / 构造 LiteLLM Router。
-3. 保持现有 `CompletionClient` protocol，不污染 orchestrator。
-4. 添加 mock Router tests。
-5. 跑通 mock Proxy smoke 和真实 OpenRouter quick smoke。
-6. 设计 usage aggregation 数据结构。
+1. callback/logging trace 落点。
+2. `return_analysis` 轻量结构化分析。
+3. Advanced config：preset、预算/熔断、max token 限制。
+4. 跑通 mock Proxy smoke 和真实 OpenRouter quick smoke。
+5. Upstream readiness：异常类型、配置字段、目录和测试形态清理。
 
-完成这一步后，MMD 才真正从“能通过 LiteLLM custom provider 调用”推进到“LiteLLM-native Fusion replacement”的轨道上。
+Router-first 和 usage 聚合已把 MMD 从“能通过 LiteLLM custom provider 调用”推进到“LiteLLM-native Fusion replacement”的轨道上；接下来重点是生产审计、默认体验和 upstream 形态。
 
 ## 11. 参考链接
 

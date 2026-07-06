@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from mmd_litellm.client import CompletionOutput, TokenUsage
 from mmd_litellm.orchestrator import (
     DeliberationConfig,
     QuorumNotMetError,
@@ -176,6 +177,37 @@ class ScriptedClient:
         raise AssertionError(f"unexpected phase: {phase}")
 
 
+class UsageScriptedClient(ScriptedClient):
+    def __init__(
+        self,
+        *,
+        usage: TokenUsage | None = None,
+        missing_usage_phases: set[str] | None = None,
+        invalid_json_once: set[tuple[str, str]] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.usage = usage or TokenUsage(
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+        )
+        self.missing_usage_phases = missing_usage_phases or set()
+        self.invalid_json_once = invalid_json_once or set()
+        self.seen_invalid_json: set[tuple[str, str]] = set()
+
+    async def acomplete(self, model, request, *, timeout=None):
+        phase = request.meta["phase"]
+        key = (phase, model)
+        if key in self.invalid_json_once and key not in self.seen_invalid_json:
+            self.seen_invalid_json.add(key)
+            text = "{not valid json"
+        else:
+            text = await super().acomplete(model, request, timeout=timeout)
+        usage = None if phase in self.missing_usage_phases else self.usage
+        return CompletionOutput(text=text, usage=usage)
+
+
 def test_quick_mode_runs_and_classifies_source_coverage():
     result = asyncio.run(
         run_quick_deliberation(
@@ -192,6 +224,7 @@ def test_quick_mode_runs_and_classifies_source_coverage():
     assert result.classifications["candidate_1"].label == "strong_consensus"
     assert result.proposals[0].model_id == "model_a"
     assert result.proposals[0].claims[0].claim_id.startswith(f"{result.run_id}:")
+    assert result.usage.usage_unavailable is True
 
 
 def test_quick_mode_degrades_when_quorum_is_met_but_partial():
@@ -209,6 +242,72 @@ def test_quick_mode_degrades_when_quorum_is_met_but_partial():
     assert result.quorum["propose"].partial is True
     assert result.classifications["candidate_1"].label == "qualified_consensus"
     assert result.failures["propose"][0].model_id == "model_c"
+
+
+def test_quick_mode_aggregates_usage_for_successful_calls():
+    result = asyncio.run(
+        run_quick_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+            ),
+            UsageScriptedClient(),
+        )
+    )
+
+    assert result.usage.openai_usage() == {
+        "prompt_tokens": 4,
+        "completion_tokens": 8,
+        "total_tokens": 12,
+    }
+    assert result.usage.usage_unavailable is False
+    assert [event.phase for event in result.usage.events] == [
+        "propose",
+        "propose",
+        "normalize",
+        "compose",
+    ]
+
+
+def test_quick_mode_marks_missing_usage_without_blocking_response():
+    result = asyncio.run(
+        run_quick_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+            ),
+            UsageScriptedClient(missing_usage_phases={"normalize"}),
+        )
+    )
+
+    assert result.final.final_answer == "Use a small TypeScript monorepo for this project."
+    assert result.usage.openai_usage() == {
+        "prompt_tokens": 3,
+        "completion_tokens": 6,
+        "total_tokens": 9,
+    }
+    assert result.usage.usage_unavailable is True
+    assert result.usage.usage_unavailable_count == 1
+
+
+def test_structured_repair_attempt_usage_is_counted():
+    result = asyncio.run(
+        run_quick_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                max_repair_attempts=1,
+            ),
+            UsageScriptedClient(invalid_json_once={("propose", "model_a")}),
+        )
+    )
+
+    assert result.usage.openai_usage() == {
+        "prompt_tokens": 5,
+        "completion_tokens": 10,
+        "total_tokens": 15,
+    }
+    assert [event.phase for event in result.usage.events].count("propose") == 3
 
 
 def test_quick_mode_raises_when_quorum_is_not_met():
@@ -256,6 +355,31 @@ def test_standard_mode_runs_full_protocol_with_explicit_votes():
     ]
 
 
+def test_standard_mode_aggregates_usage_for_all_phases():
+    result = asyncio.run(
+        run_standard_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b", "model_c"],
+                mmd_mode="standard",
+            ),
+            UsageScriptedClient(),
+        )
+    )
+
+    assert result.usage.openai_usage() == {
+        "prompt_tokens": 14,
+        "completion_tokens": 28,
+        "total_tokens": 42,
+    }
+    assert [event.phase for event in result.usage.events].count("propose") == 3
+    assert [event.phase for event in result.usage.events].count("critique") == 3
+    assert [event.phase for event in result.usage.events].count("revise") == 3
+    assert [event.phase for event in result.usage.events].count("normalize") == 1
+    assert [event.phase for event in result.usage.events].count("vote") == 3
+    assert [event.phase for event in result.usage.events].count("compose") == 1
+
+
 def test_standard_mode_marks_vote_partial_when_quorum_is_met():
     result = asyncio.run(
         run_standard_deliberation(
@@ -272,6 +396,26 @@ def test_standard_mode_marks_vote_partial_when_quorum_is_met():
     assert result.quorum["vote"].partial is True
     assert result.classifications["candidate_1"].partial is True
     assert result.classifications["candidate_1"].label == "qualified_consensus"
+
+
+def test_standard_mode_partial_failures_only_count_successful_usage():
+    result = asyncio.run(
+        run_standard_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b", "model_c"],
+                mmd_mode="standard",
+            ),
+            UsageScriptedClient(fail_by_phase={"vote": {"model_c"}}),
+        )
+    )
+
+    assert result.usage.openai_usage() == {
+        "prompt_tokens": 13,
+        "completion_tokens": 26,
+        "total_tokens": 39,
+    }
+    assert len(result.failures["vote"]) == 1
 
 
 def test_standard_mode_raises_when_critique_quorum_is_not_met():
@@ -326,6 +470,33 @@ def test_planning_mode_runs_per_topic_standard_and_composes_plan():
     assert result.topics[0].proposals[0].claims[0].claim_id.endswith(
         ":backend::model_a::c0"
     )
+
+
+def test_planning_mode_aggregates_outline_topic_and_section_usage():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="Plan the next milestone.",
+                analysis_models=["model_a", "model_b"],
+                mmd_mode="planning",
+            ),
+            UsageScriptedClient(),
+        )
+    )
+
+    assert result.usage.openai_usage() == {
+        "prompt_tokens": 21,
+        "completion_tokens": 42,
+        "total_tokens": 63,
+    }
+    phases = [event.phase for event in result.usage.events]
+    assert phases.count("outline") == 1
+    assert phases.count("propose") == 4
+    assert phases.count("critique") == 4
+    assert phases.count("revise") == 4
+    assert phases.count("normalize") == 2
+    assert phases.count("vote") == 4
+    assert phases.count("section_compose") == 2
 
 
 def test_planning_mode_keeps_partial_plan_when_one_topic_fails_quorum():

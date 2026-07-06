@@ -41,13 +41,15 @@ planning: Outline -> per-topic standard deliberation -> Section Compose
 ```
 
 Planning returns the full plan document as normal assistant content, while
-`return_trace=true` exposes the outline, per-topic traces, failed topics, and
-`plan_document` in top-level `mmd` metadata.
+`return_trace=true` exposes the outline, per-topic traces, failed topics,
+`plan_document`, and per-call usage events in top-level `mmd` metadata.
 
 When `return_trace=true`, the Proxy response includes top-level provider-specific
 `mmd` metadata with `trace_version: 1` and `protocol: "mmd.v1"`. The default
 `return_trace=false` path keeps the normal OpenAI-compatible answer content
-unchanged.
+unchanged. The standard OpenAI-compatible `usage` field is populated from
+aggregated panel/coordinator calls when underlying provider responses include
+token usage.
 
 ## Proxy smoke test
 

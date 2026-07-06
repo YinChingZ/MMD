@@ -5,6 +5,7 @@ from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, Field, model_validator
 
+from .client import CompletionOutput, TokenUsage, coerce_completion_output
 from .consensus import ClassifyCandidateResult, classify_candidate
 from .ids import make_run_id, scoped_id
 from .prompts import (
@@ -41,7 +42,7 @@ T = TypeVar("T", bound=BaseModel)
 class CompletionClient(Protocol):
     async def acomplete(
         self, model: str, request: CompletionRequest, *, timeout: float | None = None
-    ) -> str:
+    ) -> str | CompletionOutput:
         ...
 
 
@@ -77,6 +78,89 @@ class DeliberationConfig(BaseModel):
 class PhaseFailure(BaseModel):
     model_id: str
     message: str
+
+
+class UsageEvent(BaseModel):
+    call_index: int
+    phase: str
+    model_id: str
+    topic_id: str | None = None
+    usage: TokenUsage | None = None
+    usage_unavailable: bool = False
+
+
+class UsageSummary(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    usage_unavailable: bool = False
+    usage_unavailable_count: int = 0
+    events: list[UsageEvent] = Field(default_factory=list)
+
+    def openai_usage(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+class UsageTracker:
+    def __init__(self) -> None:
+        self.events: list[UsageEvent] = []
+
+    def record(
+        self,
+        *,
+        model: str,
+        request: CompletionRequest,
+        usage: TokenUsage | None,
+    ) -> None:
+        self.events.append(
+            UsageEvent(
+                call_index=len(self.events),
+                phase=str(request.meta.get("phase", "unknown")),
+                model_id=model,
+                topic_id=request.meta.get("topic_id"),
+                usage=usage,
+                usage_unavailable=usage is None,
+            )
+        )
+
+    def summary(self) -> UsageSummary:
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        usage_unavailable_count = 0
+        for event in self.events:
+            if event.usage is None:
+                usage_unavailable_count += 1
+                continue
+            prompt_tokens += event.usage.prompt_tokens
+            completion_tokens += event.usage.completion_tokens
+            total_tokens += event.usage.total_tokens
+        return UsageSummary(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            usage_unavailable=usage_unavailable_count > 0,
+            usage_unavailable_count=usage_unavailable_count,
+            events=list(self.events),
+        )
+
+
+class UsageCollectingClient:
+    def __init__(self, client: CompletionClient, tracker: UsageTracker) -> None:
+        self.client = client
+        self.tracker = tracker
+
+    async def acomplete(
+        self, model: str, request: CompletionRequest, *, timeout: float | None = None
+    ) -> str | CompletionOutput:
+        output = await self.client.acomplete(model, request, timeout=timeout)
+        completion = coerce_completion_output(output)
+        self.tracker.record(model=model, request=request, usage=completion.usage)
+        return output
 
 
 class FanoutOutcome(BaseModel):
@@ -131,6 +215,7 @@ class DeliberationResult(BaseModel):
     topics: list[TopicResult] = Field(default_factory=list)
     failed_topics: list[FailedTopic] = Field(default_factory=list)
     plan_document: PlanDocument | None = None
+    usage: UsageSummary = Field(default_factory=UsageSummary)
 
     def trace_payload(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"final"}, exclude_none=True)
@@ -219,7 +304,8 @@ async def _call_model_structured(
             next_request = request.model_copy(
                 update={"user_prompt": f"{request.user_prompt}\n\n{repair_note}"}
             )
-        return await client.acomplete(model, next_request, timeout=timeout)
+        output = await client.acomplete(model, next_request, timeout=timeout)
+        return coerce_completion_output(output).text
 
     return await call_structured(
         complete, schema, max_repair_attempts=max_repair_attempts
@@ -490,6 +576,8 @@ async def run_quick_deliberation(
     if config.mmd_mode != "quick":
         raise NotImplementedError("only quick mode is implemented in this PoC")
 
+    usage_tracker = UsageTracker()
+    client = UsageCollectingClient(client, usage_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
 
@@ -555,6 +643,7 @@ async def run_quick_deliberation(
         final=final,
         quorum={"propose": propose_outcome.quorum},
         failures={"propose": propose_outcome.failures},
+        usage=usage_tracker.summary(),
     )
 
 
@@ -564,6 +653,8 @@ async def run_standard_deliberation(
     if config.mmd_mode != "standard":
         raise ValueError("run_standard_deliberation requires mmd_mode='standard'")
 
+    usage_tracker = UsageTracker()
+    client = UsageCollectingClient(client, usage_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
     quorum: dict[str, QuorumCheck] = {}
@@ -700,6 +791,7 @@ async def run_standard_deliberation(
         final=final,
         quorum=quorum,
         failures=failures,
+        usage=usage_tracker.summary(),
     )
 
 
@@ -835,6 +927,8 @@ async def run_planning_deliberation(
     if config.mmd_mode != "planning":
         raise ValueError("run_planning_deliberation requires mmd_mode='planning'")
 
+    usage_tracker = UsageTracker()
+    client = UsageCollectingClient(client, usage_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
 
@@ -936,6 +1030,7 @@ async def run_planning_deliberation(
         topics=topics,
         failed_topics=failed_topics,
         plan_document=plan_document,
+        usage=usage_tracker.summary(),
     )
 
 

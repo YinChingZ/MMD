@@ -22,9 +22,11 @@ class MMDLiteLLMProvider(CustomLLM):
 
     provider_name = "mmd"
 
-    def __init__(self, client: CompletionClient | None = None) -> None:
+    def __init__(
+        self, client: CompletionClient | None = None, router: Any | None = None
+    ) -> None:
         super().__init__()
-        self.client = client or LiteLLMCompletionClient()
+        self.client = client or LiteLLMCompletionClient(router=router)
 
     def completion(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -71,6 +73,7 @@ class MMDLiteLLMProvider(CustomLLM):
             content=result.response_content(),
             model=public_model,
             metadata=metadata,
+            usage=result.usage.openai_usage(),
         )
         return _maybe_litellm_response(response)
 
@@ -111,6 +114,7 @@ def _maybe_litellm_response(response: dict) -> Any:
             mock_response=response["choices"][0]["message"]["content"],
         )
         model_response["model"] = response["model"]
+        model_response["usage"] = response["usage"]
         if "mmd" in response:
             model_response["mmd"] = response["mmd"]
         return model_response
