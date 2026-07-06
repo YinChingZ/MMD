@@ -225,6 +225,129 @@ class DeliberationResult(BaseModel):
             **payload,
         }
 
+    def logging_trace_payload(self) -> dict[str, Any]:
+        payload = {
+            "trace_version": 1,
+            "protocol": "mmd.v1",
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "quorum": {
+                phase: quorum.model_dump(mode="json")
+                for phase, quorum in self.quorum.items()
+            },
+            "classifications": {
+                candidate_id: classification.model_dump(mode="json")
+                for candidate_id, classification in self.classifications.items()
+            },
+            "candidate_claims": [
+                candidate.model_dump(mode="json")
+                for candidate in self.normalize.candidate_claims
+            ],
+            "failures": {
+                phase: [failure.model_dump(mode="json") for failure in failures]
+                for phase, failures in self.failures.items()
+            },
+            "usage": self.usage.model_dump(mode="json"),
+        }
+        if self.topics:
+            payload["topics"] = [
+                {
+                    "topic": topic_result.topic.model_dump(mode="json"),
+                    "quorum": {
+                        phase: quorum.model_dump(mode="json")
+                        for phase, quorum in topic_result.quorum.items()
+                    },
+                    "classifications": {
+                        candidate_id: classification.model_dump(mode="json")
+                        for candidate_id, classification in (
+                            topic_result.classifications.items()
+                        )
+                    },
+                    "candidate_claims": [
+                        candidate.model_dump(mode="json")
+                        for candidate in topic_result.normalize.candidate_claims
+                    ],
+                    "failures": {
+                        phase: [
+                            failure.model_dump(mode="json") for failure in failures
+                        ]
+                        for phase, failures in topic_result.failures.items()
+                    },
+                }
+                for topic_result in self.topics
+            ]
+        if self.failed_topics:
+            payload["failed_topics"] = [
+                failed.model_dump(mode="json") for failed in self.failed_topics
+            ]
+        return payload
+
+    def analysis_payload(self) -> dict[str, Any]:
+        consensus_summary = {
+            "strong": list(self.final.strong_consensus),
+            "qualified": list(self.final.qualified_consensus),
+        }
+        disagreements = list(self.final.disputed_points)
+        if self.plan_document is not None:
+            consensus_summary = {
+                "strong": [section.tldr for section in self.plan_document.sections],
+                "qualified": [],
+            }
+            disagreements = [
+                point
+                for section in self.plan_document.sections
+                for point in section.disputed_points
+            ]
+
+        payload: dict[str, Any] = {
+            "analysis_version": 1,
+            "protocol": "mmd.analysis.v1",
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "consensus_summary": consensus_summary,
+            "disagreements": disagreements,
+            "model_coverage": _candidate_coverage(
+                self.normalize, self.classifications, self.proposals
+            ),
+            "notable_unique_points": _notable_unique_points(
+                self.normalize, self.classifications, self.proposals
+            ),
+            "limitations": _analysis_limitations(self),
+        }
+        if self.topics:
+            topics = []
+            for topic_result in self.topics:
+                strong, qualified, disputed, _rejected = _consensus_buckets(
+                    topic_result.normalize, topic_result.classifications
+                )
+                topics.append(
+                    {
+                        "topic_id": topic_result.topic.topic_id,
+                        "title": topic_result.topic.title,
+                        "consensus_summary": {
+                            "strong": strong,
+                            "qualified": qualified,
+                        },
+                        "disagreements": disputed,
+                        "model_coverage": _candidate_coverage(
+                            topic_result.normalize,
+                            topic_result.classifications,
+                            topic_result.proposals,
+                        ),
+                        "notable_unique_points": _notable_unique_points(
+                            topic_result.normalize,
+                            topic_result.classifications,
+                            topic_result.proposals,
+                        ),
+                    }
+                )
+            payload["topics"] = topics
+        if self.failed_topics:
+            payload["failed_topics"] = [
+                failed.model_dump(mode="json") for failed in self.failed_topics
+            ]
+        return payload
+
     def response_content(self) -> str:
         if self.plan_document is None:
             return self.final.final_answer
@@ -568,6 +691,102 @@ def _consensus_buckets(
         else:
             rejected.append(candidate.text)
     return strong, qualified, disputed, rejected
+
+
+def _candidate_coverage(
+    normalize: NormalizeResult,
+    classifications: dict[str, ClassifyCandidateResult],
+    proposals: list[Proposal],
+) -> list[dict[str, Any]]:
+    model_by_claim_id = {
+        claim.claim_id: proposal.model_id
+        for proposal in proposals
+        for claim in proposal.claims
+    }
+    coverage = []
+    for candidate in normalize.candidate_claims:
+        classification = classifications.get(candidate.candidate_id)
+        source_model_ids = sorted(
+            {
+                model_by_claim_id[source_claim_id]
+                for source_claim_id in candidate.source_claim_ids
+                if source_claim_id in model_by_claim_id
+            }
+        )
+        coverage.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "text": candidate.text,
+                "classification": (
+                    classification.label if classification is not None else "unknown"
+                ),
+                "approve_ratio": (
+                    classification.approve_ratio
+                    if classification is not None
+                    else None
+                ),
+                "partial": classification.partial if classification is not None else True,
+                "source_claim_count": len(candidate.source_claim_ids),
+                "source_model_count": len(source_model_ids),
+                "source_model_ids": source_model_ids,
+            }
+        )
+    return coverage
+
+
+def _notable_unique_points(
+    normalize: NormalizeResult,
+    classifications: dict[str, ClassifyCandidateResult],
+    proposals: list[Proposal],
+) -> list[dict[str, Any]]:
+    unique_points = []
+    for candidate in _candidate_coverage(normalize, classifications, proposals):
+        if candidate["source_model_count"] != 1:
+            continue
+        if candidate["classification"] == "rejected":
+            continue
+        unique_points.append(
+            {
+                "candidate_id": candidate["candidate_id"],
+                "text": candidate["text"],
+                "source_model_id": candidate["source_model_ids"][0],
+                "classification": candidate["classification"],
+            }
+        )
+    return unique_points
+
+
+def _analysis_limitations(result: DeliberationResult) -> list[str]:
+    limitations = [
+        "This analysis is derived deterministically from MMD consensus data; it is not a separate factual verification step."
+    ]
+    if result.usage.usage_unavailable:
+        limitations.append("Some underlying model calls did not report token usage.")
+    for phase, quorum in result.quorum.items():
+        if quorum.partial:
+            limitations.append(f'Phase "{phase}" met quorum with partial responses.')
+    for phase, failures in result.failures.items():
+        if failures:
+            failed_models = ", ".join(failure.model_id for failure in failures)
+            limitations.append(f'Phase "{phase}" had failed models: {failed_models}.')
+    for topic_result in result.topics:
+        for phase, quorum in topic_result.quorum.items():
+            if quorum.partial:
+                limitations.append(
+                    f'Topic "{topic_result.topic.topic_id}" phase "{phase}" met quorum with partial responses.'
+                )
+        for phase, failures in topic_result.failures.items():
+            if failures:
+                failed_models = ", ".join(failure.model_id for failure in failures)
+                limitations.append(
+                    f'Topic "{topic_result.topic.topic_id}" phase "{phase}" had failed models: {failed_models}.'
+                )
+    if result.failed_topics:
+        failed_topics = ", ".join(
+            failed.topic.topic_id for failed in result.failed_topics
+        )
+        limitations.append(f"Planning mode omitted failed topics: {failed_topics}.")
+    return limitations
 
 
 async def run_quick_deliberation(

@@ -42,6 +42,21 @@ class FakeRouter:
         }
 
 
+class RecordingTraceLogger:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        self.events.append(
+            {
+                "kwargs": kwargs,
+                "response_obj": response_obj,
+                "start_time": start_time,
+                "end_time": end_time,
+            }
+        )
+
+
 def test_provider_returns_openai_compatible_response_with_trace():
     provider = MMDLiteLLMProvider(client=ScriptedClient())
     response = asyncio.run(
@@ -99,11 +114,145 @@ def test_provider_response_usage_uses_aggregated_usage_without_trace():
     )
 
     assert "mmd" not in response
+    assert "mmd_analysis" not in response
     assert response["usage"] == {
         "prompt_tokens": 4,
         "completion_tokens": 8,
         "total_tokens": 12,
     }
+
+
+def test_provider_return_analysis_without_full_trace():
+    provider = MMDLiteLLMProvider(client=UsageScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "return_analysis": True,
+                "return_trace": False,
+            },
+        )
+    )
+
+    assert "mmd" not in response
+    analysis = response["mmd_analysis"]
+    assert analysis["analysis_version"] == 1
+    assert analysis["protocol"] == "mmd.analysis.v1"
+    assert analysis["mode"] == "quick"
+    assert analysis["consensus_summary"]["strong"] == [
+        "Use a small TypeScript monorepo for this project."
+    ]
+    assert analysis["disagreements"] == []
+    assert analysis["model_coverage"][0]["candidate_id"] == "candidate_1"
+    assert analysis["model_coverage"][0]["source_model_count"] == 2
+    assert analysis["model_coverage"][0]["source_model_ids"] == [
+        "model_a",
+        "model_b",
+    ]
+    assert analysis["notable_unique_points"] == []
+    assert analysis["limitations"] == [
+        "This analysis is derived deterministically from MMD consensus data; it is not a separate factual verification step."
+    ]
+
+
+def test_provider_return_analysis_can_coexist_with_trace():
+    provider = MMDLiteLLMProvider(client=UsageScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "return_analysis": True,
+                "return_trace": True,
+            },
+        )
+    )
+
+    assert response["mmd"]["trace_version"] == 1
+    assert response["mmd_analysis"]["analysis_version"] == 1
+    assert response["mmd"]["run_id"] == response["mmd_analysis"]["run_id"]
+
+
+def test_provider_trace_logging_is_opt_in():
+    logger = RecordingTraceLogger()
+    provider = MMDLiteLLMProvider(
+        client=UsageScriptedClient(),
+        trace_logger=logger,
+    )
+    asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+            },
+        )
+    )
+
+    assert logger.events == []
+
+
+def test_provider_emits_trace_logging_without_returning_full_trace():
+    logger = RecordingTraceLogger()
+    provider = MMDLiteLLMProvider(
+        client=UsageScriptedClient(),
+        trace_logger=logger,
+    )
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_log_trace": True,
+                "return_trace": False,
+            },
+        )
+    )
+
+    assert "mmd" not in response
+    assert len(logger.events) == 1
+    event = logger.events[0]
+    payload = event["kwargs"]["metadata"]["mmd"]
+    assert payload["trace_version"] == 1
+    assert payload["protocol"] == "mmd.v1"
+    assert payload["mode"] == "quick"
+    assert payload["run_id"]
+    assert payload["quorum"]["propose"]["met"] is True
+    assert "candidate_1" in payload["classifications"]
+    assert payload["candidate_claims"][0]["candidate_id"] == "candidate_1"
+    assert "propose" in payload["failures"]
+    assert payload["usage"]["total_tokens"] == 12
+    assert event["kwargs"]["mmd"] == payload
+
+
+def test_provider_trace_logging_status_is_in_returned_trace_when_enabled():
+    logger = RecordingTraceLogger()
+    provider = MMDLiteLLMProvider(
+        client=UsageScriptedClient(),
+        trace_logger=logger,
+    )
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_log_trace": True,
+                "return_trace": True,
+            },
+        )
+    )
+
+    assert response["mmd"]["trace_logging"] == {
+        "attempted": True,
+        "delivered": 1,
+        "failures": [],
+    }
+    assert len(logger.events) == 1
 
 
 def test_provider_uses_router_when_client_is_not_injected():
@@ -187,6 +336,31 @@ def test_provider_supports_planning_mode_with_plan_content():
     assert "## Backend" in _content(response)
     assert response["mmd"]["mode"] == "planning"
     assert response["mmd"]["plan_document"]["sections"][0]["topic_id"] == "backend"
+
+
+def test_provider_return_analysis_supports_planning_topics():
+    provider = MMDLiteLLMProvider(client=UsageScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "Plan the next milestone."}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_mode": "planning",
+                "return_analysis": True,
+            },
+        )
+    )
+
+    analysis = response["mmd_analysis"]
+    assert analysis["mode"] == "planning"
+    assert "mmd" not in response
+    assert analysis["consensus_summary"]["strong"][0].startswith("Backend:")
+    assert [topic["topic_id"] for topic in analysis["topics"]] == [
+        "backend",
+        "deployment",
+    ]
+    assert analysis["topics"][0]["model_coverage"][0]["source_model_count"] == 2
 
 
 def test_provider_requires_analysis_models():

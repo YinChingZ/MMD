@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from datetime import datetime, timezone
 from typing import Any
 
 from .client import LiteLLMCompletionClient
@@ -23,10 +25,14 @@ class MMDLiteLLMProvider(CustomLLM):
     provider_name = "mmd"
 
     def __init__(
-        self, client: CompletionClient | None = None, router: Any | None = None
+        self,
+        client: CompletionClient | None = None,
+        router: Any | None = None,
+        trace_logger: Any | None = None,
     ) -> None:
         super().__init__()
         self.client = client or LiteLLMCompletionClient(router=router)
+        self.trace_logger = trace_logger
 
     def completion(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -47,6 +53,9 @@ class MMDLiteLLMProvider(CustomLLM):
             "max_repair_attempts",
             "max_topics",
             "return_trace",
+            "return_analysis",
+            "mmd_log_trace",
+            "mmd_trace_logger",
         ):
             if key in kwargs:
                 optional_params[key] = kwargs[key]
@@ -69,12 +78,29 @@ class MMDLiteLLMProvider(CustomLLM):
         )
         result = await run_deliberation(config, self.client)
         metadata = result.trace_payload() if config.return_trace else None
+        analysis = (
+            result.analysis_payload()
+            if bool(optional_params.get("return_analysis", False))
+            else None
+        )
         response = openai_chat_completion_response(
             content=result.response_content(),
             model=public_model,
             metadata=metadata,
+            analysis=analysis,
             usage=result.usage.openai_usage(),
         )
+        trace_logging = await _emit_trace_logging(
+            enabled=bool(optional_params.get("mmd_log_trace", False)),
+            payload=result.logging_trace_payload(),
+            request_kwargs=kwargs,
+            response=response,
+            public_model=public_model,
+            optional_params=optional_params,
+            configured_logger=self.trace_logger,
+        )
+        if metadata is not None and trace_logging["attempted"]:
+            metadata["trace_logging"] = trace_logging
         return _maybe_litellm_response(response)
 
 
@@ -117,9 +143,157 @@ def _maybe_litellm_response(response: dict) -> Any:
         model_response["usage"] = response["usage"]
         if "mmd" in response:
             model_response["mmd"] = response["mmd"]
+        if "mmd_analysis" in response:
+            model_response["mmd_analysis"] = response["mmd_analysis"]
         return model_response
     except Exception:
         return response
+
+
+async def _emit_trace_logging(
+    *,
+    enabled: bool,
+    payload: dict[str, Any],
+    request_kwargs: dict[str, Any],
+    response: dict,
+    public_model: str,
+    optional_params: dict[str, Any],
+    configured_logger: Any | None,
+) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "attempted": enabled,
+        "delivered": 0,
+        "failures": [],
+    }
+    if not enabled:
+        return status
+
+    loggers = _trace_loggers(configured_logger, optional_params)
+    if not loggers:
+        status["failures"].append("no trace logger configured")
+        return status
+
+    event_kwargs = _trace_event_kwargs(
+        request_kwargs=request_kwargs,
+        public_model=public_model,
+        optional_params=optional_params,
+        payload=payload,
+    )
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time
+
+    for logger in loggers:
+        try:
+            await _call_trace_logger(
+                logger,
+                event_kwargs,
+                response,
+                start_time,
+                end_time,
+                payload,
+            )
+            status["delivered"] += 1
+        except Exception as error:
+            status["failures"].append(str(error))
+    return status
+
+
+def _trace_loggers(
+    configured_logger: Any | None, optional_params: dict[str, Any]
+) -> list[Any]:
+    raw_loggers: list[Any] = []
+    for candidate in (
+        configured_logger,
+        optional_params.get("mmd_trace_logger"),
+        optional_params.get("mmd_trace_loggers"),
+    ):
+        if candidate is None:
+            continue
+        if isinstance(candidate, (list, tuple)):
+            raw_loggers.extend(candidate)
+        else:
+            raw_loggers.append(candidate)
+
+    if litellm is not None:
+        raw_loggers.extend(_object_callbacks(getattr(litellm, "success_callback", [])))
+        raw_loggers.extend(_object_callbacks(getattr(litellm, "callbacks", [])))
+
+    loggers: list[Any] = []
+    seen: set[int] = set()
+    for logger in raw_loggers:
+        if isinstance(logger, str):
+            continue
+        identity = id(logger)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        loggers.append(logger)
+    return loggers
+
+
+def _object_callbacks(callbacks: Any) -> list[Any]:
+    if callbacks is None:
+        return []
+    if isinstance(callbacks, (list, tuple)):
+        return [callback for callback in callbacks if not isinstance(callback, str)]
+    if isinstance(callbacks, str):
+        return []
+    return [callbacks]
+
+
+def _trace_event_kwargs(
+    *,
+    request_kwargs: dict[str, Any],
+    public_model: str,
+    optional_params: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = dict(request_kwargs.get("metadata") or {})
+    metadata["mmd"] = payload
+    return {
+        "model": public_model,
+        "messages": request_kwargs.get("messages") or [],
+        "metadata": metadata,
+        "optional_params": _json_safe_optional_params(optional_params),
+        "mmd": payload,
+    }
+
+
+def _json_safe_optional_params(optional_params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in optional_params.items()
+        if key not in {"mmd_trace_logger", "mmd_trace_loggers"}
+    }
+
+
+async def _call_trace_logger(
+    logger: Any,
+    event_kwargs: dict[str, Any],
+    response: dict,
+    start_time: datetime,
+    end_time: datetime,
+    payload: dict[str, Any],
+) -> None:
+    if hasattr(logger, "async_log_success_event"):
+        result = logger.async_log_success_event(
+            event_kwargs,
+            response,
+            start_time,
+            end_time,
+        )
+        if inspect.isawaitable(result):
+            await result
+        return
+    if hasattr(logger, "log_success_event"):
+        logger.log_success_event(event_kwargs, response, start_time, end_time)
+        return
+    if callable(logger):
+        result = logger(payload)
+        if inspect.isawaitable(result):
+            await result
+        return
+    raise TypeError(f"unsupported trace logger: {type(logger)!r}")
 
 
 mmd_custom_llm = MMDLiteLLMProvider()

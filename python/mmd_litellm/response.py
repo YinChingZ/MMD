@@ -9,6 +9,7 @@ def openai_chat_completion_response(
     content: str,
     model: str,
     metadata: dict | None = None,
+    analysis: dict | None = None,
     usage: dict | None = None,
 ) -> dict:
     response = {
@@ -28,4 +29,6 @@ def openai_chat_completion_response(
     }
     if metadata:
         response["mmd"] = metadata
+    if analysis:
+        response["mmd_analysis"] = analysis
     return response

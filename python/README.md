@@ -51,6 +51,16 @@ unchanged. The standard OpenAI-compatible `usage` field is populated from
 aggregated panel/coordinator calls when underlying provider responses include
 token usage.
 
+Set `mmd_log_trace=true` to send a slimmer audit payload to a configured
+CustomLogger-style trace logger without returning the full trace in the HTTP
+response. The callback payload includes the run id, mode, quorum, candidate
+claims, classifications, failures, and usage summary.
+
+Set `return_analysis=true` to return a lightweight top-level `mmd_analysis`
+payload for application consumption. It includes consensus summary,
+disagreements, model coverage, notable unique points, limitations, and does not
+require an extra model call.
+
 ## Proxy smoke test
 
 The LiteLLM Proxy loads `custom_handler` modules relative to the config file, so

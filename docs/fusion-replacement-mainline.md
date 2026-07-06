@@ -130,7 +130,7 @@ MMD 内部 trace 默认不进入正文。只有用户显式设置 `return_trace=
 - `coordinator_model`：可保留，用于 normalize / compose。
 - `mmd_mode`：短期保留；长期可考虑 `strategy` 或 `fusion_mode`。
 - `return_trace`：完整审计 trace。
-- `return_analysis`：轻量 Fusion-like analysis，后续新增。
+- `return_analysis`：轻量 Fusion-like analysis，已通过顶层 `mmd_analysis` opt-in 返回。
 
 内部术语如 claim、ballot、classification、quorum 可以出现在 trace 和高级文档中，但不应成为默认使用门槛。
 
@@ -237,12 +237,13 @@ OpenAI-compatible response
 - provider 前缀 preflight。
 - Router-aware completion client（显式 `router` 注入优先，未注入时 fallback 到 `litellm.acompletion`）。
 - response `usage` 聚合第一版（含 trace 中的阶段/模型级 usage events 和 usage unavailable 标记）。
+- opt-in `mmd_log_trace` callback/logging payload（默认不返回完整 trace，也不写入日志；开启后写入瘦身审计 trace）。
+- `return_analysis=true` 轻量 `mmd_analysis` payload（与完整 `mmd` trace 分离，面向应用层消费）。
 
 当前缺口：
 
-- callback/logging trace 尚未落地。
-- `return_analysis` 尚未实现。
 - preset / auto panel 尚未实现。
+- provider 异常映射和 callback/logging 生产形态还需继续贴近 LiteLLM upstream。
 - tool / web search 尚未实现。
 
 ## 6. 接下来开发主线
@@ -284,6 +285,7 @@ OpenAI-compatible response
 - 默认 `return_trace=false` 时正文保持干净。
 - 配置 trace logging 时，callback payload 包含 run_id、mode、quorum、classifications、candidate_claims、failures。
 - 不把超大 trace 默认写入所有请求日志；必须有开关或 size control。
+- 第一版已实现 `mmd_log_trace=true`，通过 CustomLogger-style `async_log_success_event` / `log_success_event` 或 callable logger 写入瘦身 payload；完整 response trace 仍只由 `return_trace=true` 控制。
 
 ### M2'.3d `return_analysis`
 
@@ -301,6 +303,7 @@ OpenAI-compatible response
 
 - `return_analysis` 给应用层直接消费，轻量、稳定、非审计全量。
 - `return_trace` 给调试、审计、trace viewer，完整但大。
+- 第一版实现为顶层 `mmd_analysis`，包含 `analysis_version: 1`、`protocol: "mmd.analysis.v1"`、run/mode、consensus/disagreement/coverage/unique/limitations；默认关闭，不影响正文。
 
 ### M2'.4 Fusion parity config
 
@@ -452,11 +455,10 @@ coordinator_model: openrouter/deepseek/deepseek-v4-pro
 
 按当前状态，下一步不是继续讨论定位，而是进入工程主线：
 
-1. callback/logging trace 落点。
-2. `return_analysis` 轻量结构化分析。
-3. Advanced config：preset、预算/熔断、max token 限制。
-4. 跑通 mock Proxy smoke 和真实 OpenRouter quick smoke。
-5. Upstream readiness：异常类型、配置字段、目录和测试形态清理。
+1. Advanced config：preset、预算/熔断、max token 限制。
+2. provider 异常映射和 callback/logging upstream 形态清理。
+3. 跑通 mock Proxy smoke 和真实 OpenRouter quick smoke。
+4. Upstream readiness：配置字段、目录和测试形态清理。
 
 Router-first 和 usage 聚合已把 MMD 从“能通过 LiteLLM custom provider 调用”推进到“LiteLLM-native Fusion replacement”的轨道上；接下来重点是生产审计、默认体验和 upstream 形态。
 
