@@ -11,3 +11,5 @@ apps/api/models.config.json
 .claude/
 apps/web/.next/
 apps/web/next-env.d.ts
+*.pyc
+__pycache__/
