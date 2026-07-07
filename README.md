@@ -135,4 +135,5 @@ npm run build   # 各 workspace 的 TypeScript 构建
 
 - [docs/protocol.md](docs/protocol.md) — 协议规则的落地说明
 - [docs/prior-art.md](docs/prior-art.md) — 与 OpenRouter Fusion Router、litesquad、LiteLLM 生态的对比分析
+- [docs/streaming-tools-multimodal-json.md](docs/streaming-tools-multimodal-json.md) — 流式输出/工具调用/多模态输入/JSON output 的可行性与实施路径分析（尚未实现，设计分析文档）
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — 里程碑规划与风险对照表

@@ -143,4 +143,5 @@ npm run build   # TypeScript build across all workspaces
 - [docs/protocol.en.md](docs/protocol.en.md) — how the protocol constraints are implemented
 - [docs/protocol.md](docs/protocol.md) — the same, in Chinese
 - [docs/prior-art.en.md](docs/prior-art.en.md) — how MMD compares to OpenRouter Fusion Router, litesquad, and the LiteLLM ecosystem
+- [docs/streaming-tools-multimodal-json.md](docs/streaming-tools-multimodal-json.md) — feasibility and implementation paths for streaming output, tool calling, multimodal input, and JSON output (not yet implemented; design analysis, Chinese only)
 - [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — milestone plan and risk register (Chinese)
