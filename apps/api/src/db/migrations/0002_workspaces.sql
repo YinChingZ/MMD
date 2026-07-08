@@ -1,7 +1,7 @@
 -- BYOK M4 step 3: anonymous workspace/session scoping. No login — every
 -- visitor gets an opaque workspace token (cookie) so GET /api/conversations
 -- and friends don't leak one visitor's history to another the moment more
--- than one person uses a deployed instance. See multi-model-deliberation-dev-roadmap.md
+-- than one person uses a deployed instance. See docs/roadmap.md
 -- and docs/protocol.md for the full BYOK design rationale.
 
 create table workspaces (

@@ -7,7 +7,7 @@
 # "copy dist + node_modules + package.json" Dockerfile doesn't work here:
 # each package's package.json points "main"/"types" straight at its
 # src/index.ts (a deliberate M5.1-era choice so vitest/tsx never depend on a
-# possibly-stale dist — see multi-model-deliberation-dev-roadmap.md), so
+# possibly-stale dist — see docs/roadmap.md), so
 # apps/api's compiled dist/main.js would try to `require` raw TypeScript
 # under plain Node and fail immediately with ERR_MODULE_NOT_FOUND. The
 # runtime stage below runs the same way `npm start` already does in

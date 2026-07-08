@@ -1,7 +1,7 @@
 # Build from the repo root: docker build -f apps/web/Dockerfile .
 #
 # Every @mmd/* import in apps/web is `import type` (compile-time only — see
-# multi-model-deliberation-dev-roadmap.md's M4/Turbopack note: this app
+# docs/roadmap.md's M4/Turbopack note: this app
 # fetches data from apps/api instead of importing orchestrator/protocol
 # runtime values directly, since Turbopack can't bundle raw TS workspace
 # source the way tsx/vitest can). So packages/* are only needed in the build

@@ -17,7 +17,7 @@ export const WORKSPACE_COOKIE_NAME = "mmd_workspace";
 const WORKSPACE_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
 
 /**
- * No login/accounts (see multi-model-deliberation-dev-roadmap.md's BYOK
+ * No login/accounts (see docs/roadmap.md's BYOK
  * section) — instead every visitor gets an opaque, unguessable workspace
  * token so conversation/run history doesn't leak across visitors the moment
  * more than one person uses a deployed instance. Carries no PII, so it's

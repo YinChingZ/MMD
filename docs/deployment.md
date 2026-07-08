@@ -17,7 +17,7 @@ docker build -f apps/web/Dockerfile .
 
 ## 一个不那么直观、但实测验证过的架构决定：apps/api 在运行时不用编译产物
 
-`apps/api/Dockerfile` 的 runtime 阶段最终是 `npm run start`（即 `tsx src/main.ts`），而不是常见的 `node dist/main.js`。这不是随手选的：`packages/*` 每个包的 `package.json` 的 `"main"`/`"types"` 字段直接指向各自的 `src/index.ts`（M5.1 时期的既有设计，为了让 vitest/tsx 不依赖一份可能过期的 dist——见 `multi-model-deliberation-dev-roadmap.md`）。这意味着如果照搬"只拷贝 dist + node_modules + package.json，跑 `node dist/main.js`"这种常见做法，编译后的 `apps/api/dist/main.js` 在 `require("@mmd/protocol")` 时会顺着符号链接找到 `packages/protocol/src/index.ts`——一份没有编译过的 TypeScript 源文件，纯 Node.js 无法执行，会直接报 `ERR_MODULE_NOT_FOUND`（本项目实测复现过这个报错）。
+`apps/api/Dockerfile` 的 runtime 阶段最终是 `npm run start`（即 `tsx src/main.ts`），而不是常见的 `node dist/main.js`。这不是随手选的：`packages/*` 每个包的 `package.json` 的 `"main"`/`"types"` 字段直接指向各自的 `src/index.ts`（M5.1 时期的既有设计，为了让 vitest/tsx 不依赖一份可能过期的 dist——见 `roadmap.md`）。这意味着如果照搬"只拷贝 dist + node_modules + package.json，跑 `node dist/main.js`"这种常见做法，编译后的 `apps/api/dist/main.js` 在 `require("@mmd/protocol")` 时会顺着符号链接找到 `packages/protocol/src/index.ts`——一份没有编译过的 TypeScript 源文件，纯 Node.js 无法执行，会直接报 `ERR_MODULE_NOT_FOUND`（本项目实测复现过这个报错）。
 
 解决办法是让 runtime 阶段跟 `npm start`/`npm run dev` 用同一条路径——通过 `tsx` 在运行时转译源码（apps/api 自己的代码和 workspace 包的代码都一样），而不是引入打包工具或者改动各包现有的 `"main"` 字段指向（改字段本身风险更大，会影响 vitest/tsx 已经确立的解析行为）。代价是 runtime 镜像里保留了完整的开发依赖（`typescript`、`vitest` 等），镜像体积比纯生产依赖大一些；这是刻意的取舍，换来的是不用碰这个 monorepo 里已经用一整个里程碑验证过的模块解析方式。
 

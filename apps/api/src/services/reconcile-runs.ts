@@ -19,7 +19,7 @@ export const RESTART_INTERRUPTED_MESSAGE =
  * reconnecting clients an actual terminal state instead of an indefinite
  * hang, at the cost of losing whatever partial progress that run had made
  * (no cross-restart resumability — not needed yet at this project's scale,
- * see multi-model-deliberation-dev-roadmap.md).
+ * see docs/roadmap.md).
  */
 export async function reconcileOrphanedRuns(
   db: Kysely<Database>

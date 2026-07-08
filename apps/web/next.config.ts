@@ -25,7 +25,7 @@ const nextConfig: NextConfig = {
   // node_modules, so the runtime Docker image doesn't need the rest of the
   // npm workspace (or even a full `npm install`) copied in — every @mmd/*
   // import in this app is `import type` only (see
-  // multi-model-deliberation-dev-roadmap.md's M4/Turbopack note), so nothing
+  // docs/roadmap.md's M4/Turbopack note), so nothing
   // workspace-specific ends up in the traced output.
   output: "standalone",
   turbopack: {

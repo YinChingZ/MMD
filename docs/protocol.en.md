@@ -2,7 +2,7 @@
 
 *[中文](protocol.md)*
 
-This document describes the protocol implemented in `packages/protocol`. It's the as-built version of chapter 5 of `multi-model-deliberation-tech-design.md` and the M0-stage revisions in [multi-model-deliberation-dev-roadmap.md](../multi-model-deliberation-dev-roadmap.md). CLI/backend code should import `@mmd/protocol` rather than redefining these schemas.
+This document describes the protocol implemented in `packages/protocol`. It's the as-built version of chapter 5 of the original tech-design doc `multi-model-deliberation-tech-design.md` (kept outside the repo, not version-controlled) and the M0-stage revisions in [roadmap.md](roadmap.md). Delivery-layer milestones (M2 Backend API, M4 BYOK, M5 cost breaker/CI/cleanup/deploy/share) are documented in [roadmap.md](roadmap.md), not repeated here. CLI/backend code should import `@mmd/protocol` rather than redefining these schemas.
 
 ## The six phases
 
@@ -115,7 +115,7 @@ M2 moves the orchestrator logic already validated in `apps/cli` (now extracted i
 
 ## M4 phase 1: BYOK reopens "client-supplied provider" — but keeps the whitelist
 
-The section above describes how M2 collapsed model selection into a server-side `models.config.json` registry to avoid SSRF and avoid needing client-supplied API keys. M4 phase 1 (no account system, a BYOK platform — see multi-model-deliberation-dev-roadmap.md) reopens client-supplied API keys, but does *not* reopen "client-supplied arbitrary baseUrl":
+The section above describes how M2 collapsed model selection into a server-side `models.config.json` registry to avoid SSRF and avoid needing client-supplied API keys. M4 phase 1 (no account system, a BYOK platform — see roadmap.md) reopens client-supplied API keys, but does *not* reopen "client-supplied arbitrary baseUrl":
 
 - `packages/protocol/src/provider-whitelist.ts` defines a fixed list of providers (`providerId` → a fixed `baseUrl`) — currently only OpenAI-compatible-shaped ones: OpenAI, DeepSeek, OpenRouter, Volcengine. A client can only pick a `providerId` + its own `apiKey` + a free-text `modelId`, never a `baseUrl` — which is exactly why reopening client-supplied keys didn't reopen the SSRF surface: `baseUrl` is still resolved entirely server-side from `providerId`.
 - `apps/api/src/config/provider-factory.ts`'s `buildRunProvider()` constructs a provider per `POST /runs` request (merging the selected server-registry models with any client-supplied BYOK models into one `RoutingProvider`), kept entirely separate from `buildProvider()` (built once at startup, still serving the server registry) so neither path affects the other.

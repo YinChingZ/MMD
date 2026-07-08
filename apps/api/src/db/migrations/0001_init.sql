@@ -1,5 +1,5 @@
 -- M2 initial schema. See docs/protocol.md and the M0 risk table in
--- multi-model-deliberation-dev-roadmap.md for why run-scoped composite keys
+-- docs/roadmap.md for why run-scoped composite keys
 -- are used instead of the original tech design doc's bare `id text primary key`.
 
 create table conversations (

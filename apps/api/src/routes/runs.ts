@@ -54,7 +54,7 @@ const ByokModelEntry = z
 
 // M5.1 cost circuit breaker: applied whenever a request doesn't supply its
 // own costLimitUsd, so a run is never unprotected just because a caller
-// forgot to think about cost — see multi-model-deliberation-dev-roadmap.md's
+// forgot to think about cost — see docs/roadmap.md's
 // M5.1 section for why $5 was chosen (standard/quick real-model runs cost
 // cents to ~$1; planning mode's up-to-8-parallel-topics case needs more
 // headroom, which callers running a large planning run should raise
