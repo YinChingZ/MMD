@@ -1,0 +1,10 @@
+{
+  "name": "mmd-hle-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predict": "tsx src/run-mmd-predictions.ts",
+    "smoke": "tsx src/run-mmd-predictions.ts --provider mock --input fixtures/sample.jsonl --output out/sample_predictions.json --mode quick --fresh"
+  }
+}

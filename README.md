@@ -46,6 +46,8 @@ packages/
   model-adapters/       # provider 封装：mock、OpenAI 兼容、按 quorum 的 fan-out
   prompts/              # 六阶段的 prompt 构造
   orchestrator/         # propose→critique→revise→normalize→vote→compose 的编排逻辑，CLI 和 API 共用
+benchmarks/
+  hle/                  # 适配 centerforaisafety/hle：导出 HLE 数据、生成 MMD predictions，并交给官方 judge 评分
 docs/
   protocol.md           # 协议规则（六阶段 schema、共识、quorum、budget、Planning Mode）
   roadmap.md            # 开发规划与里程碑（含真实测试发现，开发历史的唯一出处）
