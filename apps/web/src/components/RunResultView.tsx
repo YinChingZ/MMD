@@ -1,6 +1,7 @@
 import type { RunResult } from "@/lib/api";
 import { formatRunCost } from "@/lib/cost";
 import { ConsensusPanel } from "./ConsensusPanel";
+import { CustomJsonOutputPanel } from "./CustomJsonOutputPanel";
 import { DiscussionProcess } from "./DiscussionProcess";
 import { FinalAnswerPanel } from "./FinalAnswerPanel";
 import { PlanDocumentView } from "./PlanDocumentView";
@@ -17,6 +18,15 @@ export function RunResultView({ result }: { result: RunResult }) {
     <>
       {result.cost && (
         <p className="text-sm text-gray-500">{formatRunCost(result.cost)}</p>
+      )}
+      {result.userOutput !== undefined && (
+        <CustomJsonOutputPanel userOutput={result.userOutput} />
+      )}
+      {result.userOutputError && (
+        <p className="text-sm text-amber-600">
+          Custom JSON output formatting failed ({result.userOutputError}) — the
+          main result below is unaffected.
+        </p>
       )}
       {result.planDocument ? (
         <PlanDocumentView planDocument={result.planDocument} topics={result.topics ?? []} />

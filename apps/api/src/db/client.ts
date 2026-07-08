@@ -122,6 +122,10 @@ export interface RunResultsTable {
   timings: unknown;
   quorum: unknown;
   cost: unknown;
+  // M6.1 user-defined JSON output — see migrations/0008_output_format.sql.
+  output_format: unknown;
+  user_output: unknown;
+  user_output_error: string | null;
   created_at: Generated<Date>;
 }
 

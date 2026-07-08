@@ -1,5 +1,5 @@
 import type { RunMode } from "@mmd/protocol";
-import type { ByokModelInput, ModelInfo } from "./api";
+import type { ByokModelInput, ModelInfo, OutputFormatInput } from "./api";
 
 // UI-only representation of a BYOK entry the user has added but not yet
 // submitted — clientId is a local React key/removal handle, never sent to
@@ -36,12 +36,14 @@ export function buildCreateRunPayload(params: {
   modelIds: string[];
   byokEntries: ByokEntryUI[];
   costLimitUsd: number;
+  outputFormat?: OutputFormatInput;
 }): {
   question: string;
   mode: RunMode;
   modelIds?: string[];
   byokModels?: ByokModelInput[];
   costLimitUsd: number;
+  outputFormat?: OutputFormatInput;
 } {
   return {
     question: params.question,
@@ -51,6 +53,7 @@ export function buildCreateRunPayload(params: {
       ? params.byokEntries.map((e) => e.payload)
       : undefined,
     costLimitUsd: params.costLimitUsd,
+    outputFormat: params.outputFormat,
   };
 }
 

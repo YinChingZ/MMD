@@ -79,6 +79,17 @@ export type ByokModelInput =
     }
   | { savedKeyId: string; label?: string; pricing?: PricingOverride };
 
+// M6.1: optional caller-supplied JSON Schema — mirrors apps/api's
+// CreateRunBody.outputFormat. `schema` is a runtime JSON Schema (v1 subset:
+// object/array/string/number/integer/boolean/null/enum/required/properties/
+// items/additionalProperties, no $ref), not a zod schema.
+export interface OutputFormatInput {
+  type: "json_schema";
+  name?: string;
+  schema: Record<string, unknown>;
+  instructions?: string;
+}
+
 // Mirrors apps/api/src/repositories/results-repo.ts's getResult() shape plus
 // the runId/question/mode/status the route adds on top — not DeliberationResult
 // itself, which also carries a `budget` field getResult never persists.
@@ -100,6 +111,12 @@ export interface RunResult {
   timings: Partial<Record<Phase, number>>;
   quorum: Partial<Record<Phase, QuorumCheck>>;
   cost?: RunCostSummary;
+  // M6.1: present only when the run requested outputFormat. userOutput is
+  // omitted (with userOutputError set instead) when repair retries were
+  // exhausted — the main result above is unaffected either way.
+  outputFormat?: OutputFormatInput;
+  userOutput?: unknown;
+  userOutputError?: string;
 }
 
 async function asJson<T>(res: Response): Promise<T> {
@@ -160,6 +177,7 @@ export async function createRun(
     modelIds?: string[];
     byokModels?: ByokModelInput[];
     costLimitUsd?: number;
+    outputFormat?: OutputFormatInput;
   }
 ): Promise<{ runId: string; status: RunStatus }> {
   const res = await fetch(`/api/conversations/${conversationId}/runs`, {

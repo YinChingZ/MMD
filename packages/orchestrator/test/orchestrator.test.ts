@@ -1,12 +1,64 @@
 import { describe, expect, it } from "vitest";
 import { FinalAnswerSchema, SectionAnswerSchema } from "@mmd/protocol";
-import { MockProvider } from "@mmd/model-adapters";
+import {
+  MockProvider,
+  type CompletionRequest,
+  type CompletionResult,
+  type ModelConfig,
+  type ModelProvider,
+} from "@mmd/model-adapters";
 import {
   CostLimitExceededError,
   DeliberationQuorumError,
   runDeliberation,
   type RunEvent,
 } from "../src/index.js";
+
+// MockProvider only knows the six fixed protocol phases (keyed off
+// `meta.phase`) — it deliberately throws on anything else, so M6.1's
+// `meta.step = "format_user_output"` calls need their own stub here rather
+// than teaching the shared MockProvider about arbitrary caller schemas.
+class FormatAwareMockProvider implements ModelProvider {
+  readonly name = "mock-with-format";
+  private readonly inner = new MockProvider(this.opts);
+
+  constructor(
+    private readonly opts: { costPerCallUsd?: number } = {},
+    private readonly formatResponseText: string = JSON.stringify({
+      winner: "model_a",
+      confidence: "high",
+    })
+  ) {}
+
+  async complete(
+    config: ModelConfig,
+    request: CompletionRequest
+  ): Promise<CompletionResult> {
+    if (request.meta.step === "format_user_output") {
+      return {
+        text: this.formatResponseText,
+        latencyMs: 1,
+        usage: {
+          promptTokens: 10,
+          completionTokens: 10,
+          totalTokens: 20,
+          costUsd: this.opts.costPerCallUsd ?? 0.0001,
+        },
+      };
+    }
+    return this.inner.complete(config, request);
+  }
+}
+
+const decisionSummarySchema = {
+  type: "object",
+  required: ["winner", "confidence"],
+  properties: {
+    winner: { type: "string" },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+  },
+  additionalProperties: false,
+};
 
 const models = [
   { id: "model_a", provider: "mock" },
@@ -367,5 +419,99 @@ describe("runDeliberation — M5.1 cost circuit breaker", () => {
 
     await expect(run).rejects.toThrow(/cost limit exceeded|all \d+ topic\(s\) failed/);
     expect(events.some((e) => e.type === "run_failed")).toBe(true);
+  });
+});
+
+describe("runDeliberation — M6.1 user-defined JSON output", () => {
+  it("omitting outputFormat leaves behavior unchanged (userOutput/userOutputError both undefined)", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+    });
+
+    expect(result.outputFormat).toBeUndefined();
+    expect(result.userOutput).toBeUndefined();
+    expect(result.userOutputError).toBeUndefined();
+  });
+
+  it("standard mode: formats the internal FinalAnswer into the caller's JSON Schema after compose", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new FormatAwareMockProvider(),
+      outputFormat: { name: "DecisionSummary", schema: decisionSummarySchema },
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+    expect(result.userOutputError).toBeUndefined();
+    expect(result.userOutput).toEqual({ winner: "model_a", confidence: "high" });
+
+    const formatEvents = events.filter(
+      (e) => (e.data as any)?.step === "format_user_output"
+    );
+    expect(formatEvents.some((e) => e.type === "phase_started")).toBe(true);
+    expect(
+      formatEvents.some((e) => e.type === "phase_completed" && !(e.data as any).failed)
+    ).toBe(true);
+  });
+
+  it("planning mode: formats the internal PlanDocument into the caller's JSON Schema", async () => {
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new FormatAwareMockProvider(),
+      mode: "planning",
+      outputFormat: { schema: decisionSummarySchema },
+    });
+
+    expect(result.planDocument).toBeDefined();
+    expect(result.userOutputError).toBeUndefined();
+    expect(result.userOutput).toEqual({ winner: "model_a", confidence: "high" });
+  });
+
+  it("degrades gracefully when repair retries are exhausted: run still completes with userOutputError set, main result untouched", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new FormatAwareMockProvider({}, "not valid json at all"),
+      outputFormat: { schema: decisionSummarySchema },
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+    expect(result.userOutput).toBeUndefined();
+    expect(result.userOutputError).toMatch(/failed schema validation/);
+
+    const failedFormatEvent = events.find(
+      (e) =>
+        e.type === "phase_completed" &&
+        (e.data as any)?.step === "format_user_output" &&
+        (e.data as any)?.failed
+    );
+    expect(failedFormatEvent).toBeDefined();
+  });
+
+  it("the format call's usage is folded into the M5.1 cost total", async () => {
+    const withFormat = await runDeliberation({
+      question,
+      models,
+      provider: new FormatAwareMockProvider({ costPerCallUsd: 5 }),
+      outputFormat: { schema: decisionSummarySchema },
+      costLimitUsd: 1000,
+    });
+    const withoutFormat = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      costLimitUsd: 1000,
+    });
+
+    expect(withFormat.cost.totalUsd).toBeGreaterThan(
+      withoutFormat.cost.totalUsd + 4
+    );
   });
 });

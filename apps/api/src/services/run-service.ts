@@ -1,7 +1,11 @@
 import type { Kysely } from "kysely";
 import { getBudget, makeRunId, type RunMode } from "@mmd/protocol";
 import type { ModelConfig, ModelProvider } from "@mmd/model-adapters";
-import { runDeliberation, type RunEvent } from "@mmd/orchestrator";
+import {
+  runDeliberation,
+  type FormatUserOutputRequest,
+  type RunEvent,
+} from "@mmd/orchestrator";
 import type { Database } from "../db/client.js";
 import { appendRunEvent } from "../repositories/events-repo.js";
 import {
@@ -22,6 +26,8 @@ export interface StartRunParams {
   coordinatorModelId?: string;
   /** M5.1 cost circuit breaker — see runs.ts's DEFAULT_COST_LIMIT_USD for what callers get when they don't set this themselves. */
   costLimitUsd?: number;
+  /** M6.1 user-defined JSON output — see runs.ts's CreateRunBody for request-shape validation before this reaches the orchestrator. */
+  outputFormat?: FormatUserOutputRequest;
 }
 
 const TERMINAL_TYPES = new Set(["run_completed", "run_failed"]);
@@ -94,6 +100,7 @@ export class RunService {
       mode: params.mode,
       coordinatorModelId: params.coordinatorModelId,
       costLimitUsd: params.costLimitUsd,
+      outputFormat: params.outputFormat,
       runId,
       onEvent,
     })

@@ -1,4 +1,10 @@
-import { MockProvider } from "@mmd/model-adapters";
+import {
+  MockProvider,
+  type CompletionRequest,
+  type CompletionResult,
+  type ModelConfig,
+  type ModelProvider,
+} from "@mmd/model-adapters";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
 import {
@@ -24,6 +30,43 @@ if (!hasTestDatabase()) {
 }
 
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7);
+
+// MockProvider only knows the six fixed protocol phases — M6.1's
+// `meta.step = "format_user_output"` calls need their own stub (mirrors the
+// same wrapper in packages/orchestrator/test/orchestrator.test.ts).
+class FormatAwareMockProvider implements ModelProvider {
+  readonly name = "mock-with-format";
+  private readonly inner = new MockProvider();
+
+  async complete(
+    config: ModelConfig,
+    request: CompletionRequest
+  ): Promise<CompletionResult> {
+    if (request.meta.step === "format_user_output") {
+      return {
+        text: JSON.stringify({ winner: "model_a", confidence: "high" }),
+        latencyMs: 1,
+        usage: {
+          promptTokens: 10,
+          completionTokens: 10,
+          totalTokens: 20,
+          costUsd: 0.0001,
+        },
+      };
+    }
+    return this.inner.complete(config, request);
+  }
+}
+
+const decisionSummarySchema = {
+  type: "object",
+  required: ["winner", "confidence"],
+  properties: {
+    winner: { type: "string" },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+  },
+  additionalProperties: false,
+};
 
 /**
  * No login — every visitor gets an anonymous workspace cookie (see
@@ -1019,6 +1062,92 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
       expect(shareFailedRes.statusCode).toBe(422);
     } finally {
       await failApp.close();
+    }
+  });
+
+  it("M6.1: rejects a run request whose outputFormat.schema is outside the supported subset (400, before the run is created)", async () => {
+    const conversation = await createConversationViaApi(app);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: {
+        question: "Q?",
+        mode: "quick",
+        outputFormat: {
+          type: "json_schema",
+          schema: { type: "object", properties: { a: { $ref: "#/x" } } },
+        },
+      },
+      headers: { cookie: conversation.cookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/outputFormat\.schema/);
+  });
+
+  it("M6.1: omitting outputFormat leaves GET /result unchanged (no userOutput field)", async () => {
+    const conversation = await createConversationViaApi(app);
+    const createRunRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: { question: "Q?", mode: "quick" },
+      headers: { cookie: conversation.cookie },
+    });
+    const { runId } = createRunRes.json();
+    await pollUntilSettled(app, runId, conversation.cookie);
+
+    const resultRes = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}/result`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(resultRes.statusCode).toBe(200);
+    expect(resultRes.json().userOutput).toBeUndefined();
+  });
+
+  it("M6.1: a run with a valid outputFormat surfaces a schema-validated userOutput alongside the normal result", async () => {
+    const formatProvider: ResolvedProvider = {
+      provider: new FormatAwareMockProvider(),
+      availableModelIds: ["model_a", "model_b", "model_c"],
+      isMock: true,
+      modelIdToProviderLabel: () => "mock",
+    };
+    const formatApp = buildApp({
+      db,
+      resolvedProvider: formatProvider,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      logger: false,
+    });
+    await formatApp.ready();
+    try {
+      const conversation = await createConversationViaApi(formatApp);
+      const createRunRes = await formatApp.inject({
+        method: "POST",
+        url: `/api/conversations/${conversation.id}/runs`,
+        payload: {
+          question: "Q?",
+          mode: "quick",
+          outputFormat: { type: "json_schema", schema: decisionSummarySchema },
+        },
+        headers: { cookie: conversation.cookie },
+      });
+      expect(createRunRes.statusCode).toBe(201);
+      const { runId } = createRunRes.json();
+      const status = await pollUntilSettled(formatApp, runId, conversation.cookie);
+      expect(status).toBe("completed");
+
+      const resultRes = await formatApp.inject({
+        method: "GET",
+        url: `/api/runs/${runId}/result`,
+        headers: { cookie: conversation.cookie },
+      });
+      expect(resultRes.statusCode).toBe(200);
+      const body = resultRes.json();
+      expect(body.userOutputError).toBeUndefined();
+      expect(body.userOutput).toEqual({ winner: "model_a", confidence: "high" });
+      // The main result is unaffected by the extra formatting step.
+      expect(body.final.final_answer).toBeDefined();
+    } finally {
+      await formatApp.close();
     }
   });
 });

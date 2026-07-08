@@ -227,6 +227,14 @@ export async function saveResult(
         timings: JSON.stringify(result.timings),
         quorum: JSON.stringify(result.quorum),
         cost: JSON.stringify(result.cost),
+        output_format: result.outputFormat
+          ? JSON.stringify(result.outputFormat)
+          : null,
+        user_output:
+          result.userOutput !== undefined
+            ? JSON.stringify(result.userOutput)
+            : null,
+        user_output_error: result.userOutputError ?? null,
       })
       .execute();
 
@@ -269,5 +277,8 @@ export async function getResult(
     timings: row.timings,
     quorum: row.quorum,
     cost: row.cost ?? undefined,
+    outputFormat: row.output_format ?? undefined,
+    userOutput: row.user_output ?? undefined,
+    userOutputError: row.user_output_error ?? undefined,
   };
 }

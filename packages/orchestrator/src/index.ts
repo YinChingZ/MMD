@@ -31,6 +31,7 @@ import {
 import {
   fanOutWithQuorum,
   callStructured,
+  callJsonSchema,
   type ModelProvider,
   type ModelConfig,
   type CompletionRequest,
@@ -46,10 +47,14 @@ import {
   buildComposePrompt,
   buildOutlinePrompt,
   buildSectionComposePrompt,
+  buildFormatUserOutputPrompt,
   type ReviewWithReviewer,
   type PositionChangeInput,
+  type FormatUserOutputRequest,
 } from "@mmd/prompts";
 import type { z } from "zod";
+
+export type { FormatUserOutputRequest };
 
 export type RunEventType =
   | "run_started"
@@ -121,6 +126,14 @@ export interface DeliberationInput {
    * default — see apps/api's route for where a default gets applied.
    */
   costLimitUsd?: number;
+  /**
+   * M6.1: optional caller-supplied JSON Schema. When set, one extra
+   * coordinator call reformats the already-finalized internal
+   * FinalAnswer/PlanDocument into this shape after the normal six-phase
+   * deliberation completes — it never replaces or feeds back into the
+   * internal result. Omitted entirely means today's behavior is unchanged.
+   */
+  outputFormat?: FormatUserOutputRequest;
 }
 
 /** Running total for the M5.1 cost circuit breaker, shared by reference across
@@ -190,6 +203,16 @@ export interface DeliberationResult {
   outline?: OutlineResult;
   topics?: TopicResult[];
   planDocument?: PlanDocument;
+  /**
+   * M6.1: echoes the request's outputFormat (so saveResult can persist the
+   * request/response pair together), the reformatted result once validated
+   * against it, or an error string if repair retries were exhausted — the
+   * latter never fails the run, matching per-model quorum's degrade-not-crash
+   * style.
+   */
+  outputFormat?: FormatUserOutputRequest;
+  userOutput?: unknown;
+  userOutputError?: string;
 }
 
 /** v0.2 planning mode: one outline topic's full propose->critique->revise->normalize->vote->classify result. */
@@ -408,6 +431,57 @@ async function structuredCall<T>(
     onUsage?.(result.usage);
     return result;
   }, schema);
+}
+
+/**
+ * M6.1: reformats an already-finalized internal result (FinalAnswer or
+ * PlanDocument) into a caller-supplied JSON shape. Never throws — a
+ * repair-exhausted failure here degrades to `userOutputError` rather than
+ * failing the whole run, matching the project's "one failure doesn't sink
+ * the run" style used for per-model quorum. Cost-limit enforcement happens
+ * at the call site (before this is invoked), same as every other phase.
+ */
+async function tryFormatUserOutput(params: {
+  provider: ModelProvider;
+  coordinator: ModelConfig;
+  question: string;
+  internalResult: unknown;
+  outputFormat: FormatUserOutputRequest;
+  costState: CostState;
+  emitStep: (
+    type: RunEventType,
+    data?: Record<string, unknown>
+  ) => void;
+}): Promise<{ userOutput?: unknown; userOutputError?: string }> {
+  const { provider, coordinator, question, internalResult, outputFormat, costState, emitStep } =
+    params;
+  emitStep("phase_started", { step: "format_user_output" });
+  try {
+    const userOutput = await callJsonSchema(async (repairNote) => {
+      const request = buildFormatUserOutputPrompt({
+        question,
+        internalResult,
+        outputFormat,
+      });
+      const req: CompletionRequest = repairNote
+        ? { ...request, userPrompt: `${request.userPrompt}\n\n${repairNote}` }
+        : request;
+      const result = await provider.complete(coordinator, req);
+      // Every attempt costs money, including repair retries.
+      recordUsage(costState, result.usage);
+      return result;
+    }, outputFormat.schema);
+    emitStep("phase_completed", { step: "format_user_output" });
+    return { userOutput };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    emitStep("phase_completed", {
+      step: "format_user_output",
+      failed: true,
+      error: message,
+    });
+    return { userOutputError: message };
+  }
 }
 
 export async function runDeliberation(
@@ -677,6 +751,36 @@ async function runStandardOrQuickDeliberation(
   timings.compose = Date.now() - t0;
   emit("phase_completed", "compose");
 
+  // --- Format to user-specified JSON (optional, M6.1) ---
+  let userOutput: unknown;
+  let userOutputError: string | undefined;
+  if (input.outputFormat) {
+    if (costLimitExceeded(costState, input.costLimitUsd)) {
+      emit("run_failed", undefined, {
+        step: "format_user_output",
+        reason: "cost_limit_exceeded",
+        estimatedUsd: costState.totalUsd,
+        limitUsd: input.costLimitUsd,
+      });
+      throw new CostLimitExceededError(
+        "format_user_output",
+        costState.totalUsd,
+        input.costLimitUsd!
+      );
+    }
+    const formatted = await tryFormatUserOutput({
+      provider: input.provider,
+      coordinator,
+      question: input.question,
+      internalResult: final,
+      outputFormat: input.outputFormat,
+      costState,
+      emitStep: (type, data) => emit(type, undefined, data),
+    });
+    userOutput = formatted.userOutput;
+    userOutputError = formatted.userOutputError;
+  }
+
   const cost: RunCostSummary = {
     totalUsd: costState.totalUsd,
     limitUsd: input.costLimitUsd,
@@ -699,6 +803,9 @@ async function runStandardOrQuickDeliberation(
     timings,
     quorum,
     cost,
+    outputFormat: input.outputFormat,
+    userOutput,
+    userOutputError,
   };
 }
 
@@ -1104,6 +1211,24 @@ async function runPlanningDeliberation(
     sections,
   };
 
+  // --- Format to user-specified JSON (optional, M6.1) ---
+  let userOutput: unknown;
+  let userOutputError: string | undefined;
+  if (input.outputFormat) {
+    assertWithinCostLimit("format_user_output");
+    const formatted = await tryFormatUserOutput({
+      provider: input.provider,
+      coordinator,
+      question: input.question,
+      internalResult: planDocument,
+      outputFormat: input.outputFormat,
+      costState,
+      emitStep: (type, data) => emit(type, undefined, data),
+    });
+    userOutput = formatted.userOutput;
+    userOutputError = formatted.userOutputError;
+  }
+
   const cost: RunCostSummary = {
     totalUsd: costState.totalUsd,
     limitUsd: input.costLimitUsd,
@@ -1146,5 +1271,8 @@ async function runPlanningDeliberation(
     outline,
     topics,
     planDocument,
+    outputFormat: input.outputFormat,
+    userOutput,
+    userOutputError,
   };
 }

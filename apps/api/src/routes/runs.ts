@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getProviderBaseUrl, getProviderDisplayName } from "@mmd/protocol";
+import { validateOutputFormatSchema } from "@mmd/model-adapters";
 import type { AppDeps } from "../app.js";
 import { buildRunProvider } from "../config/provider-factory.js";
 import { resolveWorkspace } from "../middleware/workspace.js";
@@ -74,6 +75,19 @@ const CreateRunBody = z.object({
   // Omitted entirely (not just falsy) triggers DEFAULT_COST_LIMIT_USD — there
   // is no way to request "no limit at all" from the HTTP API.
   costLimitUsd: z.number().positive().optional(),
+  // M6.1: optional caller-supplied JSON Schema. When set, the deliberation's
+  // normal FinalAnswer/PlanDocument gets reformatted into this shape as an
+  // extra, additive step — schema.schema itself gets a second pass through
+  // validateOutputFormatSchema below (the v1-subset/depth/size check), since
+  // zod here only confirms the request's own shape, not the schema's content.
+  outputFormat: z
+    .object({
+      type: z.literal("json_schema"),
+      name: z.string().min(1).optional(),
+      schema: z.record(z.unknown()),
+      instructions: z.string().optional(),
+    })
+    .optional(),
 });
 
 export async function runsRoutes(
@@ -108,7 +122,18 @@ export async function runsRoutes(
         modelIds,
         byokModels = [],
         costLimitUsd = DEFAULT_COST_LIMIT_USD,
+        outputFormat,
       } = parsed.data;
+
+      if (outputFormat) {
+        const schemaCheck = validateOutputFormatSchema(outputFormat.schema);
+        if (!schemaCheck.ok) {
+          return reply
+            .code(400)
+            .send({ error: `invalid outputFormat.schema: ${schemaCheck.error}` });
+        }
+      }
+
       const { availableModelIds } = deps.resolvedProvider;
 
       // Omitting modelIds keeps the pre-BYOK default of "use every registry
@@ -219,6 +244,7 @@ export async function runsRoutes(
         provider: runProvider.provider,
         coordinatorModelId: runProvider.coordinatorModelId,
         costLimitUsd,
+        outputFormat,
       });
 
       return reply.code(201).send({ runId, status: "running" });

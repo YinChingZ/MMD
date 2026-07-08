@@ -4,7 +4,7 @@ export interface StructuredCallOptions {
   maxRepairAttempts?: number;
 }
 
-function extractJson(text: string): string {
+export function extractJson(text: string): string {
   const fenced =
     text.match(/```json\s*([\s\S]*?)```/i) ?? text.match(/```\s*([\s\S]*?)```/);
   return (fenced ? fenced[1] : text).trim();

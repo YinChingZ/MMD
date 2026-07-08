@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { RunMode } from "@mmd/protocol";
-import { createRun } from "@/lib/api";
+import { createRun, type OutputFormatInput } from "@/lib/api";
 import { buildCreateRunPayload, type ByokEntryUI } from "@/lib/model-sources";
 import { ByokModelForm } from "./ByokModelForm";
 import { CostEstimateLine } from "./CostEstimateLine";
@@ -24,6 +24,7 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [byokEntries, setByokEntries] = useState<ByokEntryUI[]>([]);
   const [costLimitUsd, setCostLimitUsd] = useState(DEFAULT_COST_LIMIT_USD);
+  const [outputSchemaText, setOutputSchemaText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,6 +37,23 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
 
   const submit = async () => {
     if (!question.trim() || !hasAnyModel) return;
+
+    let outputFormat: OutputFormatInput | undefined;
+    if (outputSchemaText.trim()) {
+      try {
+        const schema = JSON.parse(outputSchemaText);
+        if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+          throw new Error("must be a JSON object");
+        }
+        outputFormat = { type: "json_schema", schema };
+      } catch (err) {
+        setError(
+          `Custom JSON output schema is not valid JSON: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return;
+      }
+    }
+
     setSubmitting(true);
     setError(null);
     try {
@@ -47,6 +65,7 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
           modelIds,
           byokEntries,
           costLimitUsd,
+          outputFormat,
         })
       );
       router.push(`/conversations/${conversationId}/runs/${runId}`);
@@ -100,6 +119,27 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
         modelCount={modelIds.length + byokEntries.length}
       />
       <CostEstimateLine costLimitUsd={costLimitUsd} onChange={setCostLimitUsd} />
+
+      <details className="rounded border border-gray-200 p-2">
+        <summary className="cursor-pointer text-sm font-medium text-gray-700">
+          Custom JSON output (optional)
+        </summary>
+        <div className="mt-2 flex flex-col gap-1">
+          <p className="text-xs text-gray-500">
+            Paste a JSON Schema and the final result will also be reformatted
+            into that shape, validated, and returned alongside the normal
+            answer. Leave blank for the default behavior.
+          </p>
+          <textarea
+            className="min-h-32 rounded border border-gray-300 p-2 font-mono text-xs"
+            placeholder={
+              '{\n  "type": "object",\n  "required": ["winner"],\n  "properties": {\n    "winner": { "type": "string" }\n  }\n}'
+            }
+            value={outputSchemaText}
+            onChange={(e) => setOutputSchemaText(e.target.value)}
+          />
+        </div>
+      </details>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 

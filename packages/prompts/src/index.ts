@@ -7,3 +7,4 @@ export * from "./vote.js";
 export * from "./compose.js";
 export * from "./outline.js";
 export * from "./section-compose.js";
+export * from "./format-user-output.js";
