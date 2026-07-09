@@ -18,7 +18,10 @@ export function extractJson(text: string): string {
  * whole phase on the first malformed response.
  */
 export async function callStructured<T>(
-  complete: (repairNote?: string) => Promise<{ text: string }>,
+  // `attempt` is additive (M6.3): identifies which repair generation this
+  // call is, so a caller streaming per-item previews mid-call knows to
+  // discard a previous attempt's preview items rather than append to them.
+  complete: (repairNote?: string, attempt?: number) => Promise<{ text: string }>,
   // Input is widened to `any` (rather than defaulting to T) because schemas
   // with `.default(...)` have an Output type that differs from their Input
   // type; pinning both to T here made TS unify T with the wrong one.
@@ -32,7 +35,7 @@ export async function callStructured<T>(
     const repairNote = lastError
       ? `Your previous output failed JSON schema validation: ${lastError}. Return corrected JSON only, no prose.`
       : undefined;
-    const { text } = await complete(repairNote);
+    const { text } = await complete(repairNote, attempt);
 
     try {
       const parsed = JSON.parse(extractJson(text));

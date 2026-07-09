@@ -40,4 +40,19 @@ export interface CompletionResult {
 export interface ModelProvider {
   readonly name: string;
   complete(config: ModelConfig, request: CompletionRequest): Promise<CompletionResult>;
+  /**
+   * Optional streaming variant, added for M6.3/M6.4. Providers that don't
+   * implement it (MockProvider by default, any future provider) keep working
+   * exactly as today — every call site checks `provider.completeStream`
+   * before using it and falls back to `complete()`. `opts.timeoutMs` is
+   * advisory: implementations that make a real network call should tie an
+   * AbortController to it so an abandoned stream actually stops instead of
+   * continuing to run in the background after the caller has moved on.
+   */
+  completeStream?(
+    config: ModelConfig,
+    request: CompletionRequest,
+    onDelta: (delta: string) => void,
+    opts?: { timeoutMs?: number }
+  ): Promise<CompletionResult>;
 }

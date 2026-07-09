@@ -35,6 +35,115 @@ describe("deriveRunProgress — standard/quick mode", () => {
     if (progress.kind !== "flat") throw new Error("expected flat");
     expect(progress.phases.vote).toBe("failed");
   });
+
+  it("accumulates model_responded events into modelProgress for the current phase", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose" }),
+      event({
+        seq: 2,
+        type: "model_responded",
+        phase: "propose",
+        data: { modelId: "model_a", ok: true, latencyMs: 120, total: 3 },
+      }),
+      event({
+        seq: 3,
+        type: "model_responded",
+        phase: "propose",
+        data: { modelId: "model_b", ok: false, latencyMs: 50, total: 3 },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "standard");
+    if (progress.kind !== "flat") throw new Error("expected flat");
+    expect(progress.modelProgress.propose?.total).toBe(3);
+    expect(progress.modelProgress.propose?.responded).toEqual([
+      { modelId: "model_a", ok: true, latencyMs: 120 },
+      { modelId: "model_b", ok: false, latencyMs: 50 },
+    ]);
+  });
+
+  it("resets modelProgress when a phase restarts", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose" }),
+      event({
+        seq: 2,
+        type: "model_responded",
+        phase: "propose",
+        data: { modelId: "model_a", ok: true, latencyMs: 10, total: 3 },
+      }),
+      event({ seq: 3, type: "phase_started", phase: "propose" }),
+    ];
+    const progress = deriveRunProgress(events, "standard");
+    if (progress.kind !== "flat") throw new Error("expected flat");
+    expect(progress.modelProgress.propose?.responded).toEqual([]);
+  });
+
+  it("appends item_progress items (index > 0) to the same model's list", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose" }),
+      event({
+        seq: 2,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "c0" }, attempt: 0 },
+      }),
+      event({
+        seq: 3,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_a", arrayField: "claims", index: 1, item: { claim_id: "c1" }, attempt: 0 },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "standard");
+    if (progress.kind !== "flat") throw new Error("expected flat");
+    expect(progress.itemProgress.propose?.model_a).toEqual({
+      modelId: "model_a",
+      arrayField: "claims",
+      items: [{ claim_id: "c0" }, { claim_id: "c1" }],
+    });
+  });
+
+  it("resets a model's item_progress list when index === 0 arrives again (repair-retry or network-retry restart)", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose" }),
+      event({
+        seq: 2,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "stale" }, attempt: 0 },
+      }),
+      event({
+        seq: 3,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "fresh" }, attempt: 1 },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "standard");
+    if (progress.kind !== "flat") throw new Error("expected flat");
+    expect(progress.itemProgress.propose?.model_a?.items).toEqual([{ claim_id: "fresh" }]);
+  });
+
+  it("tracks item_progress independently per model within a phase", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose" }),
+      event({
+        seq: 2,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "a0" }, attempt: 0 },
+      }),
+      event({
+        seq: 3,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_b", arrayField: "claims", index: 0, item: { claim_id: "b0" }, attempt: 0 },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "standard");
+    if (progress.kind !== "flat") throw new Error("expected flat");
+    expect(progress.itemProgress.propose?.model_a?.items).toEqual([{ claim_id: "a0" }]);
+    expect(progress.itemProgress.propose?.model_b?.items).toEqual([{ claim_id: "b0" }]);
+  });
 });
 
 describe("deriveRunProgress — planning mode", () => {
@@ -86,5 +195,63 @@ describe("deriveRunProgress — planning mode", () => {
     expect(progress.topics.get("topic_1")?.failed).toBe(true);
     expect(progress.topics.get("topic_1")?.error).toBe("quorum not met");
     expect(progress.topics.get("topic_2")?.failed).toBe(false);
+  });
+
+  it("tracks modelProgress independently per topic", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose", topicId: "topic_1" }),
+      event({
+        seq: 2,
+        type: "model_responded",
+        phase: "propose",
+        topicId: "topic_1",
+        data: { modelId: "model_a", ok: true, latencyMs: 30, total: 3 },
+      }),
+      event({ seq: 3, type: "phase_started", phase: "propose", topicId: "topic_2" }),
+      event({
+        seq: 4,
+        type: "model_responded",
+        phase: "propose",
+        topicId: "topic_2",
+        data: { modelId: "model_b", ok: true, latencyMs: 40, total: 3 },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "planning");
+    if (progress.kind !== "planning") throw new Error("expected planning");
+    expect(progress.topics.get("topic_1")?.modelProgress.propose?.responded).toEqual([
+      { modelId: "model_a", ok: true, latencyMs: 30 },
+    ]);
+    expect(progress.topics.get("topic_2")?.modelProgress.propose?.responded).toEqual([
+      { modelId: "model_b", ok: true, latencyMs: 40 },
+    ]);
+  });
+
+  it("tracks itemProgress independently per topic", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose", topicId: "topic_1" }),
+      event({
+        seq: 2,
+        type: "item_progress",
+        phase: "propose",
+        topicId: "topic_1",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "t1" }, attempt: 0 },
+      }),
+      event({ seq: 3, type: "phase_started", phase: "propose", topicId: "topic_2" }),
+      event({
+        seq: 4,
+        type: "item_progress",
+        phase: "propose",
+        topicId: "topic_2",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "t2" }, attempt: 0 },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "planning");
+    if (progress.kind !== "planning") throw new Error("expected planning");
+    expect(progress.topics.get("topic_1")?.itemProgress.propose?.model_a?.items).toEqual([
+      { claim_id: "t1" },
+    ]);
+    expect(progress.topics.get("topic_2")?.itemProgress.propose?.model_a?.items).toEqual([
+      { claim_id: "t2" },
+    ]);
   });
 });

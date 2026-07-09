@@ -7,6 +7,11 @@ import {
   FinalAnswerSchema,
   OutlineResultSchema,
   SectionAnswerSchema,
+  ClaimSchema,
+  ReviewSchema,
+  RevisionSchema,
+  BallotSchema,
+  CandidateClaimSchema,
   classifyCandidate,
   makeRunId,
   getBudget,
@@ -32,11 +37,14 @@ import {
   fanOutWithQuorum,
   callStructured,
   callJsonSchema,
+  createValidatedArrayItemWatcher,
+  createStringFieldWatcher,
   type ModelProvider,
   type ModelConfig,
   type CompletionRequest,
   type CompletionUsage,
   type FanoutOutcome,
+  type FanoutResult,
 } from "@mmd/model-adapters";
 import {
   buildProposePrompt,
@@ -59,6 +67,9 @@ export type { FormatUserOutputRequest };
 export type RunEventType =
   | "run_started"
   | "phase_started"
+  | "model_responded"
+  | "item_progress"
+  | "token"
   | "phase_completed"
   | "run_failed"
   | "run_completed";
@@ -80,6 +91,24 @@ function describeFailures<T>(outcome: FanoutOutcome<T>): ModelFailure[] {
   return outcome.results
     .filter((r): r is Extract<typeof r, { ok: false }> => !r.ok)
     .map((r) => ({ modelId: r.config.id, message: r.error.message }));
+}
+
+/** Builds a `fanOutWithQuorum` `onSettled` callback that emits a
+ * "model_responded" event the instant each model's call settles, so the
+ * frontend can show per-model progress within a phase instead of waiting
+ * for the whole phase to finish. */
+function reportModelResponded(
+  emit: (type: RunEventType, phase?: Phase, data?: Record<string, unknown>) => void,
+  phase: Phase
+) {
+  return (result: FanoutResult<unknown>, _index: number, total: number) =>
+    emit("model_responded", phase, {
+      modelId: result.config.id,
+      ok: result.ok,
+      latencyMs: result.latencyMs,
+      total,
+      ...(result.ok ? {} : { error: result.error.message }),
+    });
 }
 
 export class DeliberationQuorumError extends Error {
@@ -414,23 +443,129 @@ function computePositionChanges(
   );
 }
 
+/** Optional streaming hooks for `structuredCall` (M6.3/M6.4) — additive, so
+ * every call site that doesn't pass this is unaffected. */
+interface StreamHooks {
+  /** Fresh delta handler per repair `attempt` — the call site's factory is
+   * responsible for resetting its internal state when `attempt` changes,
+   * since this arrow function itself is re-created from scratch on every
+   * fanOutWithQuorum network retry (a new `stream` object is built at each
+   * call site invocation), and callStructured's own repair-retry loop reuses
+   * the same `stream` object across attempts within one call. */
+  onDelta?: (delta: string, attempt: number) => void;
+  /** Passed through to provider.completeStream's own abort timer. */
+  timeoutMs?: number;
+}
+
 async function structuredCall<T>(
   provider: ModelProvider,
   config: ModelConfig,
   request: CompletionRequest,
   schema: z.ZodType<T, z.ZodTypeDef, any>,
-  onUsage?: (usage: CompletionUsage | undefined) => void
+  onUsage?: (usage: CompletionUsage | undefined) => void,
+  stream?: StreamHooks
 ): Promise<T> {
-  return callStructured(async (repairNote) => {
+  return callStructured(async (repairNote, attempt = 0) => {
     const req: CompletionRequest = repairNote
       ? { ...request, userPrompt: `${request.userPrompt}\n\n${repairNote}` }
       : request;
+    if (provider.completeStream && stream?.onDelta) {
+      const result = await provider.completeStream(
+        config,
+        req,
+        (delta) => stream.onDelta!(delta, attempt),
+        { timeoutMs: stream.timeoutMs }
+      );
+      onUsage?.(result.usage);
+      return result;
+    }
     const result = await provider.complete(config, req);
     // Every attempt costs money, including repair retries — report each one,
     // not just the final accepted attempt.
     onUsage?.(result.usage);
     return result;
   }, schema);
+}
+
+/** Per-phase item-array field + element schema, for M6.3's progressive
+ * parsing — only these five phases fan out an array of a validated element
+ * type; normalize/compose/outline/section_compose are excluded (normalize's
+ * candidate_claims IS covered here since it's a fan-out-free single
+ * coordinator call but still an array of a validated element type). */
+const ARRAY_STREAM_CONFIG: Partial<
+  Record<Phase, { field: string; schema: z.ZodType<any, any, any> }>
+> = {
+  propose: { field: "claims", schema: ClaimSchema },
+  critique: { field: "reviews", schema: ReviewSchema },
+  revise: { field: "revisions", schema: RevisionSchema },
+  vote: { field: "votes", schema: BallotSchema },
+  normalize: { field: "candidate_claims", schema: CandidateClaimSchema },
+};
+
+/** Builds a `StreamHooks.onDelta` that feeds a per-(phase,model) array-item
+ * watcher, emitting a validated `item_progress` event for each item the
+ * instant it's complete. A fresh watcher (index reset to 0) is created
+ * whenever `attempt` changes — this is what makes "new attempt = clear and
+ * redraw" work on the frontend with no extra backend bookkeeping: the same
+ * `index === 0` signal also covers a `fanOutWithQuorum` network retry, since
+ * the whole arrow function that builds this handler is re-invoked from
+ * scratch on retry. */
+function makeItemStreamHandler(
+  emit: (type: RunEventType, phase?: Phase, data?: Record<string, unknown>) => void,
+  phase: Phase,
+  arrayField: string,
+  itemSchema: z.ZodType<any, any, any>,
+  modelId: string
+): (delta: string, attempt: number) => void {
+  let currentAttempt = -1;
+  let watcher: { feed: (delta: string) => void } | null = null;
+  let index = 0;
+  return (delta, attempt) => {
+    if (attempt !== currentAttempt) {
+      currentAttempt = attempt;
+      index = 0;
+      watcher = createValidatedArrayItemWatcher(arrayField, itemSchema, (item) => {
+        emit("item_progress", phase, { modelId, arrayField, index: index++, item, attempt });
+      });
+    }
+    watcher!.feed(delta);
+  };
+}
+
+function itemStreamHooks(
+  emit: (type: RunEventType, phase?: Phase, data?: Record<string, unknown>) => void,
+  phase: Phase,
+  modelId: string,
+  timeoutMs: number
+): StreamHooks | undefined {
+  const cfg = ARRAY_STREAM_CONFIG[phase];
+  if (!cfg) return undefined;
+  return { onDelta: makeItemStreamHandler(emit, phase, cfg.field, cfg.schema, modelId), timeoutMs };
+}
+
+/** M6.4: builds a `StreamHooks.onDelta` that relays a prose field's unescaped
+ * characters via `token` events as they arrive. Unlike M6.3's item watcher,
+ * compose/section_compose never go through fanOutWithQuorum (single
+ * coordinator call / one call per topic, not fanned out), so there's no
+ * network-retry race to reason about — only callStructured's own repair
+ * `attempt` matters, handled the same way (fresh watcher per attempt). */
+function makeTokenStreamHandler(
+  emit: (type: RunEventType, phase?: Phase, data?: Record<string, unknown>) => void,
+  phase: Phase,
+  targetField: string,
+  extraData?: Record<string, unknown>
+): (delta: string, attempt: number) => void {
+  let currentAttempt = -1;
+  let watcher: { feed: (delta: string) => void } | null = null;
+  return (delta, attempt) => {
+    if (attempt !== currentAttempt) {
+      currentAttempt = attempt;
+      watcher = createStringFieldWatcher(targetField, (text) => {
+        emit("token", phase, { delta: text, ...extraData });
+      });
+    }
+    watcher!.feed(delta);
+  };
 }
 
 /**
@@ -548,9 +683,10 @@ async function runStandardOrQuickDeliberation(
         config,
         buildProposePrompt({ question: input.question, modelId: config.id }),
         ProposalSchema,
-        (usage) => recordUsage(costState, usage)
+        (usage) => recordUsage(costState, usage),
+        itemStreamHooks(emit, "propose", config.id, fanout.timeoutMs)
       ),
-    fanout
+    { ...fanout, onSettled: reportModelResponded(emit, "propose") }
   );
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
@@ -586,9 +722,10 @@ async function runStandardOrQuickDeliberation(
             proposals,
           }),
           CritiqueSchema,
-          (usage) => recordUsage(costState, usage)
+          (usage) => recordUsage(costState, usage),
+          itemStreamHooks(emit, "critique", config.id, fanout.timeoutMs)
         ),
-      fanout
+      { ...fanout, onSettled: reportModelResponded(emit, "critique") }
     );
     timings.critique = Date.now() - t0;
     quorum.critique = critiqueOutcome.quorum;
@@ -627,9 +764,10 @@ async function runStandardOrQuickDeliberation(
             reviewsOnMine: reviewsForModel(config.id, proposals, critiques),
           }),
           RevisionSetSchema,
-          (usage) => recordUsage(costState, usage)
+          (usage) => recordUsage(costState, usage),
+          itemStreamHooks(emit, "revise", config.id, fanout.timeoutMs)
         ),
-      fanout
+      { ...fanout, onSettled: reportModelResponded(emit, "revise") }
     );
     timings.revise = Date.now() - t0;
     quorum.revise = reviseOutcome.quorum;
@@ -663,7 +801,8 @@ async function runStandardOrQuickDeliberation(
       claims: finalClaims,
     }),
     NormalizeResultSchema,
-    (usage) => recordUsage(costState, usage)
+    (usage) => recordUsage(costState, usage),
+    itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
   );
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
@@ -691,9 +830,10 @@ async function runStandardOrQuickDeliberation(
             })),
           }),
           VoteSetSchema,
-          (usage) => recordUsage(costState, usage)
+          (usage) => recordUsage(costState, usage),
+          itemStreamHooks(emit, "vote", config.id, fanout.timeoutMs)
         ),
-      fanout
+      { ...fanout, onSettled: reportModelResponded(emit, "vote") }
     );
     timings.vote = Date.now() - t0;
     quorum.vote = voteOutcome.quorum;
@@ -746,7 +886,11 @@ async function runStandardOrQuickDeliberation(
       positionChanges,
     }),
     FinalAnswerSchema,
-    (usage) => recordUsage(costState, usage)
+    (usage) => recordUsage(costState, usage),
+    {
+      onDelta: makeTokenStreamHandler(emit, "compose", "final_answer"),
+      timeoutMs: fanout.timeoutMs,
+    }
   );
   timings.compose = Date.now() - t0;
   emit("phase_completed", "compose");
@@ -884,9 +1028,10 @@ async function runTopicDeliberation(
         config,
         buildProposePrompt({ question, modelId: config.id, topic }),
         ProposalSchema,
-        (usage) => recordUsage(costState, usage)
+        (usage) => recordUsage(costState, usage),
+        itemStreamHooks(emit, "propose", config.id, fanout.timeoutMs)
       ),
-    fanout
+    { ...fanout, onSettled: reportModelResponded(emit, "propose") }
   );
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
@@ -920,9 +1065,10 @@ async function runTopicDeliberation(
           topic,
         }),
         CritiqueSchema,
-        (usage) => recordUsage(costState, usage)
+        (usage) => recordUsage(costState, usage),
+        itemStreamHooks(emit, "critique", config.id, fanout.timeoutMs)
       ),
-    fanout
+    { ...fanout, onSettled: reportModelResponded(emit, "critique") }
   );
   timings.critique = Date.now() - t0;
   quorum.critique = critiqueOutcome.quorum;
@@ -957,9 +1103,10 @@ async function runTopicDeliberation(
           reviewsOnMine: reviewsForModel(config.id, proposals, critiques),
         }),
         RevisionSetSchema,
-        (usage) => recordUsage(costState, usage)
+        (usage) => recordUsage(costState, usage),
+        itemStreamHooks(emit, "revise", config.id, fanout.timeoutMs)
       ),
-    fanout
+    { ...fanout, onSettled: reportModelResponded(emit, "revise") }
   );
   timings.revise = Date.now() - t0;
   quorum.revise = reviseOutcome.quorum;
@@ -987,7 +1134,8 @@ async function runTopicDeliberation(
     coordinator,
     buildNormalizePrompt({ question, claims: finalClaims, topic }),
     NormalizeResultSchema,
-    (usage) => recordUsage(costState, usage)
+    (usage) => recordUsage(costState, usage),
+    itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
   );
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
@@ -1012,9 +1160,10 @@ async function runTopicDeliberation(
           })),
         }),
         VoteSetSchema,
-        (usage) => recordUsage(costState, usage)
+        (usage) => recordUsage(costState, usage),
+        itemStreamHooks(emit, "vote", config.id, fanout.timeoutMs)
       ),
-    fanout
+    { ...fanout, onSettled: reportModelResponded(emit, "vote") }
   );
   timings.vote = Date.now() - t0;
   quorum.vote = voteOutcome.quorum;
@@ -1195,7 +1344,13 @@ async function runPlanningDeliberation(
           positionChanges,
         }),
         SectionAnswerSchema,
-        (usage) => recordUsage(costState, usage)
+        (usage) => recordUsage(costState, usage),
+        {
+          onDelta: makeTokenStreamHandler(emit, "compose", "section_answer", {
+            topicId: topicResult.topic.topic_id,
+          }),
+          timeoutMs: fanout.timeoutMs,
+        }
       );
       topicResult.timings.compose = Date.now() - sectionStart;
       return stampSectionAnswer(topicResult.topic, section);

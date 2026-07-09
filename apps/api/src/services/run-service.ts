@@ -7,7 +7,7 @@ import {
   type RunEvent,
 } from "@mmd/orchestrator";
 import type { Database } from "../db/client.js";
-import { appendRunEvent } from "../repositories/events-repo.js";
+import { appendRunEvent, extractTopicId } from "../repositories/events-repo.js";
 import {
   createRun,
   markRunCompleted,
@@ -31,6 +31,11 @@ export interface StartRunParams {
 }
 
 const TERMINAL_TYPES = new Set(["run_completed", "run_failed"]);
+/** M6.4: high-frequency token deltas — never persisted (write amplification)
+ * and never replayable on reconnect (the eventual phase_completed already
+ * carries the full final text), so they skip appendRunEvent/the seq counter
+ * entirely and go straight to a broadcast-only path. */
+const EPHEMERAL_TYPES = new Set(["token"]);
 
 export class RunService {
   constructor(
@@ -69,6 +74,28 @@ export class RunService {
     });
 
     const onEvent = (event: RunEvent) => {
+      // Both branches chain off the same eventChain, and onEvent calls
+      // happen synchronously in emission order (Node is single-threaded, so
+      // each call reassigns eventChain before the next emit() runs) —
+      // preserving relative ordering between ephemeral and persisted events
+      // without a DB round trip for the ephemeral ones.
+      if (EPHEMERAL_TYPES.has(event.type)) {
+        eventChain = eventChain
+          .then(() => {
+            this.broadcaster.publishEphemeral(runId, {
+              type: event.type,
+              phase: event.phase ?? null,
+              topicId: extractTopicId(event.data),
+              data: event.data ?? {},
+              createdAt: new Date().toISOString(),
+            });
+          })
+          .catch((err) => {
+            console.error(`run ${runId}: failed to broadcast ephemeral event`, err);
+          });
+        return;
+      }
+
       seq += 1;
       const currentSeq = seq;
       const isTerminal = TERMINAL_TYPES.has(event.type);

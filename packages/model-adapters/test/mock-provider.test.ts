@@ -154,3 +154,50 @@ describe("MockProvider — every phase output must validate against @mmd/protoco
     expect(result.usage!.costUsd).toBe(5);
   });
 });
+
+describe("MockProvider — M6.3/M6.4 opt-in completeStream", () => {
+  it("does not attach completeStream at all when streaming is unset (default)", () => {
+    const provider = new MockProvider();
+    expect(provider.completeStream).toBeUndefined();
+  });
+
+  it("does not attach completeStream when streaming is explicitly false", () => {
+    const provider = new MockProvider({ streaming: false });
+    expect(provider.completeStream).toBeUndefined();
+  });
+
+  it("attaches completeStream when streaming is true, and its deltas reconstruct the same text complete() returns", async () => {
+    const provider = new MockProvider({ streaming: true, streamChunkSize: 5 });
+    expect(provider.completeStream).toBeDefined();
+
+    const request = {
+      systemPrompt: "",
+      userPrompt: "q",
+      meta: { phase: "propose", question: "Is X true?" },
+    };
+    const nonStreamed = await provider.complete(config, request);
+
+    let reconstructed = "";
+    const streamed = await provider.completeStream!(config, request, (delta) => {
+      reconstructed += delta;
+    });
+
+    expect(reconstructed).toBe(nonStreamed.text);
+    expect(streamed.text).toBe(nonStreamed.text);
+    expect(ProposalSchema.safeParse(JSON.parse(streamed.text)).success).toBe(true);
+  });
+
+  it("completeStream still simulates failModelIds", async () => {
+    const provider = new MockProvider({
+      streaming: true,
+      failModelIds: new Set(["model_a"]),
+    });
+    await expect(
+      provider.completeStream!(
+        config,
+        { systemPrompt: "", userPrompt: "", meta: { phase: "propose", question: "q" } },
+        () => {}
+      )
+    ).rejects.toThrow(/simulated failure/);
+  });
+});

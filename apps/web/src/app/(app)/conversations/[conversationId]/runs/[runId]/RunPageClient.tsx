@@ -3,9 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { getRunResult, type RunResult } from "@/lib/api";
 import { deriveRunProgress } from "@/lib/progress";
+import { ROOT_COMPOSE_KEY } from "@/lib/run-events";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useRunStatus } from "@/hooks/useRunStatus";
 import { ErrorPanel } from "@/components/ErrorPanel";
+import { FinalAnswerPanel } from "@/components/FinalAnswerPanel";
+import { LivePhaseItems } from "@/components/LivePhaseItems";
 import { PhaseProgress } from "@/components/PhaseProgress";
 import { PlanningPhaseProgress } from "@/components/PlanningPhaseProgress";
 import { RunResultView } from "@/components/RunResultView";
@@ -15,7 +18,7 @@ import { ShareButton } from "@/components/ShareButton";
 export function RunPageClient({ runId }: { runId: string }) {
   const { run, loading } = useRunStatus(runId);
   const isRunning = run?.status === "running";
-  const events = useRunEvents(runId, isRunning);
+  const { events, composeText } = useRunEvents(runId, isRunning);
   const progress = useMemo(
     () => (run ? deriveRunProgress(events, run.mode) : null),
     [events, run]
@@ -50,9 +53,22 @@ export function RunPageClient({ runId }: { runId: string }) {
       {run.status === "running" && progress && (
         <div className="rounded border border-gray-200 p-4">
           {progress.kind === "flat" ? (
-            <PhaseProgress mode={run.mode} progress={progress} />
+            <>
+              <PhaseProgress mode={run.mode} progress={progress} />
+              <div className="mt-3">
+                <LivePhaseItems itemProgress={progress.itemProgress} phases={progress.phases} />
+              </div>
+              {progress.phases.compose === "in_progress" && (
+                <div className="mt-3">
+                  <FinalAnswerPanel
+                    title="Final answer (typing…)"
+                    text={composeText[ROOT_COMPOSE_KEY] ?? ""}
+                  />
+                </div>
+              )}
+            </>
           ) : (
-            <PlanningPhaseProgress progress={progress} />
+            <PlanningPhaseProgress progress={progress} composeText={composeText} />
           )}
         </div>
       )}

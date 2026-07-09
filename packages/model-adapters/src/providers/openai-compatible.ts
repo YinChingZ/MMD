@@ -101,6 +101,88 @@ export class OpenAICompatibleProvider implements ModelProvider {
     };
   }
 
+  async completeStream(
+    config: ModelConfig,
+    request: CompletionRequest,
+    onDelta: (delta: string) => void,
+    opts?: { timeoutMs?: number }
+  ): Promise<CompletionResult> {
+    const apiKey = this.literalApiKey ?? process.env[this.apiKeyEnvVar];
+    if (!apiKey) {
+      throw new Error(
+        `missing API key: set ${this.apiKeyEnvVar} to use ${this.name} for model "${config.id}"`
+      );
+    }
+
+    const controller = new AbortController();
+    const timer = opts?.timeoutMs
+      ? setTimeout(() => controller.abort(), opts.timeoutMs)
+      : undefined;
+    const start = Date.now();
+    try {
+      const res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: config.id,
+          stream: true,
+          stream_options: { include_usage: true },
+          messages: [
+            { role: "system", content: request.systemPrompt },
+            { role: "user", content: request.userPrompt },
+          ],
+        }),
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error(
+          `${this.name} stream request failed for "${config.id}": ${res.status} ${await res
+            .text()
+            .catch(() => "")}`
+        );
+      }
+
+      let text = "";
+      let usageRaw: Record<string, unknown> | undefined;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const line = frame.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") continue;
+          const chunk = JSON.parse(payload);
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta.length > 0) {
+            text += delta;
+            onDelta(delta);
+          }
+          if (chunk.usage) usageRaw = chunk.usage;
+        }
+      }
+
+      return {
+        text,
+        latencyMs: Date.now() - start,
+        usage: this.parseUsage(usageRaw, config.id),
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private parseUsage(
     raw: Record<string, unknown> | undefined,
     modelId: string

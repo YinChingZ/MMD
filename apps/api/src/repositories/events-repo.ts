@@ -11,7 +11,7 @@ export interface PersistedRunEvent {
   createdAt: string;
 }
 
-function extractTopicId(data: unknown): string | null {
+export function extractTopicId(data: unknown): string | null {
   if (data && typeof data === "object" && "topicId" in data) {
     const topicId = (data as Record<string, unknown>).topicId;
     return typeof topicId === "string" ? topicId : null;

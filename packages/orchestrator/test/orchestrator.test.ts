@@ -206,6 +206,374 @@ describe("runDeliberation — M1 acceptance criteria", () => {
   });
 });
 
+describe("runDeliberation — M6.2 per-model progress events", () => {
+  it("standard mode: emits a model_responded event per model for every fan-out phase, none for normalize/compose", async () => {
+    const events: RunEvent[] = [];
+    await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      onEvent: (e) => events.push(e),
+    });
+
+    const responded = events.filter((e) => e.type === "model_responded");
+    expect(responded).toHaveLength(12); // 4 fan-out phases x 3 models
+
+    const phases = new Set(responded.map((e) => e.phase));
+    expect(phases).toEqual(new Set(["propose", "critique", "revise", "vote"]));
+
+    for (const event of responded) {
+      const data = event.data as {
+        modelId: string;
+        ok: boolean;
+        latencyMs: number;
+        total: number;
+      };
+      expect(models.map((m) => m.id)).toContain(data.modelId);
+      expect(data.ok).toBe(true);
+      expect(typeof data.latencyMs).toBe("number");
+      expect(data.total).toBe(3);
+    }
+  });
+
+  it("quick mode: only propose fans out, so model_responded is emitted only for propose", async () => {
+    const events: RunEvent[] = [];
+    await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      mode: "quick",
+      onEvent: (e) => events.push(e),
+    });
+
+    const responded = events.filter((e) => e.type === "model_responded");
+    expect(responded).toHaveLength(3);
+    expect(responded.every((e) => e.phase === "propose")).toBe(true);
+  });
+
+  it("a failing model's event carries ok:false and an error message, others stay ok:true", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ failModelIds: new Set(["model_c"]) }),
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+
+    const proposeEvents = events.filter(
+      (e) => e.type === "model_responded" && e.phase === "propose"
+    );
+    expect(proposeEvents).toHaveLength(3);
+    const failed = proposeEvents.find(
+      (e) => (e.data as { modelId: string }).modelId === "model_c"
+    );
+    expect((failed?.data as { ok: boolean; error?: string }).ok).toBe(false);
+    expect((failed?.data as { error?: string }).error).toMatch(/simulated failure/);
+    const succeeded = proposeEvents.filter(
+      (e) => (e.data as { modelId: string }).modelId !== "model_c"
+    );
+    expect(succeeded.every((e) => (e.data as { ok: boolean }).ok)).toBe(true);
+  });
+
+  it("planning mode: every model_responded event carries its topic's topicId", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider(),
+      mode: "planning",
+      onEvent: (e) => events.push(e),
+    });
+
+    const topicIds = new Set((result.topics ?? []).map((t) => t.topic.topic_id));
+    const responded = events.filter((e) => e.type === "model_responded");
+    expect(responded).toHaveLength(topicIds.size * 4 * 3); // topics x 4 fan-out phases x 3 models
+    for (const event of responded) {
+      const topicId = (event.data as { topicId?: string }).topicId;
+      expect(topicId).toBeDefined();
+      expect(topicIds.has(topicId!)).toBe(true);
+    }
+  });
+});
+
+interface ItemProgressData {
+  modelId: string;
+  arrayField: string;
+  index: number;
+  item: unknown;
+  attempt: number;
+  topicId?: string;
+}
+
+function itemProgressEvents(events: RunEvent[], phase?: string): ItemProgressData[] {
+  return events
+    .filter((e) => e.type === "item_progress" && (phase === undefined || e.phase === phase))
+    .map((e) => e.data as ItemProgressData);
+}
+
+function groupByModel(items: ItemProgressData[]): Map<string, unknown[]> {
+  const byModel = new Map<string, unknown[]>();
+  for (const ip of items) {
+    const arr = byModel.get(ip.modelId) ?? [];
+    arr.push(ip.item);
+    byModel.set(ip.modelId, arr);
+  }
+  return byModel;
+}
+
+/** RepairRetryMockProvider streams a schema-invalid propose response on the
+ * first attempt for a given model (invalid at the whole-Proposal level, e.g.
+ * missing answer_summary — but with a claim item that itself validates
+ * against ClaimSchema on its own, so it still fires an item_progress event)
+ * and a fully valid one on the next attempt, to exercise callStructured's
+ * repair-retry loop together with M6.3's `attempt` tagging. All non-propose
+ * phases delegate straight through to a streaming MockProvider unchanged. */
+class RepairRetryMockProvider implements ModelProvider {
+  readonly name = "repair-retry-mock";
+  private readonly inner = new MockProvider({ streaming: true, streamChunkSize: 8 });
+  private readonly proposeCallCount = new Map<string, number>();
+
+  async complete(config: ModelConfig, request: CompletionRequest): Promise<CompletionResult> {
+    return this.inner.complete(config, request);
+  }
+
+  async completeStream(
+    config: ModelConfig,
+    request: CompletionRequest,
+    onDelta: (delta: string) => void,
+    opts?: { timeoutMs?: number }
+  ): Promise<CompletionResult> {
+    if (request.meta.phase !== "propose") {
+      return this.inner.completeStream!(config, request, onDelta, opts);
+    }
+    const count = (this.proposeCallCount.get(config.id) ?? 0) + 1;
+    this.proposeCallCount.set(config.id, count);
+    const start = Date.now();
+    const text =
+      count === 1
+        ? JSON.stringify({
+            model_id: config.id,
+            // answer_summary deliberately omitted — fails ProposalSchema at
+            // the whole-response level, forcing a repair retry — but the
+            // claim item below is itself fully ClaimSchema-valid, so it
+            // still fires an item_progress event tagged attempt=0.
+            claims: [
+              {
+                claim_id: `${config.id}_attempt0`,
+                text: "attempt 0 claim",
+                type: "fact",
+                confidence: 0.5,
+                rationale: "attempt 0 rationale",
+                conditions: [],
+              },
+            ],
+          })
+        : JSON.stringify({
+            model_id: config.id,
+            answer_summary: "attempt 1 summary",
+            claims: [
+              {
+                claim_id: `${config.id}_attempt1`,
+                text: "attempt 1 claim",
+                type: "fact",
+                confidence: 0.5,
+                rationale: "attempt 1 rationale",
+                conditions: [],
+              },
+            ],
+            assumptions: [],
+            risks: [],
+          });
+    for (let i = 0; i < text.length; i += 8) onDelta(text.slice(i, i + 8));
+    return {
+      text,
+      latencyMs: Date.now() - start,
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.0001 },
+    };
+  }
+}
+
+describe("runDeliberation — M6.3 claim/item-level progressive parsing", () => {
+  it("standard mode: item_progress fires per model for propose/critique/revise/vote/normalize, matching the final settled result exactly", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ streaming: true }),
+      onEvent: (e) => events.push(e),
+    });
+
+    const phasesSeen = new Set(
+      events.filter((e) => e.type === "item_progress").map((e) => e.phase)
+    );
+    expect(phasesSeen).toEqual(new Set(["propose", "critique", "revise", "vote", "normalize"]));
+
+    // Propose previews show the model's raw claim_id/topic_id before the
+    // orchestrator's post-validation stamping (stampProposal namespaces
+    // claim_id per model and fills in topic_id) — every other field is
+    // untouched by stamping, so compare those instead of the full object.
+    const proposeByModel = groupByModel(itemProgressEvents(events, "propose"));
+    for (const proposal of result.proposals) {
+      const previewClaims = proposeByModel.get(proposal.model_id) as {
+        text: string;
+        type: string;
+        confidence: number;
+        rationale: string;
+        conditions: string[];
+      }[];
+      expect(previewClaims.map((c) => ({ text: c.text, type: c.type, confidence: c.confidence }))).toEqual(
+        proposal.claims.map((c) => ({ text: c.text, type: c.type, confidence: c.confidence }))
+      );
+    }
+
+    const voteByModel = groupByModel(itemProgressEvents(events, "vote"));
+    for (const voteSet of result.votes) {
+      expect(voteByModel.get(voteSet.model_id)).toEqual(voteSet.votes);
+    }
+
+    const normalizeItems = itemProgressEvents(events, "normalize").map((ip) => ip.item);
+    expect(normalizeItems).toEqual(result.normalize.candidate_claims);
+  });
+
+  it("quick mode: item_progress fires only for propose and normalize (critique/revise/vote skipped)", async () => {
+    const events: RunEvent[] = [];
+    await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ streaming: true }),
+      mode: "quick",
+      onEvent: (e) => events.push(e),
+    });
+
+    const phasesSeen = new Set(
+      events.filter((e) => e.type === "item_progress").map((e) => e.phase)
+    );
+    expect(phasesSeen).toEqual(new Set(["propose", "normalize"]));
+  });
+
+  it("never fires when the provider doesn't support streaming (fully opt-in, regression-proof default)", async () => {
+    const events: RunEvent[] = [];
+    await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(events.some((e) => e.type === "item_progress")).toBe(false);
+  });
+
+  it("attempt tags distinguish an abandoned repair-retry generation's items from the final accepted one", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question,
+      models: models.slice(0, 1),
+      provider: new RepairRetryMockProvider(),
+      onEvent: (e) => events.push(e),
+    });
+
+    const proposeItems = itemProgressEvents(events, "propose");
+    const attempt0 = proposeItems.filter((ip) => ip.attempt === 0);
+    const attempt1 = proposeItems.filter((ip) => ip.attempt === 1);
+    expect(attempt0).toHaveLength(1);
+    expect(attempt1).toHaveLength(1);
+    expect((attempt0[0].item as { claim_id: string }).claim_id).toBe("model_a_attempt0");
+    expect((attempt1[0].item as { claim_id: string }).claim_id).toBe("model_a_attempt1");
+
+    // The final, authoritative result only ever reflects the last accepted
+    // attempt's content — proving the frontend's "clear and redraw on new
+    // attempt" rule (index===0 on a fresh attempt replaces, not appends)
+    // matches what the backend actually considers final. (claim_id itself
+    // gets rewritten by stampProposal regardless of attempt, so compare
+    // `text` instead, which stamping never touches.)
+    expect(result.proposals[0].claims.map((c) => c.text)).toEqual(["attempt 1 claim"]);
+  });
+
+  it("planning mode: every item_progress event carries its topic's topicId", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider({ streaming: true }),
+      mode: "planning",
+      onEvent: (e) => events.push(e),
+    });
+
+    const topicIds = new Set((result.topics ?? []).map((t) => t.topic.topic_id));
+    const itemEvents = itemProgressEvents(events);
+    expect(itemEvents.length).toBeGreaterThan(0);
+    for (const ip of itemEvents) {
+      expect(ip.topicId).toBeDefined();
+      expect(topicIds.has(ip.topicId!)).toBe(true);
+    }
+  });
+});
+
+interface TokenData {
+  delta: string;
+  topicId?: string;
+}
+
+function tokenEvents(events: RunEvent[]): { phase: string | undefined; data: TokenData }[] {
+  return events
+    .filter((e) => e.type === "token")
+    .map((e) => ({ phase: e.phase, data: e.data as TokenData }));
+}
+
+describe("runDeliberation — M6.4 compose-stage token streaming", () => {
+  it("standard mode: token events fire only for compose, and concatenating all deltas reconstructs the final answer exactly", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ streaming: true }),
+      onEvent: (e) => events.push(e),
+    });
+
+    const tokens = tokenEvents(events);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(tokens.every((t) => t.phase === "compose")).toBe(true);
+    const reconstructed = tokens.map((t) => t.data.delta).join("");
+    expect(reconstructed).toBe(result.final.final_answer);
+  });
+
+  it("never fires when the provider doesn't support streaming (fully opt-in)", async () => {
+    const events: RunEvent[] = [];
+    await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(events.some((e) => e.type === "token")).toBe(false);
+  });
+
+  it("planning mode: section-compose token events carry the correct topicId and reconstruct each topic's section_answer exactly", async () => {
+    const events: RunEvent[] = [];
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new MockProvider({ streaming: true }),
+      mode: "planning",
+      onEvent: (e) => events.push(e),
+    });
+
+    const tokens = tokenEvents(events);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(tokens.every((t) => t.phase === "compose")).toBe(true);
+
+    for (const section of result.planDocument?.sections ?? []) {
+      const topicTokens = tokens.filter((t) => t.data.topicId === section.topic_id);
+      expect(topicTokens.length).toBeGreaterThan(0);
+      const reconstructed = topicTokens.map((t) => t.data.delta).join("");
+      expect(reconstructed).toBe(section.section_answer);
+    }
+  });
+});
+
 describe("runDeliberation — v0.2 planning mode", () => {
   it("runs an outline then a full per-topic deliberation, producing a schema-valid plan document", async () => {
     const result = await runDeliberation({

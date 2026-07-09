@@ -13,6 +13,7 @@ export function PhaseProgress({
     <PhaseStepList
       phases={phaseListForMode(mode)}
       statusFor={(phase) => progress.phases[phase] ?? "pending"}
+      modelProgressFor={(phase) => progress.modelProgress[phase]}
     />
   );
 }

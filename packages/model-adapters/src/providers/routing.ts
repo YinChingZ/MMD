@@ -37,4 +37,30 @@ export class RoutingProvider implements ModelProvider {
       request
     );
   }
+
+  /**
+   * M6.3/M6.4: always attached (unlike a real provider, RoutingProvider
+   * doesn't know until call time whether the specific model's route
+   * supports streaming, since different labels can route to different
+   * underlying providers). Falls back to a plain `complete()` call — with
+   * `onDelta` never invoked, so no live preview for that one model, but the
+   * call still succeeds normally — when the resolved route's own provider
+   * doesn't implement `completeStream`.
+   */
+  async completeStream(
+    config: ModelConfig,
+    request: CompletionRequest,
+    onDelta: (delta: string) => void,
+    opts?: { timeoutMs?: number }
+  ): Promise<CompletionResult> {
+    const route = this.routes.get(config.id);
+    if (!route) {
+      throw new Error(`no provider route configured for model "${config.id}"`);
+    }
+    const apiConfig = { id: route.apiModelId, provider: config.provider };
+    if (route.provider.completeStream) {
+      return route.provider.completeStream(apiConfig, request, onDelta, opts);
+    }
+    return route.provider.complete(apiConfig, request);
+  }
 }

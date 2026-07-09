@@ -19,6 +19,16 @@ export interface MockProviderOptions {
    * real API key (mirrors failModelIds' role for quorum testing).
    */
   costPerCallUsd?: number;
+  /**
+   * M6.3/M6.4: opt-in only — when unset/false, `completeStream` is never
+   * attached to the instance at all (not just a no-op), so every call
+   * site's `provider.completeStream` check correctly falls back to
+   * `complete()` and every existing test's assumptions about `complete()`
+   * call counts stay intact.
+   */
+  streaming?: boolean;
+  /** Characters per onDelta chunk when streaming is enabled. */
+  streamChunkSize?: number;
 }
 
 /**
@@ -33,8 +43,13 @@ export interface MockProviderOptions {
  */
 export class MockProvider implements ModelProvider {
   readonly name = "mock";
+  completeStream?: ModelProvider["completeStream"];
 
-  constructor(private readonly opts: MockProviderOptions = {}) {}
+  constructor(private readonly opts: MockProviderOptions = {}) {
+    if (opts.streaming) {
+      this.completeStream = this.streamComplete.bind(this);
+    }
+  }
 
   async complete(
     config: ModelConfig,
@@ -46,17 +61,35 @@ export class MockProvider implements ModelProvider {
     }
     await sleep(this.opts.latencyMs ?? 5);
     const text = JSON.stringify(generate(config, request));
+    return { text, latencyMs: Date.now() - start, usage: this.usageFor(request, text) };
+  }
+
+  private async streamComplete(
+    config: ModelConfig,
+    request: CompletionRequest,
+    onDelta: (delta: string) => void
+  ): Promise<CompletionResult> {
+    const start = Date.now();
+    if (this.opts.failModelIds?.has(config.id)) {
+      throw new Error(`mock provider: simulated failure for model "${config.id}"`);
+    }
+    const text = JSON.stringify(generate(config, request));
+    const chunkSize = this.opts.streamChunkSize ?? 12;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      onDelta(text.slice(i, i + chunkSize));
+      await sleep(1);
+    }
+    return { text, latencyMs: Date.now() - start, usage: this.usageFor(request, text) };
+  }
+
+  private usageFor(request: CompletionRequest, text: string) {
     const promptTokens = Math.ceil(request.userPrompt.length / 4);
     const completionTokens = Math.ceil(text.length / 4);
     return {
-      text,
-      latencyMs: Date.now() - start,
-      usage: {
-        promptTokens,
-        completionTokens,
-        totalTokens: promptTokens + completionTokens,
-        costUsd: this.opts.costPerCallUsd ?? 0.0001,
-      },
+      promptTokens,
+      completionTokens,
+      totalTokens: promptTokens + completionTokens,
+      costUsd: this.opts.costPerCallUsd ?? 0.0001,
     };
   }
 }

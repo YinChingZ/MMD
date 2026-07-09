@@ -1,6 +1,8 @@
 import type { Phase } from "@mmd/protocol";
 import type { PlanningProgress } from "@/lib/progress";
 import { PhaseStepList, StatusDot } from "./PhaseStepList";
+import { LivePhaseItems } from "./LivePhaseItems";
+import { FinalAnswerPanel } from "./FinalAnswerPanel";
 
 const TOPIC_PHASES: Phase[] = [
   "propose",
@@ -11,7 +13,15 @@ const TOPIC_PHASES: Phase[] = [
   "compose",
 ];
 
-export function PlanningPhaseProgress({ progress }: { progress: PlanningProgress }) {
+export function PlanningPhaseProgress({
+  progress,
+  composeText,
+}: {
+  progress: PlanningProgress;
+  /** M6.4: keyed by topicId — each topic's section-compose streams
+   * independently, so multiple topics can be "typing" in parallel. */
+  composeText?: Record<string, string>;
+}) {
   const topics = [...progress.topics.entries()];
   return (
     <div className="flex flex-col gap-3">
@@ -37,7 +47,19 @@ export function PlanningPhaseProgress({ progress }: { progress: PlanningProgress
           <PhaseStepList
             phases={TOPIC_PHASES}
             statusFor={(phase) => topic.phases[phase] ?? "pending"}
+            modelProgressFor={(phase) => topic.modelProgress[phase]}
           />
+          <div className="mt-2">
+            <LivePhaseItems itemProgress={topic.itemProgress} phases={topic.phases} />
+          </div>
+          {topic.phases.compose === "in_progress" && (
+            <div className="mt-2">
+              <FinalAnswerPanel
+                title="Section answer (typing…)"
+                text={composeText?.[topicId] ?? ""}
+              />
+            </div>
+          )}
         </div>
       ))}
     </div>

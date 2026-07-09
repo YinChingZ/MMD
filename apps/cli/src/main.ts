@@ -92,6 +92,9 @@ const result = await runDeliberation({
           failures?: { modelId: string; message: string }[];
           topicId?: string;
           step?: string;
+          modelId?: string;
+          ok?: boolean;
+          latencyMs?: number;
         }
       | undefined;
     const topicLabel = eventData?.topicId ? ` [topic:${eventData.topicId}]` : "";
@@ -101,6 +104,11 @@ const result = await runDeliberation({
     );
     for (const f of eventData?.failures ?? []) {
       console.error(`  - ${f.modelId} failed: ${f.message}`);
+    }
+    if (event.type === "model_responded") {
+      console.error(
+        `  - ${eventData?.modelId} ${eventData?.ok ? "ok" : "failed"} in ${eventData?.latencyMs}ms`
+      );
     }
   },
 });
