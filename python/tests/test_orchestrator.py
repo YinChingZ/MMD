@@ -5,7 +5,9 @@ import pytest
 
 from mmd_litellm.client import CompletionOutput, TokenUsage
 from mmd_litellm.orchestrator import (
+    CallBudgetExceededError,
     DeliberationConfig,
+    DeliberationTimeoutError,
     QuorumNotMetError,
     run_deliberation,
     run_quick_deliberation,
@@ -208,6 +210,12 @@ class UsageScriptedClient(ScriptedClient):
         return CompletionOutput(text=text, usage=usage)
 
 
+class SlowScriptedClient(ScriptedClient):
+    async def acomplete(self, model, request, *, timeout=None):
+        await asyncio.sleep(0.05)
+        return await super().acomplete(model, request, timeout=timeout)
+
+
 def test_quick_mode_runs_and_classifies_source_coverage():
     result = asyncio.run(
         run_quick_deliberation(
@@ -225,6 +233,38 @@ def test_quick_mode_runs_and_classifies_source_coverage():
     assert result.proposals[0].model_id == "model_a"
     assert result.proposals[0].claims[0].claim_id.startswith(f"{result.run_id}:")
     assert result.usage.usage_unavailable is True
+
+
+def test_run_deliberation_enforces_optional_total_timeout():
+    with pytest.raises(DeliberationTimeoutError) as error:
+        asyncio.run(
+            run_deliberation(
+                DeliberationConfig(
+                    question="What should we build next?",
+                    analysis_models=["model_a", "model_b"],
+                    max_run_timeout=0.01,
+                ),
+                SlowScriptedClient(),
+            )
+        )
+
+    assert error.value.max_run_timeout == 0.01
+
+
+def test_run_deliberation_enforces_total_model_call_budget():
+    with pytest.raises(CallBudgetExceededError) as error:
+        asyncio.run(
+            run_deliberation(
+                DeliberationConfig(
+                    question="What should we build next?",
+                    analysis_models=["model_a", "model_b"],
+                    max_total_calls=1,
+                ),
+                ScriptedClient(),
+            )
+        )
+
+    assert error.value.max_total_calls == 1
 
 
 def test_quick_mode_degrades_when_quorum_is_met_but_partial():

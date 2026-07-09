@@ -11,11 +11,15 @@ from .client import LiteLLMCompletionClient
 from .errors import (
     MMDProviderAPIError,
     MMDProviderBadRequestError,
+    MMDProviderBudgetError,
     MMDProviderError,
     MMDProviderQuorumError,
+    MMDProviderTimeoutError,
 )
 from .orchestrator import (
     CompletionClient,
+    CallBudgetExceededError,
+    DeliberationTimeoutError,
     DeliberationConfig,
     QuorumNotMetError,
     run_deliberation,
@@ -72,6 +76,8 @@ class MMDLiteLLMProvider(CustomLLM):
             "mmd_mode",
             "quorum_ratio",
             "per_model_timeout",
+            "max_run_timeout",
+            "max_total_calls",
             "max_repair_attempts",
             "max_topics",
             "max_analysis_models",
@@ -89,6 +95,7 @@ class MMDLiteLLMProvider(CustomLLM):
             "return_trace",
             "return_analysis",
             "mmd_log_trace",
+            "max_log_trace_candidates",
             "mmd_trace_logger",
         ):
             if key in kwargs:
@@ -101,6 +108,10 @@ class MMDLiteLLMProvider(CustomLLM):
         )
         try:
             result = await run_deliberation(config, self.client)
+        except CallBudgetExceededError as error:
+            raise _provider_budget_error(public_model, error) from error
+        except DeliberationTimeoutError as error:
+            raise _provider_timeout_error(public_model, error) from error
         except QuorumNotMetError as error:
             raise _provider_quorum_error(public_model, error) from error
         except Exception as error:
@@ -121,12 +132,15 @@ class MMDLiteLLMProvider(CustomLLM):
         )
         trace_logging = await _emit_trace_logging(
             enabled=bool(optional_params.get("mmd_log_trace", False)),
-            payload=result.logging_trace_payload(),
+            payload=result.logging_trace_payload(
+                max_candidates=config.max_log_trace_candidates
+            ),
             request_kwargs=kwargs,
             response=response,
             public_model=public_model,
             optional_params=optional_params,
             configured_logger=self.trace_logger,
+            logging_obj=kwargs.get("logging_obj"),
         )
         if metadata is not None and trace_logging["attempted"]:
             metadata["trace_logging"] = trace_logging
@@ -153,6 +167,11 @@ def _build_config(
             mmd_mode=optional_params.get("mmd_mode", "quick"),
             quorum_ratio=optional_params.get("quorum_ratio", 0.66),
             per_model_timeout=optional_params.get("per_model_timeout"),
+            max_run_timeout=optional_params.get("max_run_timeout"),
+            max_total_calls=optional_params.get("max_total_calls"),
+            max_log_trace_candidates=optional_params.get(
+                "max_log_trace_candidates", 50
+            ),
             max_repair_attempts=optional_params.get("max_repair_attempts", 2),
             max_topics=optional_params.get("max_topics", 8),
             max_analysis_models=optional_params.get("max_analysis_models"),
@@ -228,6 +247,26 @@ def _provider_quorum_error(
     )
 
 
+def _provider_timeout_error(
+    public_model: str, error: DeliberationTimeoutError
+) -> MMDProviderTimeoutError:
+    return MMDProviderTimeoutError(
+        str(error),
+        model=public_model,
+        details={"max_run_timeout": error.max_run_timeout},
+    )
+
+
+def _provider_budget_error(
+    public_model: str, error: CallBudgetExceededError
+) -> MMDProviderBudgetError:
+    return MMDProviderBudgetError(
+        str(error),
+        model=public_model,
+        details={"max_total_calls": error.max_total_calls},
+    )
+
+
 def _provider_api_error(public_model: str, error: Exception) -> MMDProviderAPIError:
     return MMDProviderAPIError(
         f"MMD provider execution failed: {error}",
@@ -265,6 +304,7 @@ async def _emit_trace_logging(
     public_model: str,
     optional_params: dict[str, Any],
     configured_logger: Any | None,
+    logging_obj: Any | None,
 ) -> dict[str, Any]:
     status: dict[str, Any] = {
         "attempted": enabled,
@@ -274,8 +314,11 @@ async def _emit_trace_logging(
     if not enabled:
         return status
 
+    if _attach_trace_to_litellm_logging(logging_obj, payload):
+        status["attached_to_litellm_logging"] = True
+
     loggers = _trace_loggers(configured_logger, optional_params)
-    if not loggers:
+    if not loggers and not status.get("attached_to_litellm_logging"):
         status["failures"].append("no trace logger configured")
         return status
 
@@ -304,6 +347,24 @@ async def _emit_trace_logging(
     return status
 
 
+def _attach_trace_to_litellm_logging(
+    logging_obj: Any | None, payload: dict[str, Any]
+) -> bool:
+    """Hand the payload to LiteLLM's request-scoped callback pipeline.
+
+    LiteLLM invokes success callbacks after a custom provider returns. Attaching
+    MMD's opt-in audit payload to that request context avoids independently
+    invoking global callbacks here, which would otherwise duplicate log events.
+    """
+    if logging_obj is None:
+        return False
+    details = getattr(logging_obj, "model_call_details", None)
+    if not isinstance(details, dict):
+        return False
+    details["mmd"] = payload
+    return True
+
+
 def _trace_loggers(
     configured_logger: Any | None, optional_params: dict[str, Any]
 ) -> list[Any]:
@@ -320,10 +381,6 @@ def _trace_loggers(
         else:
             raw_loggers.append(candidate)
 
-    if litellm is not None:
-        raw_loggers.extend(_object_callbacks(getattr(litellm, "success_callback", [])))
-        raw_loggers.extend(_object_callbacks(getattr(litellm, "callbacks", [])))
-
     loggers: list[Any] = []
     seen: set[int] = set()
     for logger in raw_loggers:
@@ -335,16 +392,6 @@ def _trace_loggers(
         seen.add(identity)
         loggers.append(logger)
     return loggers
-
-
-def _object_callbacks(callbacks: Any) -> list[Any]:
-    if callbacks is None:
-        return []
-    if isinstance(callbacks, (list, tuple)):
-        return [callback for callback in callbacks if not isinstance(callback, str)]
-    if isinstance(callbacks, str):
-        return []
-    return [callbacks]
 
 
 def _trace_event_kwargs(

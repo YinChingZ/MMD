@@ -1,126 +1,65 @@
 # MMD — Multi-Model Deliberation
 
-*[English](README.en.md)*
+MMD 让多个 LLM 围绕同一问题进行结构化协商，并生成带共识强度、分歧和可追溯来源的最终回答。它的目标是成为 LiteLLM 生态中可自托管的多模型 deliberation provider，而不是重建 LiteLLM 的 gateway、路由或治理能力。
 
-多个 LLM 按 Propose → Critique → Revise → Normalize → Vote → Compose 六阶段协议进行协商式对话，输出带共识强度标注、且可追溯到原始论点的最终答案。
+## 文档
 
-## 现状
+项目只有三份权威主文档：
 
-**M0（协议加固）+ M1（CLI 原型）+ M1.5（收敛验证，Go 决策）+ v0.2（Planning Mode 长输出支持）均已完成**，且都用真实模型（不只是 mock）跑通过端到端验证。`apps/cli` 支持三种模式：`standard`（默认六阶段）、`quick`（跳过 critique/revise/vote）、`planning`（按主题拆分、支持综合技术规划这类长输出）。
+1. **本文件**：定位、仓库入口和快速开始。
+2. [架构与运行参考](docs/architecture.md)：协议、LiteLLM Provider、配置、返回契约、限制和验证命令。
+3. [统一开发路径](docs/development.md)：当前状态、所有后续阶段、验收标准、发布与 LiteLLM upstream 路线。
 
-当前 `litellm-integration` branch 的技术方向已经从“继续自建 Backend API / Web MVP”调整为 **LiteLLM-first open-source Fusion replacement**：把 MMD 协议核心改造成 LiteLLM 生态里的开源 Fusion-like router/provider 能力，一切优先服务 Fusion 级默认可用性、LiteLLM 适配便利、upstream 接受度和开源社区影响力。主线技术文档见 [docs/fusion-replacement-mainline.md](docs/fusion-replacement-mainline.md)，转向背景见 [docs/litellm-integration.md](docs/litellm-integration.md)。
+`docs/research/` 是带日期的调研归档，不定义当前行为或开发优先级；`python/README.md` 仅用于 Python 包发布元数据。
 
-## 六阶段协议
+## 当前状态
 
-| 阶段 | 说明 |
-|------|------|
-| Propose | 每个模型只看到用户问题，独立回答，拆成若干 claims |
-| Critique | 每个模型评议其他模型的 claims |
-| Revise | 每个模型根据评议更新自己的立场 |
-| Normalize | 合并语义相近的 claims 成 candidate claims（必须保留 `source_claim_ids` 以便追溯） |
-| Vote | 每个模型对 candidate claims 表决 |
-| Compose | 按比例制共识分类（strong / qualified / disputed / rejected）生成最终答案 |
+TypeScript 协议核心和 CLI 已完成，支持 `quick`、`standard` 与 `planning` 三种模式。Python `mmd-litellm` 包可作为 LiteLLM custom provider 暴露 `mmd/fusion`，并已覆盖 Router 注入、quorum、trace、usage 聚合、超时和调用预算。
 
-`standard`/`quick` 模式直接跑这六个阶段；`planning` 模式在最前面加一个 **Outline** 阶段（单一 coordinator 把问题拆成最多 8 个主题），然后对每个主题并行跑一遍这六阶段，最终按主题分节输出。
+它**尚未达到 OpenRouter Fusion 的完整产品级能力**：没有默认自动 panel、按需 deliberation 策略、端到端 tool loop、完整消息保真或 streaming。当前边界和完成路径以 [统一开发路径](docs/development.md) 为准。
 
-协议的硬性约束（比例制共识、run 隔离的 id、quorum 降级、延迟/成本预算、quick/planning mode、outline 阶段为什么用单一 coordinator）见 [docs/protocol.md](docs/protocol.md)。
+## 仓库结构
 
-## Monorepo 结构
-
-```
-apps/
-  cli/                 # M1：跑通全流程的命令行入口
-packages/
-  protocol/             # zod schema + 共识分类 / quorum / id / budget 纯函数
-  model-adapters/       # provider 封装：mock、OpenAI 兼容、按 quorum 的 fan-out
-  prompts/              # 六阶段的 prompt 构造
-python/
-  mmd_litellm/          # M2'：LiteLLM-shaped Python/Pydantic PoC
-docs/
-  protocol.md           # 协议规则文档
-  fusion-replacement-mainline.md # LiteLLM Fusion replacement 主线
-  litellm-integration.md # LiteLLM 集成转向设计
+```text
+apps/cli/                 TypeScript CLI 原型
+packages/protocol/        Zod schema、共识/quorum/id/budget 纯函数
+packages/model-adapters/  OpenAI-compatible 与 mock provider、fan-out
+packages/prompts/         协商阶段的 prompt 构造
+python/mmd_litellm/       LiteLLM custom provider 与 Pydantic 协议实现
+python/examples/          Proxy 配置和 handler shim 示例
+docs/                     三份权威文档与非权威研究归档
 ```
 
 ## 快速开始
 
+安装依赖并运行无 API key 的 mock 协商：
+
 ```bash
 npm install
-```
-
-### 用 mock provider 跑一次（无需 API key）
-
-```bash
 cd apps/cli
 npm run start -- --question "Should a small team adopt a monorepo?" --mode standard
 ```
 
-不存在 `models.config.json`（或传 `--provider mock`）时会自动使用 `MockProvider`，默认模拟 `model_a,model_b,model_c` 三个模型，不会发起真实网络请求。结果会写入 `apps/cli/out/<runId>.json` 和 `.md`，并打印到终端。
+不存在 `models.config.json` 或传入 `--provider mock` 时，CLI 使用三个 scripted mock 模型。输出写入 `apps/cli/out/<runId>.json` 和 `.md`。
 
-### Planning mode：长输出/综合技术规划
-
-```bash
-npm run start -- --question "给一个 3 人团队的电商项目做技术选型规划" --mode planning
-```
-
-会先跑一次 outline 把问题拆成最多 8 个主题，再对每个主题并行跑完整六阶段协议，最终输出一份按主题分节的规划文档（`## Executive Summary` + 每个主题一节）。真实模型下单个主题的六阶段耗时和 `standard` 模式的单次 run 类似（见 [docs/protocol.md](docs/protocol.md) 的真实耗时基线），多个主题并行执行，所以总耗时约等于最慢的那个主题，而不是耗时总和。
-
-### 接入真实模型
+使用真实 OpenAI-compatible 模型：
 
 ```bash
 cp apps/cli/models.config.example.json apps/cli/models.config.json
 cp apps/cli/.env.example apps/cli/.env
 ```
 
-编辑 `models.config.json`，为每个模型填入真实的 `modelId` / `baseUrl`（任意 OpenAI 兼容的 `/chat/completions` 端点），并在 `.env` 里设置对应 `apiKeyEnvVar` 指向的环境变量的值。两个文件都已加入 `.gitignore`，不会被提交。
+在 `models.config.json` 中配置模型与 endpoint，并在 `.env` 中设置相应 key。两个本地配置均被 `.gitignore` 排除。
 
-### CLI 参数
+LiteLLM Proxy 的安装、YAML 示例、可用选项及 smoke test 见 [架构与运行参考](docs/architecture.md#litellm-provider)。
 
-| flag | 说明 |
-|------|------|
-| `--question`, `-q` | 待协商的问题 |
-| `--mode` | `standard`（默认，六阶段全跑）、`quick`（跳过 critique/revise/vote）或 `planning`（按主题拆分，适合长输出/综合规划） |
-| `--models`, `-m` | 使用 mock provider 时的模型 id 列表，逗号分隔 |
-| `--fail-models` | 使用 mock provider 时指定模拟失败的模型 id，用于测试 quorum 降级 |
-| `--config`, `-c` | models config 路径，默认 `./models.config.json` |
-| `--provider mock` | 强制使用 mock provider，即使存在 config 文件 |
-| `--out`, `-o` | 输出目录，默认 `./out` |
-
-## 开发
+## 常用命令
 
 ```bash
-npm run test    # 各 workspace 的单元测试
-npm run build   # 各 workspace 的 TypeScript 构建
-```
-
-### LiteLLM PoC（M2'）
-
-```bash
+npm run test
+npm run build
 uv run --project python --extra test pytest
-```
-
-当前 Python PoC 已实现 `mmd/fusion` custom provider 外壳、Pydantic 协议核心、quick mode（Propose → Normalize → Compose）、standard mode（完整六阶段）、planning mode（Outline → 按 topic 并行 standard → Section Compose）、Router-aware 内部调用、usage 聚合、advanced config 第一版、typed provider error mapping、provider-managed tools compatibility 第一版、opt-in `return_analysis` payload、opt-in `mmd_log_trace` callback payload 和 OpenAI-compatible response。`return_trace=true` 时，LiteLLM Proxy HTTP 响应会在顶层 `mmd` 字段返回 `trace_version: 1` 的 provider-specific trace metadata；默认 `return_trace=false` 不改变普通 `choices[].message.content`。LiteLLM Proxy 配置示例见 `python/examples/litellm_config.yaml`。
-
-本地 LiteLLM Proxy HTTP smoke（使用 scripted mock panel，无需真实模型 key）：
-
-```bash
 uv run --project python --extra proxy python python/scripts/proxy_smoke.py
 ```
 
-真实模型 Proxy HTTP smoke harness（需要先设置对应 provider key，例如 `OPENROUTER_API_KEY`）：
-
-```bash
-export MMD_SMOKE_ANALYSIS_MODELS="openrouter/openai/gpt-4o-mini,openrouter/google/gemini-flash-1.5"
-export MMD_SMOKE_COORDINATOR_MODEL="openrouter/openai/gpt-4o-mini"
-uv run --project python --extra proxy python python/scripts/proxy_real_smoke.py
-```
-
-真实模型 smoke 已用 OpenRouter panel 跑通 quick mode，并验证 `mmd.trace_version === 1`。接下来的 M2' 开发顺序：advanced config → upstream readiness 清理。
-
-## 相关文档
-
-- [docs/protocol.md](docs/protocol.md) — 协议规则的落地说明
-- [docs/fusion-replacement-mainline.md](docs/fusion-replacement-mainline.md) — LiteLLM Fusion replacement 主线技术文档
-- [docs/litellm-integration.md](docs/litellm-integration.md) — 本 branch 的 LiteLLM 集成转向设计
-- [docs/prior-art.md](docs/prior-art.md) — 与 OpenRouter Fusion Router、litesquad、LiteLLM 生态的对比分析
-- [multi-model-deliberation-dev-roadmap.md](multi-model-deliberation-dev-roadmap.md) — 里程碑规划与风险对照表
+真实模型 smoke 需要环境变量中的 provider key，完整命令和安全要求见 [架构与运行参考](docs/architecture.md#验证)。

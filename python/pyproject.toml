@@ -1,7 +1,8 @@
 [project]
 name = "mmd-litellm"
-version = "0.0.0"
-description = "LiteLLM-shaped Python proof of concept for Multi-Model Deliberation."
+version = "0.1.0"
+description = "Auditable multi-model deliberation provider for LiteLLM."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "pydantic>=2.8",
@@ -20,6 +21,13 @@ test = [
 dev = [
   "mmd-litellm[proxy,test]",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mmd_litellm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -80,12 +80,15 @@ def main() -> None:
     per_model_timeout = _optional_float_env("MMD_SMOKE_PER_MODEL_TIMEOUT")
     if per_model_timeout is None and preset is None:
         per_model_timeout = 120
+    max_run_timeout = _optional_float_env("MMD_SMOKE_MAX_RUN_TIMEOUT")
+    max_total_calls = _optional_int_env("MMD_SMOKE_MAX_TOTAL_CALLS")
     max_repair_attempts = _int_env("MMD_SMOKE_MAX_REPAIR_ATTEMPTS", 2)
     quorum_ratio = _float_env("MMD_SMOKE_QUORUM_RATIO", 0.66)
     max_topics = _int_env("MMD_SMOKE_MAX_TOPICS", 3)
     max_completion_tokens = _optional_int_env("MMD_SMOKE_MAX_COMPLETION_TOKENS")
     temperature = _optional_float_env("MMD_SMOKE_TEMPERATURE")
     coordinator_temperature = _optional_float_env("MMD_SMOKE_COORDINATOR_TEMPERATURE")
+    expected_partial = _optional_bool_env("MMD_SMOKE_EXPECT_PARTIAL")
     request_timeout = _float_env("MMD_SMOKE_HTTP_TIMEOUT", 600)
     question = os.environ.get(
         "MMD_SMOKE_QUESTION",
@@ -108,6 +111,8 @@ def main() -> None:
         mode=mode,
         quorum_ratio=quorum_ratio,
         per_model_timeout=per_model_timeout,
+        max_run_timeout=max_run_timeout,
+        max_total_calls=max_total_calls,
         max_repair_attempts=max_repair_attempts,
         max_topics=max_topics,
         max_completion_tokens=max_completion_tokens,
@@ -164,6 +169,8 @@ def main() -> None:
         raise AssertionError(f"unexpected mmd trace contract: {trace}")
     if trace.get("mode") != mode:
         raise AssertionError(f"unexpected mmd mode in trace: {trace.get('mode')}")
+    if expected_partial is not None:
+        _assert_expected_partial(trace, expected_partial)
 
     print(
         json.dumps(
@@ -239,6 +246,31 @@ def _optional_int_env(name: str) -> int | None:
     return int(value)
 
 
+def _optional_bool_env(name: str) -> bool | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _assert_expected_partial(trace: dict, expected_partial: bool) -> None:
+    propose_quorum = (trace.get("quorum") or {}).get("propose")
+    if not isinstance(propose_quorum, dict):
+        raise AssertionError(
+            "MMD_SMOKE_EXPECT_PARTIAL requires a trace with top-level propose quorum"
+        )
+    actual_partial = propose_quorum.get("partial")
+    if actual_partial is not expected_partial:
+        raise AssertionError(
+            f"expected propose partial={expected_partial}, got {actual_partial}: {trace}"
+        )
+
+
 def _yaml_list(values: list[str], indent: int) -> list[str]:
     prefix = " " * indent
     return [f"{prefix}- {_yaml_scalar(value)}" for value in values]
@@ -257,6 +289,8 @@ def _config_yaml(
     mode: str,
     quorum_ratio: float,
     per_model_timeout: float | None,
+    max_run_timeout: float | None,
+    max_total_calls: int | None,
     max_repair_attempts: int,
     max_topics: int,
     max_completion_tokens: int | None,
@@ -277,6 +311,16 @@ def _config_yaml(
         *(
             [f"      per_model_timeout: {per_model_timeout}"]
             if per_model_timeout is not None
+            else []
+        ),
+        *(
+            [f"      max_run_timeout: {max_run_timeout}"]
+            if max_run_timeout is not None
+            else []
+        ),
+        *(
+            [f"      max_total_calls: {max_total_calls}"]
+            if max_total_calls is not None
             else []
         ),
         f"      max_repair_attempts: {max_repair_attempts}",

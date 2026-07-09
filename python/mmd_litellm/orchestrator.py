@@ -76,6 +76,9 @@ class DeliberationConfig(BaseModel):
     mmd_mode: MMDMode = "quick"
     quorum_ratio: float = Field(default=0.66, gt=0, le=1)
     per_model_timeout: float | None = Field(default=None, gt=0)
+    max_run_timeout: float | None = Field(default=None, gt=0)
+    max_total_calls: int | None = Field(default=None, ge=1)
+    max_log_trace_candidates: int = Field(default=50, ge=0)
     max_repair_attempts: int = Field(default=2, ge=0)
     max_topics: int = Field(default=8, ge=1, le=8)
     max_analysis_models: int = Field(default=8, ge=1, le=8)
@@ -268,6 +271,23 @@ class UsageCollectingClient:
         return output
 
 
+class CallLimitedClient:
+    """Shares one strict model-call budget across every phase and topic."""
+
+    def __init__(self, client: CompletionClient, max_total_calls: int) -> None:
+        self.client = client
+        self.max_total_calls = max_total_calls
+        self.calls_started = 0
+
+    async def acomplete(
+        self, model: str, request: CompletionRequest, *, timeout: float | None = None
+    ) -> str | CompletionOutput:
+        if self.calls_started >= self.max_total_calls:
+            raise CallBudgetExceededError(self.max_total_calls)
+        self.calls_started += 1
+        return await self.client.acomplete(model, request, timeout=timeout)
+
+
 class FanoutOutcome(BaseModel):
     proposals: list[Proposal]
     quorum: QuorumCheck
@@ -331,7 +351,12 @@ class DeliberationResult(BaseModel):
             **payload,
         }
 
-    def logging_trace_payload(self) -> dict[str, Any]:
+    def logging_trace_payload(
+        self, *, max_candidates: int | None = None
+    ) -> dict[str, Any]:
+        candidate_claims, omitted_candidates = _logging_candidates(
+            self.normalize.candidate_claims, max_candidates
+        )
         payload = {
             "trace_version": 1,
             "protocol": "mmd.v1",
@@ -345,10 +370,7 @@ class DeliberationResult(BaseModel):
                 candidate_id: classification.model_dump(mode="json")
                 for candidate_id, classification in self.classifications.items()
             },
-            "candidate_claims": [
-                candidate.model_dump(mode="json")
-                for candidate in self.normalize.candidate_claims
-            ],
+            "candidate_claims": candidate_claims,
             "failures": {
                 phase: [failure.model_dump(mode="json") for failure in failures]
                 for phase, failures in self.failures.items()
@@ -356,33 +378,43 @@ class DeliberationResult(BaseModel):
             "usage": self.usage.model_dump(mode="json"),
             "tooling": self.tooling.model_dump(mode="json", exclude_none=True),
         }
+        omitted_topic_candidates = 0
         if self.topics:
-            payload["topics"] = [
-                {
-                    "topic": topic_result.topic.model_dump(mode="json"),
-                    "quorum": {
-                        phase: quorum.model_dump(mode="json")
-                        for phase, quorum in topic_result.quorum.items()
-                    },
-                    "classifications": {
-                        candidate_id: classification.model_dump(mode="json")
-                        for candidate_id, classification in (
-                            topic_result.classifications.items()
-                        )
-                    },
-                    "candidate_claims": [
-                        candidate.model_dump(mode="json")
-                        for candidate in topic_result.normalize.candidate_claims
-                    ],
-                    "failures": {
-                        phase: [
-                            failure.model_dump(mode="json") for failure in failures
-                        ]
-                        for phase, failures in topic_result.failures.items()
-                    },
-                }
-                for topic_result in self.topics
-            ]
+            topic_payloads = []
+            for topic_result in self.topics:
+                topic_candidates, omitted = _logging_candidates(
+                    topic_result.normalize.candidate_claims, max_candidates
+                )
+                omitted_topic_candidates += omitted
+                topic_payloads.append(
+                    {
+                        "topic": topic_result.topic.model_dump(mode="json"),
+                        "quorum": {
+                            phase: quorum.model_dump(mode="json")
+                            for phase, quorum in topic_result.quorum.items()
+                        },
+                        "classifications": {
+                            candidate_id: classification.model_dump(mode="json")
+                            for candidate_id, classification in (
+                                topic_result.classifications.items()
+                            )
+                        },
+                        "candidate_claims": topic_candidates,
+                        "failures": {
+                            phase: [
+                                failure.model_dump(mode="json")
+                                for failure in failures
+                            ]
+                            for phase, failures in topic_result.failures.items()
+                        },
+                    }
+                )
+            payload["topics"] = topic_payloads
+        if omitted_candidates or omitted_topic_candidates:
+            payload["truncation"] = {
+                "candidate_claims_omitted": omitted_candidates,
+                "topic_candidate_claims_omitted": omitted_topic_candidates,
+            }
         if self.failed_topics:
             payload["failed_topics"] = [
                 failed.model_dump(mode="json") for failed in self.failed_topics
@@ -489,6 +521,15 @@ class DeliberationResult(BaseModel):
         return "\n".join(lines).strip()
 
 
+def _logging_candidates(
+    candidates: list[CandidateClaim], max_candidates: int | None
+) -> tuple[list[dict[str, Any]], int]:
+    serialized = [candidate.model_dump(mode="json") for candidate in candidates]
+    if max_candidates is None:
+        return serialized, 0
+    return serialized[:max_candidates], max(0, len(serialized) - max_candidates)
+
+
 def _append_markdown_list(lines: list[str], title: str, values: list[str]) -> None:
     if not values:
         return
@@ -517,6 +558,24 @@ class QuorumNotMetError(RuntimeError):
         self.phase = phase
         self.quorum = quorum
         self.failures = failures
+
+
+class DeliberationTimeoutError(TimeoutError):
+    """The complete deliberation exceeded its caller-provided wall-clock budget."""
+
+    def __init__(self, max_run_timeout: float) -> None:
+        super().__init__(
+            f"MMD deliberation exceeded max_run_timeout of {max_run_timeout:g}s"
+        )
+        self.max_run_timeout = max_run_timeout
+
+
+class CallBudgetExceededError(RuntimeError):
+    def __init__(self, max_total_calls: int) -> None:
+        super().__init__(
+            f"MMD deliberation exceeded max_total_calls of {max_total_calls}"
+        )
+        self.max_total_calls = max_total_calls
 
 
 async def _call_model_structured(
@@ -604,6 +663,8 @@ async def _fanout_propose(
             return model, _stamp_proposal(
                 run_id, model, proposal, topic.topic_id if topic else None
             )
+        except CallBudgetExceededError:
+            raise
         except Exception as error:  # fan-out records per-model failures
             return model, error
 
@@ -647,6 +708,8 @@ async def _fanout_structured(
                 ),
             )
             return model, stamp(model, value)
+        except CallBudgetExceededError:
+            raise
         except Exception as error:  # fan-out records per-model failures
             return model, error
 
@@ -1381,10 +1444,21 @@ async def run_planning_deliberation(
 async def run_deliberation(
     config: DeliberationConfig, client: CompletionClient
 ) -> DeliberationResult:
-    if config.mmd_mode == "quick":
-        return await run_quick_deliberation(config, client)
-    if config.mmd_mode == "standard":
-        return await run_standard_deliberation(config, client)
-    if config.mmd_mode == "planning":
-        return await run_planning_deliberation(config, client)
-    raise NotImplementedError(f"unsupported mmd_mode: {config.mmd_mode}")
+    if config.max_total_calls is not None:
+        client = CallLimitedClient(client, config.max_total_calls)
+
+    async def run_mode() -> DeliberationResult:
+        if config.mmd_mode == "quick":
+            return await run_quick_deliberation(config, client)
+        if config.mmd_mode == "standard":
+            return await run_standard_deliberation(config, client)
+        if config.mmd_mode == "planning":
+            return await run_planning_deliberation(config, client)
+        raise NotImplementedError(f"unsupported mmd_mode: {config.mmd_mode}")
+
+    if config.max_run_timeout is None:
+        return await run_mode()
+    try:
+        return await asyncio.wait_for(run_mode(), timeout=config.max_run_timeout)
+    except asyncio.TimeoutError as error:
+        raise DeliberationTimeoutError(config.max_run_timeout) from error

@@ -9,6 +9,8 @@ model_list:
       preset: balanced
       mmd_mode: quick
       quorum_ratio: 0.66
+      max_run_timeout: 180
+      max_total_calls: 12
       max_repair_attempts: 2
       max_completion_tokens: 1200
       temperature: 0.4

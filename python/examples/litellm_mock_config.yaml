@@ -9,6 +9,8 @@ model_list:
       mmd_mode: standard
       quorum_ratio: 0.66
       per_model_timeout: 10
+      max_run_timeout: 30
+      max_total_calls: 12
       max_repair_attempts: 1
       return_trace: true
 

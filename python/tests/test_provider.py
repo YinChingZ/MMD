@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 
 import pytest
 
@@ -6,11 +7,17 @@ from mmd_litellm.client import TokenUsage
 from mmd_litellm.errors import (
     MMDProviderAPIError,
     MMDProviderBadRequestError,
+    MMDProviderBudgetError,
     MMDProviderQuorumError,
+    MMDProviderTimeoutError,
 )
 from mmd_litellm.litellm_provider import MMDLiteLLMProvider
 from mmd_litellm.prompts import CompletionRequest
-from tests.test_orchestrator import ScriptedClient, UsageScriptedClient
+from tests.test_orchestrator import (
+    ScriptedClient,
+    SlowScriptedClient,
+    UsageScriptedClient,
+)
 
 
 def _content(response):
@@ -60,6 +67,19 @@ class RecordingTraceLogger:
                 "end_time": end_time,
             }
         )
+
+
+class FakeLiteLLMLogging:
+    def __init__(self) -> None:
+        self.model_call_details = {}
+
+
+def test_package_exports_stable_litellm_provider_entrypoint():
+    from mmd_litellm import MMDLiteLLMProvider as exported_provider
+    from mmd_litellm import mmd_custom_llm
+
+    assert exported_provider is MMDLiteLLMProvider
+    assert isinstance(mmd_custom_llm, MMDLiteLLMProvider)
 
 
 def test_provider_returns_openai_compatible_response_with_trace():
@@ -181,6 +201,47 @@ def test_provider_return_analysis_can_coexist_with_trace():
     assert response["mmd"]["run_id"] == response["mmd_analysis"]["run_id"]
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("litellm") is None,
+    reason="LiteLLM is an optional runtime dependency",
+)
+def test_provider_errors_preserve_litellm_native_types():
+    from litellm.exceptions import APIError, BadRequestError
+
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+
+    with pytest.raises(MMDProviderBadRequestError) as invalid_request:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "assistant", "content": "No user prompt."}],
+                optional_params={"analysis_models": ["model_a", "model_b"]},
+            )
+        )
+    assert isinstance(invalid_request.value, BadRequestError)
+    assert invalid_request.value.llm_provider == "mmd"
+    assert invalid_request.value.model == "mmd/fusion"
+    assert invalid_request.value.error_payload()["mmd"]["cause"] == "ValueError"
+
+    runtime_provider = MMDLiteLLMProvider(
+        client=UsageScriptedClient(invalid_json_once={("normalize", "model_a")})
+    )
+    with pytest.raises(MMDProviderAPIError) as runtime_failure:
+        asyncio.run(
+            runtime_provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                    "max_repair_attempts": 0,
+                },
+            )
+        )
+    assert isinstance(runtime_failure.value, APIError)
+    assert runtime_failure.value.llm_provider == "mmd"
+    assert runtime_failure.value.model == "mmd/fusion"
+
+
 def test_provider_trace_logging_is_opt_in():
     logger = RecordingTraceLogger()
     provider = MMDLiteLLMProvider(
@@ -234,6 +295,36 @@ def test_provider_emits_trace_logging_without_returning_full_trace():
     assert event["kwargs"]["mmd"] == payload
 
 
+def test_provider_caps_candidates_in_logging_trace_only():
+    logger = RecordingTraceLogger()
+    provider = MMDLiteLLMProvider(
+        client=UsageScriptedClient(),
+        trace_logger=logger,
+    )
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_log_trace": True,
+                "max_log_trace_candidates": 0,
+                "return_trace": True,
+            },
+        )
+    )
+
+    logged_payload = logger.events[0]["kwargs"]["mmd"]
+    assert logged_payload["candidate_claims"] == []
+    assert logged_payload["truncation"] == {
+        "candidate_claims_omitted": 1,
+        "topic_candidate_claims_omitted": 0,
+    }
+    assert response["mmd"]["normalize"]["candidate_claims"][0][
+        "candidate_id"
+    ] == "candidate_1"
+
+
 def test_provider_trace_logging_status_is_in_returned_trace_when_enabled():
     logger = RecordingTraceLogger()
     provider = MMDLiteLLMProvider(
@@ -258,6 +349,33 @@ def test_provider_trace_logging_status_is_in_returned_trace_when_enabled():
         "failures": [],
     }
     assert len(logger.events) == 1
+
+
+def test_provider_attaches_trace_to_litellm_request_logging_context():
+    logging_obj = FakeLiteLLMLogging()
+    provider = MMDLiteLLMProvider(client=UsageScriptedClient())
+
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            logging_obj=logging_obj,
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "mmd_log_trace": True,
+                "return_trace": True,
+            },
+        )
+    )
+
+    assert logging_obj.model_call_details["mmd"]["trace_version"] == 1
+    assert logging_obj.model_call_details["mmd"]["run_id"] == response["mmd"]["run_id"]
+    assert response["mmd"]["trace_logging"] == {
+        "attempted": True,
+        "delivered": 0,
+        "failures": [],
+        "attached_to_litellm_logging": True,
+    }
 
 
 def test_provider_uses_router_when_client_is_not_injected():
@@ -545,6 +663,48 @@ def test_provider_maps_quorum_failure_to_provider_api_error():
         "model_b",
         "model_c",
     ]
+
+
+def test_provider_maps_total_timeout_to_gateway_timeout_error():
+    provider = MMDLiteLLMProvider(client=SlowScriptedClient())
+
+    with pytest.raises(MMDProviderTimeoutError) as exc_info:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                    "max_run_timeout": 0.01,
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.status_code == 504
+    assert error.error_payload()["code"] == "mmd_run_timeout"
+    assert error.error_payload()["mmd"] == {"max_run_timeout": 0.01}
+
+
+def test_provider_maps_call_budget_to_rate_limit_error():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+
+    with pytest.raises(MMDProviderBudgetError) as exc_info:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                    "max_total_calls": 1,
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.status_code == 429
+    assert error.error_payload()["code"] == "mmd_call_budget_exceeded"
+    assert error.error_payload()["mmd"] == {"max_total_calls": 1}
 
 
 def test_provider_maps_structured_output_failure_to_api_error():
