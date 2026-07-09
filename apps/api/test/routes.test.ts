@@ -217,6 +217,46 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
     expect(body.final.final_answer.length).toBeGreaterThan(0);
   });
 
+  it("persists image input privately while keeping run-result and share payloads free of raw image data", async () => {
+    const conversation = await createConversationViaApi(app);
+    const image = { dataUrl: "data:image/png;base64,AQID" };
+    const createRunRes = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/runs`,
+      payload: { question: "What is in this image?", mode: "quick", images: [image] },
+      headers: { cookie: conversation.cookie },
+    });
+    expect(createRunRes.statusCode).toBe(201);
+    const { runId } = createRunRes.json();
+
+    const persisted = await db
+      .selectFrom("runs")
+      .select("input_images")
+      .where("id", "=", runId)
+      .executeTakeFirstOrThrow();
+    expect(persisted.input_images).toEqual([image]);
+
+    expect(await pollUntilSettled(app, runId, conversation.cookie)).toBe("completed");
+    const resultRes = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}/result`,
+      headers: { cookie: conversation.cookie },
+    });
+    expect(JSON.stringify(resultRes.json())).not.toContain(image.dataUrl);
+
+    const shareRes = await app.inject({
+      method: "POST",
+      url: `/api/runs/${runId}/share`,
+      headers: { cookie: conversation.cookie },
+    });
+    const publicRes = await app.inject({
+      method: "GET",
+      url: `/api/share/${shareRes.json().token}`,
+    });
+    expect(publicRes.statusCode).toBe(200);
+    expect(JSON.stringify(publicRes.json())).not.toContain(image.dataUrl);
+  });
+
   it("rejects a run-creation request for an unknown modelId", async () => {
     const conversation = await createConversationViaApi(app);
     const res = await app.inject({

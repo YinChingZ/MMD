@@ -82,6 +82,8 @@ export interface RunProviderResult {
   models: ModelConfig[];
   coordinatorModelId?: string;
   modelIdToProviderLabel: (id: string) => string;
+  /** M6.6: direct OpenAI and OpenRouter BYOK routes support native web search. */
+  supportsWebSearch: boolean;
 }
 
 /**
@@ -123,6 +125,7 @@ export function buildRunProvider(params: {
         apiKey: entry.apiKey,
         providerId: entry.providerId,
         pricing: entry.pricing,
+        useResponsesApi: entry.providerId === "openai",
       }),
       apiModelId: entry.modelId,
     });
@@ -140,5 +143,10 @@ export function buildRunProvider(params: {
     models: allIds.map((id) => ({ id, provider: modelIdToProviderLabel(id) })),
     coordinatorModelId: legacy.coordinatorModelId,
     modelIdToProviderLabel,
+    supportsWebSearch:
+      selectedLegacyIds.length === 0 &&
+      byokModels.length > 0 &&
+      new Set(byokModels.map((model) => model.providerId)).size === 1 &&
+      ["openai", "openrouter"].includes(byokModels[0]!.providerId ?? ""),
   };
 }

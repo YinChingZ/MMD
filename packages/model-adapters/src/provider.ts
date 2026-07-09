@@ -4,9 +4,29 @@ export interface ModelConfig {
   provider: string;
 }
 
+/**
+ * A provider-neutral user-message content part. Image URLs may be ordinary
+ * HTTPS URLs or validated data URLs; M6.5 currently supplies only data URLs
+ * from the API's inline image-upload path.
+ */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; imageUrl: string };
+
+/** Built-in provider tool surface intentionally kept small for M6.6. */
+export type BuiltInTool = { type: "web_search" };
+
 export interface CompletionRequest {
   systemPrompt: string;
-  userPrompt: string;
+  /**
+   * Text for normal deliberation calls, or multimodal content parts for the
+   * propose-only image-input path. All downstream protocol phases keep using
+   * a string, so existing providers can continue treating this as text unless
+   * they explicitly support content parts.
+   */
+  userPrompt: string | ContentPart[];
+  /** Optional provider-native tools. Only propose and critique set this today. */
+  tools?: BuiltInTool[];
   /**
    * Structured context describing which deliberation phase this call belongs to.
    * Providers (in particular MockProvider) key off `meta.phase` instead of
@@ -35,6 +55,8 @@ export interface CompletionResult {
   latencyMs: number;
   /** Absent only for providers that don't report usage at all — MockProvider always fills this in so cost-accumulation logic can be exercised without a real API key. */
   usage?: CompletionUsage;
+  /** Provider-reported tool activity for diagnostics; never feeds later phases. */
+  toolCalls?: Array<{ type: string }>;
 }
 
 export interface ModelProvider {

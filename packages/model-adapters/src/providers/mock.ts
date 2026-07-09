@@ -83,7 +83,7 @@ export class MockProvider implements ModelProvider {
   }
 
   private usageFor(request: CompletionRequest, text: string) {
-    const promptTokens = Math.ceil(request.userPrompt.length / 4);
+    const promptTokens = Math.ceil(promptTextLength(request.userPrompt) / 4);
     const completionTokens = Math.ceil(text.length / 4);
     return {
       promptTokens,
@@ -92,6 +92,16 @@ export class MockProvider implements ModelProvider {
       costUsd: this.opts.costPerCallUsd ?? 0.0001,
     };
   }
+}
+
+function promptTextLength(prompt: CompletionRequest["userPrompt"]): number {
+  return typeof prompt === "string"
+    ? prompt.length
+    : prompt.reduce(
+        (length, part) =>
+          length + (part.type === "text" ? part.text.length : part.imageUrl.length),
+        0
+      );
 }
 
 function hash(input: string): number {

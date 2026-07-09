@@ -132,4 +132,22 @@ describe("buildCreateRunPayload", () => {
     expect(payload.modelIds).toEqual(["model_a"]);
     expect(payload.byokModels).toEqual([byokEntry().payload]);
   });
+
+  it("includes image data URLs only when images were selected", () => {
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "standard",
+      modelIds: ["model_a"],
+      byokEntries: [],
+      costLimitUsd: 5,
+      images: [{ dataUrl: "data:image/png;base64,AQID" }],
+    });
+    expect(payload.images).toEqual([{ dataUrl: "data:image/png;base64,AQID" }]);
+  });
+
+  it("omits webSearch unless the user explicitly enables it", () => {
+    const base = { question: "Q?", mode: "standard" as const, modelIds: ["model_a"], byokEntries: [], costLimitUsd: 5 };
+    expect(buildCreateRunPayload(base).webSearch).toBeUndefined();
+    expect(buildCreateRunPayload({ ...base, webSearch: true }).webSearch).toBe(true);
+  });
 });

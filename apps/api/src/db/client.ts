@@ -34,6 +34,7 @@ export interface RunsTable {
   conversation_id: string;
   workspace_id: string | null;
   question: string;
+  input_images: unknown;
   mode: string;
   protocol_version: Generated<string>;
   status: string;

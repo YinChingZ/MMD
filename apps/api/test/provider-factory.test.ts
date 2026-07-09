@@ -112,6 +112,7 @@ describe("buildRunProvider", () => {
     expect(result.text).toBe("legacy_vendor:real-a:hello");
     expect(run.models).toEqual([{ id: "model_a", provider: "legacy-vendor" }]);
     expect(run.coordinatorModelId).toBe("model_a");
+    expect(run.supportsWebSearch).toBe(false);
   });
 
   it("dispatches a byok entry to a fresh OpenAICompatibleProvider using the caller's own key", async () => {
@@ -151,6 +152,46 @@ describe("buildRunProvider", () => {
     );
     expect(JSON.parse(init.body as string).model).toBe("gpt-4.1-mini");
     expect(run.modelIdToProviderLabel("byok_openai")).toBe("OpenAI");
+  });
+
+  it("marks an all-direct-OpenAI BYOK run as web-search capable", () => {
+    const run = buildRunProvider({
+      legacy: fakeLegacyResolvedProvider(),
+      selectedLegacyIds: [],
+      byokModels: [
+        {
+          label: "byok_openai",
+          baseUrl: "https://api.openai.com/v1",
+          apiKey: "sk-caller-key",
+          modelId: "gpt-5.4-mini",
+          providerLabel: "OpenAI",
+          providerId: "openai",
+        },
+      ],
+    });
+    expect(run.supportsWebSearch).toBe(true);
+  });
+
+  it("marks an all-OpenRouter BYOK run as web-search capable but rejects mixed providers", () => {
+    const base = {
+      label: "byok_openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-caller-key",
+      modelId: "openai/gpt-5.4-mini",
+      providerLabel: "OpenRouter",
+      providerId: "openrouter",
+    } as const;
+    expect(
+      buildRunProvider({ legacy: fakeLegacyResolvedProvider(), selectedLegacyIds: [], byokModels: [base] })
+        .supportsWebSearch
+    ).toBe(true);
+    expect(
+      buildRunProvider({
+        legacy: fakeLegacyResolvedProvider(),
+        selectedLegacyIds: [],
+        byokModels: [base, { ...base, label: "byok_openai", providerId: "openai" }],
+      }).supportsWebSearch
+    ).toBe(false);
   });
 
   it("mixes selected legacy ids and byok entries in one run", async () => {

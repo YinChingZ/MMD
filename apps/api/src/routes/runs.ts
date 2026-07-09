@@ -61,6 +61,66 @@ const ByokModelEntry = z
 // headroom, which callers running a large planning run should raise
 // explicitly via costLimitUsd rather than relying on the default).
 const DEFAULT_COST_LIMIT_USD = 5;
+/** M6.5 upload policy, mirrored by apps/web before a request is sent. */
+export const MAX_INPUT_IMAGES = 3;
+export const MAX_INPUT_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_TOTAL_INPUT_IMAGE_BYTES = 12 * 1024 * 1024;
+// 12 MiB of source bytes becomes 16 MiB after base64, plus JSON/request
+// framing. Keep this route-local rather than raising Fastify's global limit.
+export const CREATE_RUN_BODY_LIMIT = 18 * 1024 * 1024;
+
+const InputImageBody = z.object({ dataUrl: z.string().min(1) });
+
+export type InputImageBody = z.infer<typeof InputImageBody>;
+
+/**
+ * Validates exactly the compact data-URL subset accepted by M6.5. Buffer's
+ * base64 decoder is intentionally permissive, so canonical round-tripping is
+ * required to reject malformed payloads instead of silently changing them.
+ */
+export function validateInputImages(
+  images: InputImageBody[]
+): { ok: true } | { ok: false; error: string } {
+  if (images.length > MAX_INPUT_IMAGES) {
+    return { ok: false, error: `at most ${MAX_INPUT_IMAGES} images are allowed` };
+  }
+
+  let totalBytes = 0;
+  for (const [index, image] of images.entries()) {
+    const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(
+      image.dataUrl
+    );
+    if (!match) {
+      return {
+        ok: false,
+        error: `images[${index}] must be a base64 JPEG, PNG, or WebP data URL`,
+      };
+    }
+    const encoded = match[2];
+    if (encoded.length % 4 !== 0) {
+      return { ok: false, error: `images[${index}] has invalid base64 padding` };
+    }
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.length === 0 || bytes.toString("base64") !== encoded) {
+      return { ok: false, error: `images[${index}] has invalid base64 data` };
+    }
+    if (bytes.length > MAX_INPUT_IMAGE_BYTES) {
+      return {
+        ok: false,
+        error: `images[${index}] exceeds the ${MAX_INPUT_IMAGE_BYTES / 1024 / 1024}MB limit`,
+      };
+    }
+    totalBytes += bytes.length;
+  }
+
+  if (totalBytes > MAX_TOTAL_INPUT_IMAGE_BYTES) {
+    return {
+      ok: false,
+      error: `images exceed the ${MAX_TOTAL_INPUT_IMAGE_BYTES / 1024 / 1024}MB total limit`,
+    };
+  }
+  return { ok: true };
+}
 
 const CreateRunBody = z.object({
   question: z.string().min(1),
@@ -88,6 +148,11 @@ const CreateRunBody = z.object({
       instructions: z.string().optional(),
     })
     .optional(),
+  images: z.array(InputImageBody).max(MAX_INPUT_IMAGES).optional(),
+  // M6.6: one opt-in switch enables direct OpenAI Responses or OpenRouter
+  // server-tool search in both propose and critique. The compatibility guard
+  // below keeps this strictly BYOK and prevents a partial mixed-provider run.
+  webSearch: z.boolean().optional(),
 });
 
 export async function runsRoutes(
@@ -104,7 +169,10 @@ export async function runsRoutes(
     // M5.1 cost circuit breaker (that one protects the caller's own BYOK
     // budget; this one protects the platform from a single workspace
     // hammering run creation).
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    {
+      bodyLimit: CREATE_RUN_BODY_LIMIT,
+      config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+    },
     async (request, reply) => {
       const conversation = await getConversation(deps.db, request.params.id);
       if (!conversation || conversation.workspaceId !== request.workspaceId) {
@@ -123,7 +191,14 @@ export async function runsRoutes(
         byokModels = [],
         costLimitUsd = DEFAULT_COST_LIMIT_USD,
         outputFormat,
+        images = [],
+        webSearch = false,
       } = parsed.data;
+
+      const imagesCheck = validateInputImages(images);
+      if (!imagesCheck.ok) {
+        return reply.code(400).send({ error: `invalid images: ${imagesCheck.error}` });
+      }
 
       if (outputFormat) {
         const schemaCheck = validateOutputFormatSchema(outputFormat.schema);
@@ -223,6 +298,12 @@ export async function runsRoutes(
         return reply.code(400).send({ error: message });
       }
 
+      if (webSearch && !runProvider.supportsWebSearch) {
+        return reply.code(400).send({
+          error: "webSearch requires OpenAI-only or OpenRouter-only BYOK models, with no server-configured or mixed-provider models",
+        });
+      }
+
       for (const m of resolvedByokModels) {
         if (!m.save) continue;
         await saveApiKey(deps.db, deps.encryptionKey, {
@@ -239,6 +320,8 @@ export async function runsRoutes(
         conversationId: request.params.id,
         workspaceId: request.workspaceId,
         question,
+        images,
+        webSearch,
         mode,
         models: runProvider.models,
         provider: runProvider.provider,

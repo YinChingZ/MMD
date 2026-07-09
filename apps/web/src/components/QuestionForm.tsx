@@ -11,6 +11,11 @@ import { ModeSelector } from "./ModeSelector";
 import { ModelMultiSelect } from "./ModelMultiSelect";
 import { SavedKeysPicker } from "./SavedKeysPicker";
 import { TimeEstimateLine } from "./TimeEstimateLine";
+import {
+  readImageFiles,
+  validateImageFiles,
+  type SelectedImage,
+} from "@/lib/image-input";
 
 // Mirrors apps/api/src/routes/runs.ts's DEFAULT_COST_LIMIT_USD — kept as an
 // independent constant since the two apps don't share a config package for
@@ -25,6 +30,8 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
   const [byokEntries, setByokEntries] = useState<ByokEntryUI[]>([]);
   const [costLimitUsd, setCostLimitUsd] = useState(DEFAULT_COST_LIMIT_USD);
   const [outputSchemaText, setOutputSchemaText] = useState("");
+  const [images, setImages] = useState<SelectedImage[]>([]);
+  const [webSearch, setWebSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,6 +73,8 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
           byokEntries,
           costLimitUsd,
           outputFormat,
+          images: images.map(({ dataUrl }) => ({ dataUrl })),
+          webSearch,
         })
       );
       router.push(`/conversations/${conversationId}/runs/${runId}`);
@@ -79,6 +88,23 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
     .map((e) => ("savedKeyId" in e.payload ? e.payload.savedKeyId : undefined))
     .filter((id): id is string => Boolean(id));
 
+  const addImages = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const selected = Array.from(files);
+    const validationError = validateImageFiles(selected, images);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    try {
+      const next = await readImageFiles(selected);
+      setImages((previous) => [...previous, ...next]);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not read images.");
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <textarea
@@ -88,10 +114,69 @@ export function QuestionForm({ conversationId }: { conversationId: string }) {
         onChange={(e) => setQuestion(e.target.value)}
       />
 
+      <div className="flex flex-col gap-2">
+        <label className="text-sm font-medium text-gray-700" htmlFor="input-images">
+          Images (optional)
+        </label>
+        <p className="text-xs text-gray-500">
+          JPEG, PNG, or WebP only; up to 3 images, 5MB each and 12MB total.
+          Every selected model receives these images during its independent proposal,
+          so choose vision-capable models.
+        </p>
+        <input
+          id="input-images"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          multiple
+          onChange={(event) => {
+            void addImages(event.target.files);
+            event.target.value = "";
+          }}
+          className="text-sm"
+        />
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {images.map((image) => (
+              <div key={image.id} className="relative w-24 rounded border border-gray-200 p-1">
+                <img
+                  src={image.dataUrl}
+                  alt={image.name}
+                  className="h-16 w-full rounded object-cover"
+                />
+                <p className="truncate text-xs text-gray-500">{image.name}</p>
+                <button
+                  type="button"
+                  aria-label={`Remove ${image.name}`}
+                  onClick={() => setImages((current) => current.filter((item) => item.id !== image.id))}
+                  className="text-xs text-red-600"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div>
         <h3 className="mb-1 text-sm font-medium text-gray-700">Mode</h3>
         <ModeSelector value={mode} onChange={setMode} />
       </div>
+
+      <label className="flex flex-col gap-1 rounded border border-gray-200 p-3 text-sm text-gray-700">
+        <span className="flex items-center gap-2 font-medium">
+          <input
+            type="checkbox"
+            checked={webSearch}
+            onChange={(event) => setWebSearch(event.target.checked)}
+          />
+          Verify facts with web search
+        </span>
+        <span className="text-xs text-gray-500">
+          Uses OpenAI Responses API or OpenRouter server search during propose and critique.
+          Select only OpenAI BYOK models or only OpenRouter BYOK models; it may increase cost and latency.
+        </span>
+      </label>
 
       <div>
         <h3 className="mb-1 text-sm font-medium text-gray-700">Models</h3>

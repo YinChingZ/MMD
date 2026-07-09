@@ -130,6 +130,10 @@ export class DeliberationQuorumError extends Error {
 
 export interface DeliberationInput {
   question: string;
+  /** M6.5: validated data URLs used only by independent propose calls. */
+  images?: InputImage[];
+  /** M6.6: unified, opt-in web-search switch for propose and critique. */
+  webSearch?: boolean;
   models: ModelConfig[];
   provider: ModelProvider;
   mode?: RunMode;
@@ -163,6 +167,11 @@ export interface DeliberationInput {
    * internal result. Omitted entirely means today's behavior is unchanged.
    */
   outputFormat?: FormatUserOutputRequest;
+}
+
+/** A validated inline image persisted with a run, without exposing it in results. */
+export interface InputImage {
+  dataUrl: string;
 }
 
 /** Running total for the M5.1 cost circuit breaker, shared by reference across
@@ -467,7 +476,13 @@ async function structuredCall<T>(
 ): Promise<T> {
   return callStructured(async (repairNote, attempt = 0) => {
     const req: CompletionRequest = repairNote
-      ? { ...request, userPrompt: `${request.userPrompt}\n\n${repairNote}` }
+      ? {
+          ...request,
+          userPrompt:
+            typeof request.userPrompt === "string"
+              ? `${request.userPrompt}\n\n${repairNote}`
+              : [...request.userPrompt, { type: "text", text: repairNote }],
+        }
       : request;
     if (provider.completeStream && stream?.onDelta) {
       const result = await provider.completeStream(
@@ -645,6 +660,10 @@ async function runStandardOrQuickDeliberation(
   const coordinator =
     input.models.find((m) => m.id === input.coordinatorModelId) ??
     input.models[0];
+  const toolFanout = {
+    ...fanout,
+    timeoutMs: fanout.timeoutMs + (input.webSearch ? budget.toolRoundTripAllowanceMs ?? 0 : 0),
+  };
 
   const timings: Partial<Record<Phase, number>> = {};
   const quorum: Partial<Record<Phase, QuorumCheck>> = {};
@@ -681,12 +700,17 @@ async function runStandardOrQuickDeliberation(
       structuredCall(
         input.provider,
         config,
-        buildProposePrompt({ question: input.question, modelId: config.id }),
+        buildProposePrompt({
+          question: input.question,
+          modelId: config.id,
+          images: input.images?.map((image) => image.dataUrl),
+          webSearch: input.webSearch,
+        }),
         ProposalSchema,
         (usage) => recordUsage(costState, usage),
         itemStreamHooks(emit, "propose", config.id, fanout.timeoutMs)
       ),
-    { ...fanout, onSettled: reportModelResponded(emit, "propose") }
+    { ...toolFanout, onSettled: reportModelResponded(emit, "propose") }
   );
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
@@ -720,12 +744,13 @@ async function runStandardOrQuickDeliberation(
             question: input.question,
             reviewerModelId: config.id,
             proposals,
+            webSearch: input.webSearch,
           }),
           CritiqueSchema,
           (usage) => recordUsage(costState, usage),
           itemStreamHooks(emit, "critique", config.id, fanout.timeoutMs)
         ),
-      { ...fanout, onSettled: reportModelResponded(emit, "critique") }
+      { ...toolFanout, onSettled: reportModelResponded(emit, "critique") }
     );
     timings.critique = Date.now() - t0;
     quorum.critique = critiqueOutcome.quorum;
@@ -956,6 +981,9 @@ async function runStandardOrQuickDeliberation(
 interface RunTopicDeliberationParams {
   runId: string;
   question: string;
+  images?: InputImage[];
+  webSearch?: boolean;
+  toolRoundTripAllowanceMs?: number;
   models: ModelConfig[];
   provider: ModelProvider;
   topic: Topic;
@@ -977,6 +1005,9 @@ async function runTopicDeliberation(
   const {
     runId,
     question,
+    images,
+    webSearch,
+    toolRoundTripAllowanceMs,
     models,
     provider,
     topic,
@@ -989,6 +1020,10 @@ async function runTopicDeliberation(
 
   const timings: Partial<Record<Phase, number>> = {};
   const quorum: Partial<Record<Phase, QuorumCheck>> = {};
+  const toolFanout = {
+    ...fanout,
+    timeoutMs: fanout.timeoutMs + (webSearch ? toolRoundTripAllowanceMs ?? 0 : 0),
+  };
 
   const emit = (
     type: RunEventType,
@@ -1026,12 +1061,18 @@ async function runTopicDeliberation(
       structuredCall(
         provider,
         config,
-        buildProposePrompt({ question, modelId: config.id, topic }),
+        buildProposePrompt({
+          question,
+          modelId: config.id,
+          topic,
+          images: images?.map((image) => image.dataUrl),
+          webSearch,
+        }),
         ProposalSchema,
         (usage) => recordUsage(costState, usage),
         itemStreamHooks(emit, "propose", config.id, fanout.timeoutMs)
       ),
-    { ...fanout, onSettled: reportModelResponded(emit, "propose") }
+    { ...toolFanout, onSettled: reportModelResponded(emit, "propose") }
   );
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
@@ -1063,12 +1104,13 @@ async function runTopicDeliberation(
           reviewerModelId: config.id,
           proposals,
           topic,
+          webSearch,
         }),
         CritiqueSchema,
         (usage) => recordUsage(costState, usage),
         itemStreamHooks(emit, "critique", config.id, fanout.timeoutMs)
       ),
-    { ...fanout, onSettled: reportModelResponded(emit, "critique") }
+    { ...toolFanout, onSettled: reportModelResponded(emit, "critique") }
   );
   timings.critique = Date.now() - t0;
   quorum.critique = critiqueOutcome.quorum;
@@ -1270,6 +1312,9 @@ async function runPlanningDeliberation(
       runTopicDeliberation({
         runId,
         question: input.question,
+        images: input.images,
+        webSearch: input.webSearch,
+        toolRoundTripAllowanceMs: budget.toolRoundTripAllowanceMs,
         models: input.models,
         provider: input.provider,
         topic,

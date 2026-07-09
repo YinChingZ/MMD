@@ -302,6 +302,42 @@ describe("OpenAICompatibleProvider", () => {
     expect(body.stream_options).toEqual({ include_usage: true });
   });
 
+  it("serializes multimodal content parts for both normal and streaming requests", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce(fakeResponse({ choices: [{ message: { content: "ok" } }] }))
+      .mockResolvedValueOnce(
+        fakeSseResponse([sseFrame({ choices: [{ delta: { content: "ok" } }] }), "data: [DONE]\n\n"])
+      );
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: "https://example.com/v1",
+      apiKey: "k",
+    });
+    const multimodalRequest = {
+      systemPrompt: "s",
+      userPrompt: [
+        { type: "text" as const, text: "What is shown?" },
+        { type: "image_url" as const, imageUrl: "data:image/png;base64,cG5n" },
+      ],
+      meta: {},
+    };
+
+    await provider.complete({ id: "some-model", provider: "openai-compatible" }, multimodalRequest);
+    await provider.completeStream!(
+      { id: "some-model", provider: "openai-compatible" },
+      multimodalRequest,
+      () => {}
+    );
+
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body.messages[1].content).toEqual([
+        { type: "text", text: "What is shown?" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,cG5n" } },
+      ]);
+    }
+  });
+
   it("completeStream: aborts the underlying request when timeoutMs elapses", async () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation((_url: string, init: RequestInit) => {
@@ -326,5 +362,77 @@ describe("OpenAICompatibleProvider", () => {
     ).rejects.toThrow();
     const [, init] = fetchMock.mock.calls[0];
     expect((init as RequestInit).signal?.aborted).toBe(true);
+  });
+
+  it("uses the Responses API with one native web-search tool when requested", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      fakeResponse({
+        output_text: '{"claims":[]}',
+        output: [{ type: "web_search_call" }],
+        usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      })
+    );
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "k",
+      providerId: "openai",
+      useResponsesApi: true,
+    });
+
+    const result = await provider.complete(
+      { id: "gpt-5.4", provider: "OpenAI" },
+      { ...request, tools: [{ type: "web_search" }] }
+    );
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.openai.com/v1/responses");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.tools).toEqual([{ type: "web_search" }]);
+    expect(body.max_tool_calls).toBe(1);
+    expect(body.store).toBe(false);
+    expect(body.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hello" }] }]);
+    expect(result.text).toBe('{"claims":[]}');
+    expect(result.toolCalls).toEqual([{ type: "web_search" }]);
+    // $0.01 native-search fee is included in addition to token pricing.
+    expect(result.usage?.costUsd).toBeCloseTo(0.01055, 5);
+  });
+
+  it("uses OpenRouter's web-search server tool through Chat Completions", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      fakeResponse({
+        choices: [{ message: { content: '{"claims":[]}' } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          cost: 0.012,
+          server_tool_use: { web_search_requests: 1 },
+        },
+      })
+    );
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "k",
+      providerId: "openrouter",
+    });
+
+    const result = await provider.complete(
+      { id: "openai/gpt-5.4-mini", provider: "OpenRouter" },
+      { ...request, tools: [{ type: "web_search" }] }
+    );
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.tools).toEqual([
+      {
+        type: "openrouter:web_search",
+        parameters: { max_results: 5, max_total_results: 5, search_context_size: "medium" },
+      },
+    ]);
+    expect(result.text).toBe('{"claims":[]}');
+    expect(result.usage?.costUsd).toBe(0.012);
   });
 });

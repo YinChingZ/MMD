@@ -19,6 +19,8 @@ export interface RunBudget {
   targetP50Ms: number;
   targetP95Ms: number;
   phases: Phase[];
+  /** Extra per-call timeout used only by M6.6 web-search-enabled propose/critique. */
+  toolRoundTripAllowanceMs?: number;
   /** planning mode only: hard cap on outline topic count (also enforced in OutlineResultSchema itself). */
   maxTopics?: number;
 }
@@ -38,6 +40,7 @@ export const STANDARD_BUDGET: RunBudget = {
   targetP50Ms: 150_000,
   targetP95Ms: 300_000,
   phases: [...PHASES],
+  toolRoundTripAllowanceMs: 15_000,
 };
 
 // quick mode 还没有用真实模型基准测过（见 docs/protocol.md），维持 M0
@@ -52,6 +55,7 @@ export const QUICK_MODE_BUDGET: RunBudget = {
   targetP50Ms: 20_000,
   targetP95Ms: 40_000,
   phases: ["propose", "normalize", "compose"],
+  toolRoundTripAllowanceMs: 15_000,
 };
 
 // planning mode: the full six-phase set (propose/critique/revise/normalize/
@@ -64,6 +68,7 @@ export const PLANNING_BUDGET: RunBudget = {
   targetP50Ms: 150_000,
   targetP95Ms: 300_000,
   phases: [...PHASES],
+  toolRoundTripAllowanceMs: 15_000,
   maxTopics: 8,
 };
 

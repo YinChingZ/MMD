@@ -90,6 +90,11 @@ export interface OutputFormatInput {
   instructions?: string;
 }
 
+/** M6.5: a validated inline JPEG/PNG/WebP data URL for propose-only input. */
+export interface InputImageInput {
+  dataUrl: string;
+}
+
 // Mirrors apps/api/src/repositories/results-repo.ts's getResult() shape plus
 // the runId/question/mode/status the route adds on top — not DeliberationResult
 // itself, which also carries a `budget` field getResult never persists.
@@ -178,6 +183,8 @@ export async function createRun(
     byokModels?: ByokModelInput[];
     costLimitUsd?: number;
     outputFormat?: OutputFormatInput;
+    images?: InputImageInput[];
+    webSearch?: boolean;
   }
 ): Promise<{ runId: string; status: RunStatus }> {
   const res = await fetch(`/api/conversations/${conversationId}/runs`, {

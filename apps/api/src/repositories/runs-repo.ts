@@ -4,6 +4,10 @@ import type { ModelConfig } from "@mmd/model-adapters";
 import type { RunBudget, RunMode } from "@mmd/protocol";
 import type { Database, RunsTable } from "../db/client.js";
 
+export interface InputImage {
+  dataUrl: string;
+}
+
 export type RunStatus = "running" | "completed" | "failed";
 
 export interface RunRow {
@@ -25,6 +29,7 @@ export async function createRun(
     conversationId: string;
     workspaceId: string;
     question: string;
+    images?: InputImage[];
     mode: RunMode;
     modelConfig: ModelConfig[];
     budget: RunBudget;
@@ -37,6 +42,7 @@ export async function createRun(
       conversation_id: params.conversationId,
       workspace_id: params.workspaceId,
       question: params.question,
+      input_images: JSON.stringify(params.images ?? []),
       mode: params.mode,
       status: "running",
       model_config: JSON.stringify(params.modelConfig),

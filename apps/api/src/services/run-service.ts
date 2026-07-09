@@ -4,6 +4,7 @@ import type { ModelConfig, ModelProvider } from "@mmd/model-adapters";
 import {
   runDeliberation,
   type FormatUserOutputRequest,
+  type InputImage,
   type RunEvent,
 } from "@mmd/orchestrator";
 import type { Database } from "../db/client.js";
@@ -20,6 +21,8 @@ export interface StartRunParams {
   conversationId: string;
   workspaceId: string;
   question: string;
+  images?: InputImage[];
+  webSearch?: boolean;
   mode: RunMode;
   models: ModelConfig[];
   provider: ModelProvider;
@@ -61,6 +64,7 @@ export class RunService {
       conversationId: params.conversationId,
       workspaceId: params.workspaceId,
       question: params.question,
+      images: params.images,
       mode: params.mode,
       modelConfig: params.models,
       budget,
@@ -122,6 +126,8 @@ export class RunService {
 
     runDeliberation({
       question: params.question,
+      images: params.images,
+      webSearch: params.webSearch,
       models: params.models,
       provider: params.provider,
       mode: params.mode,

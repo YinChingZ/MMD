@@ -67,6 +67,35 @@ const models = [
 ];
 const question = "Should a small team adopt a monorepo?";
 
+class RecordingMockProvider implements ModelProvider {
+  readonly name = "recording-mock";
+  readonly requests: CompletionRequest[] = [];
+  private readonly inner = new MockProvider();
+
+  async complete(
+    config: ModelConfig,
+    request: CompletionRequest
+  ): Promise<CompletionResult> {
+    this.requests.push(request);
+    return this.inner.complete(config, request);
+  }
+}
+
+class ImageRejectingMockProvider implements ModelProvider {
+  readonly name = "image-rejecting-mock";
+  private readonly inner = new MockProvider();
+
+  async complete(
+    config: ModelConfig,
+    request: CompletionRequest
+  ): Promise<CompletionResult> {
+    if (config.id === "model_c" && Array.isArray(request.userPrompt)) {
+      throw new Error("model does not support image input");
+    }
+    return this.inner.complete(config, request);
+  }
+}
+
 describe("runDeliberation — M1 acceptance criteria", () => {
   it("runs the full standard pipeline end-to-end and produces a schema-valid final answer", async () => {
     const result = await runDeliberation({
@@ -99,6 +128,53 @@ describe("runDeliberation — M1 acceptance criteria", () => {
     });
 
     expect(result.runId).toBe("run_caller_supplied");
+  });
+
+  it("M6.5 sends images only to propose, including each planning topic", async () => {
+    const provider = new RecordingMockProvider();
+    const images = [{ dataUrl: "data:image/png;base64,AQID" }];
+    await runDeliberation({ question, models, provider, images, mode: "planning" });
+
+    const proposeRequests = provider.requests.filter((request) => request.meta.phase === "propose");
+    expect(proposeRequests.length).toBeGreaterThan(models.length);
+    for (const request of proposeRequests) {
+      expect(request.userPrompt).toEqual(
+        expect.arrayContaining([
+          { type: "text", text: expect.any(String) },
+          { type: "image_url", imageUrl: images[0].dataUrl },
+        ])
+      );
+    }
+    for (const request of provider.requests.filter((request) => request.meta.phase !== "propose")) {
+      expect(typeof request.userPrompt).toBe("string");
+    }
+  });
+
+  it("M6.5 degrades through quorum when one selected model rejects image input", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new ImageRejectingMockProvider(),
+      images: [{ dataUrl: "data:image/png;base64,AQID" }],
+    });
+
+    expect(result.quorum.propose?.met).toBe(true);
+    expect(result.quorum.propose?.partial).toBe(true);
+    expect(result.proposals).toHaveLength(2);
+    expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+  });
+
+  it("M6.6 enables native tools only for propose and critique", async () => {
+    const provider = new RecordingMockProvider();
+    await runDeliberation({ question, models, provider, webSearch: true });
+    for (const request of provider.requests) {
+      const phase = request.meta.phase;
+      if (phase === "propose" || phase === "critique") {
+        expect(request.tools).toEqual([{ type: "web_search" }]);
+      } else {
+        expect(request.tools).toBeUndefined();
+      }
+    }
   });
 
   it("surfaces which models changed their position and why (not just a flat merge)", async () => {
