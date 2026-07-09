@@ -1,17 +1,29 @@
+import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import type { RunStatus } from "@/lib/api";
-
-const STYLES: Record<RunStatus, string> = {
-  running: "bg-blue-100 text-blue-800",
-  completed: "bg-green-100 text-green-800",
-  failed: "bg-red-100 text-red-800",
-};
+import { messages } from "@/lib/messages";
+import { Badge } from "./ui/badge";
 
 export function RunStatusBadge({ status }: { status: RunStatus }) {
+  if (status === "running") {
+    return (
+      <Badge tone="accent">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        {messages.run.statusRunning}
+      </Badge>
+    );
+  }
+  if (status === "completed") {
+    return (
+      <Badge tone="strong">
+        <CheckCircle2 className="h-3 w-3" />
+        {messages.run.statusCompleted}
+      </Badge>
+    );
+  }
   return (
-    <span
-      className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STYLES[status]}`}
-    >
-      {status}
-    </span>
+    <Badge tone="rejected">
+      <XCircle className="h-3 w-3" />
+      {messages.run.statusFailed}
+    </Badge>
   );
 }

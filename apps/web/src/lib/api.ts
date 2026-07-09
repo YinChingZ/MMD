@@ -149,6 +149,15 @@ export async function createConversation(
   return asJson<ConversationSummary>(res);
 }
 
+// Cascade-deletes the conversation's runs (API migration 0006).
+export async function deleteConversation(id: string): Promise<void> {
+  const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `request failed with status ${res.status}`);
+  }
+}
+
 export async function getConversation(
   id: string
 ): Promise<ConversationSummary & { runs: RunRow[] }> {

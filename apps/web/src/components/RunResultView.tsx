@@ -1,9 +1,9 @@
 import type { RunResult } from "@/lib/api";
-import { formatRunCost } from "@/lib/cost";
-import { ConsensusPanel } from "./ConsensusPanel";
-import { CustomJsonOutputPanel } from "./CustomJsonOutputPanel";
-import { DiscussionProcess } from "./DiscussionProcess";
-import { FinalAnswerPanel } from "./FinalAnswerPanel";
+import { messages } from "@/lib/messages";
+import { ConsensusSection } from "./results/ConsensusSection";
+import { DeliberationRecord } from "./results/DeliberationRecord";
+import { FinalAnswerCard } from "./results/FinalAnswerCard";
+import { StructuredOutputPanel } from "./results/StructuredOutputPanel";
 import { PlanDocumentView } from "./PlanDocumentView";
 
 /**
@@ -12,34 +12,28 @@ import { PlanDocumentView } from "./PlanDocumentView";
  * here depends on workspace state; it only ever reads from the RunResult
  * passed in, so it's safe to render from either an owner's fetch or an
  * anonymous share-token fetch.
+ *
+ * 布局原则：答案优先，证据按需展开——首屏最终答案卡，其后共识分区、
+ * 审议过程（默认收起）、结构化输出。
  */
 export function RunResultView({ result }: { result: RunResult }) {
   return (
-    <>
-      {result.cost && (
-        <p className="text-sm text-gray-500">{formatRunCost(result.cost)}</p>
-      )}
-      {result.userOutput !== undefined && (
-        <CustomJsonOutputPanel userOutput={result.userOutput} />
-      )}
-      {result.userOutputError && (
-        <p className="text-sm text-amber-600">
-          Custom JSON output formatting failed ({result.userOutputError}) — the
-          main result below is unaffected.
-        </p>
-      )}
+    <div className="flex flex-col gap-4">
       {result.planDocument ? (
-        <PlanDocumentView planDocument={result.planDocument} topics={result.topics ?? []} />
+        <PlanDocumentView
+          planDocument={result.planDocument}
+          topics={result.topics ?? []}
+        />
       ) : (
         <>
-          <FinalAnswerPanel text={result.final.final_answer} />
-          <ConsensusPanel
+          <FinalAnswerCard text={result.final.final_answer} result={result} />
+          <ConsensusSection
             candidates={result.normalize.candidate_claims}
             classifications={result.classifications}
             proposals={result.proposals}
             revisions={result.revisions}
           />
-          <DiscussionProcess
+          <DeliberationRecord
             proposals={result.proposals}
             critiques={result.critiques}
             revisions={result.revisions}
@@ -47,6 +41,16 @@ export function RunResultView({ result }: { result: RunResult }) {
           />
         </>
       )}
-    </>
+
+      {result.userOutput !== undefined && (
+        <StructuredOutputPanel userOutput={result.userOutput} />
+      )}
+      {result.userOutputError && (
+        <p className="text-sm text-consensus-disputed">
+          {messages.jsonOutput.resultError}（{result.userOutputError}）——
+          上方主结果不受影响。
+        </p>
+      )}
+    </div>
   );
 }

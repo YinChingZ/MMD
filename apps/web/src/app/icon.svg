@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#faf8f4"/>
+  <!-- 六点汇聚：六个模型向中心共识收敛 -->
+  <circle cx="32" cy="32" r="7" fill="#c9634a"/>
+  <circle cx="32" cy="12" r="4.5" fill="#c9634a" opacity="0.85"/>
+  <circle cx="49.3" cy="22" r="4.5" fill="#c9634a" opacity="0.7"/>
+  <circle cx="49.3" cy="42" r="4.5" fill="#c9634a" opacity="0.55"/>
+  <circle cx="32" cy="52" r="4.5" fill="#c9634a" opacity="0.7"/>
+  <circle cx="14.7" cy="42" r="4.5" fill="#c9634a" opacity="0.85"/>
+  <circle cx="14.7" cy="22" r="4.5" fill="#c9634a" opacity="0.55"/>
+</svg>

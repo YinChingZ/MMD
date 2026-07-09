@@ -1,12 +1,132 @@
 @import "tailwindcss";
 
+/*
+ * MMD 设计令牌层。
+ * 颜色一律通过下面的语义变量进入组件（bg-surface / text-ink 等工具类），
+ * 组件内不允许硬编码色值 —— 未来暗色主题只需追加一套 .dark 变量。
+ */
 :root {
-  --consensus-strong: #16a34a;
-  --consensus-qualified: #2563eb;
-  --consensus-disputed: #d97706;
-  --consensus-rejected: #dc2626;
+  /* 基底：中性暖白 + 石墨 */
+  --background: oklch(0.977 0.005 85); /* ≈ #faf8f4 暖米白 */
+  --surface: oklch(1 0 0); /* 卡片白 */
+  --surface-muted: oklch(0.955 0.007 85); /* 内嵌面板 / 代码底 */
+  --surface-hover: oklch(0.945 0.008 85);
+  --border: oklch(0.905 0.008 85); /* 低对比边框 */
+  --border-strong: oklch(0.84 0.01 85);
+  --ink: oklch(0.26 0.012 60); /* 石墨正文 */
+  --ink-muted: oklch(0.5 0.015 70); /* 辅助信息 */
+  --ink-faint: oklch(0.64 0.012 75); /* 占位 / 最弱层级 */
+
+  /* 品牌强调色：陶土暖色（单一令牌，可整体换色） */
+  --accent: oklch(0.62 0.13 40); /* ≈ #c9634a */
+  --accent-hover: oklch(0.57 0.13 40);
+  --accent-foreground: oklch(0.99 0 0);
+  --accent-muted: oklch(0.945 0.028 45); /* accent 淡底 */
+
+  --ring: var(--accent);
+  --danger: oklch(0.55 0.19 25);
+  --danger-muted: oklch(0.95 0.03 25);
+
+  /* 语义化共识色：四组 前景 + 淡底 */
+  --consensus-strong: oklch(0.55 0.14 150);
+  --consensus-strong-bg: oklch(0.95 0.035 150);
+  --consensus-qualified: oklch(0.52 0.14 255);
+  --consensus-qualified-bg: oklch(0.95 0.02 255);
+  --consensus-disputed: oklch(0.6 0.13 70);
+  --consensus-disputed-bg: oklch(0.96 0.045 85);
+  --consensus-rejected: oklch(0.55 0.19 25);
+  --consensus-rejected-bg: oklch(0.95 0.03 25);
+
+  /* 圆角 / 阴影 */
+  --radius-sm: 0.5rem; /* 8px 小控件 */
+  --radius-md: 0.75rem; /* 12px 常规 */
+  --radius-lg: 1rem; /* 16px 卡片 / 输入器 */
+  --shadow-card: 0 1px 2px oklch(0.2 0.02 60 / 0.05), 0 1px 4px oklch(0.2 0.02 60 / 0.04);
+  --shadow-raised: 0 2px 8px oklch(0.2 0.02 60 / 0.07), 0 8px 24px oklch(0.2 0.02 60 / 0.06);
+  --shadow-overlay: 0 4px 16px oklch(0.2 0.02 60 / 0.12), 0 12px 40px oklch(0.2 0.02 60 / 0.12);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-muted: var(--accent-muted);
+  --color-ring: var(--ring);
+  --color-danger: var(--danger);
+  --color-danger-muted: var(--danger-muted);
+  --color-consensus-strong: var(--consensus-strong);
+  --color-consensus-strong-bg: var(--consensus-strong-bg);
+  --color-consensus-qualified: var(--consensus-qualified);
+  --color-consensus-qualified-bg: var(--consensus-qualified-bg);
+  --color-consensus-disputed: var(--consensus-disputed);
+  --color-consensus-disputed-bg: var(--consensus-disputed-bg);
+  --color-consensus-rejected: var(--consensus-rejected);
+  --color-consensus-rejected-bg: var(--consensus-rejected-bg);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-overlay: var(--shadow-overlay);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
 body {
   color-scheme: light;
+  background-color: var(--background);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 弹层 / 流式卡片入场（配合 transition-behavior） */
+@media (prefers-reduced-motion: no-preference) {
+  .mmd-enter {
+    transition: opacity 0.25s ease, translate 0.25s ease;
+    @starting-style {
+      opacity: 0;
+      translate: 0 6px;
+    }
+  }
+}
+
+/* 流式合成光标 */
+.mmd-caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1.1em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes mmd-caret {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+  .mmd-caret {
+    animation: mmd-caret 1s step-end infinite;
+  }
+  @keyframes mmd-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+  .mmd-pulse {
+    animation: mmd-pulse 1.6s ease-in-out infinite;
+  }
 }
