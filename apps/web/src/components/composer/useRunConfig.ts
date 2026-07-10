@@ -11,6 +11,7 @@ import {
   type ProviderInfo,
   type SavedApiKeyMetadata,
 } from "../../lib/api";
+import { getDefaultModels } from "../../lib/default-models";
 import {
   readImageFiles,
   validateImageFiles,
@@ -33,12 +34,14 @@ export interface RunConfig {
   setMode: (m: RunMode) => void;
   models: ModelInfo[] | null;
   modelIds: string[];
+  setModelIds: (ids: string[]) => void;
   toggleModel: (id: string) => void;
   byokEntries: ByokEntryUI[];
   addByokEntry: (entry: ByokEntryUI) => void;
   removeByokEntry: (clientId: string) => void;
   providers: ProviderInfo[] | null;
   savedKeys: SavedApiKeyMetadata[] | null;
+  removeSavedKey: (id: string) => void;
   costLimitUsd: number;
   setCostLimitUsd: (v: number) => void;
   outputSchemaText: string;
@@ -66,22 +69,55 @@ export function useRunConfig(): RunConfig {
 
   useEffect(() => {
     let cancelled = false;
-    listModels()
-      .then((fetched) => {
-        if (cancelled) return;
-        setModels(fetched);
-        // 默认全选内置模型（沿用原 ModelMultiSelect 行为），仅初始化一次。
-        setModelIds(fetched.map((m) => m.id));
-      })
-      .catch(() => {
-        if (!cancelled) setModels([]);
-      });
+
     listProviders()
       .then((fetched) => !cancelled && setProviders(fetched))
       .catch(() => !cancelled && setProviders([]));
-    listWorkspaceKeys()
-      .then((fetched) => !cancelled && setSavedKeys(fetched))
-      .catch(() => !cancelled && setSavedKeys([]));
+
+    // 模型与已存密钥必须一起等待——默认选择规则依赖"是否有已存密钥"，
+    // 分开设置会在密钥还没到时就用错误的规则选中模型。
+    const modelsPromise = listModels().catch(() => [] as ModelInfo[]);
+    const savedKeysPromise = listWorkspaceKeys().catch(
+      () => [] as SavedApiKeyMetadata[],
+    );
+
+    Promise.all([modelsPromise, savedKeysPromise]).then(
+      ([fetchedModels, fetchedKeys]) => {
+        if (cancelled) return;
+        setModels(fetchedModels);
+        setSavedKeys(fetchedKeys);
+
+        const marks = getDefaultModels();
+        if (marks.length > 0) {
+          // 用户已标记默认模型：始终优先于下方的通用规则。
+          const legacyIds = marks
+            .filter((m) => m.kind === "legacy")
+            .map((m) => (m as { id: string }).id)
+            .filter((id) => fetchedModels.some((m) => m.id === id));
+          setModelIds(legacyIds);
+          for (const mark of marks) {
+            if (mark.kind !== "byokSavedKey") continue;
+            if (!fetchedKeys.some((k) => k.id === mark.savedKeyId)) continue;
+            setByokEntries((prev) => [
+              ...prev,
+              {
+                clientId: crypto.randomUUID(),
+                label: mark.label,
+                providerLabel: mark.providerLabel,
+                payload: { savedKeyId: mark.savedKeyId },
+              },
+            ]);
+          }
+        } else if (fetchedKeys.length > 0) {
+          // 有已存密钥：默认选内置列表前三个，而非全部。
+          setModelIds(fetchedModels.slice(0, 3).map((m) => m.id));
+        } else {
+          // 无已存密钥（含 mock 注册表场景）：默认不选任何模型。
+          setModelIds([]);
+        }
+      },
+    );
+
     return () => {
       cancelled = true;
     };
@@ -113,6 +149,7 @@ export function useRunConfig(): RunConfig {
     setMode,
     models,
     modelIds,
+    setModelIds,
     toggleModel,
     byokEntries,
     addByokEntry: (entry) => setByokEntries((prev) => [...prev, entry]),
@@ -120,6 +157,8 @@ export function useRunConfig(): RunConfig {
       setByokEntries((prev) => prev.filter((e) => e.clientId !== clientId)),
     providers,
     savedKeys,
+    removeSavedKey: (id) =>
+      setSavedKeys((prev) => (prev ? prev.filter((k) => k.id !== id) : prev)),
     costLimitUsd,
     setCostLimitUsd,
     outputSchemaText,

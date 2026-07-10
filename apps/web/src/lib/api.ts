@@ -38,6 +38,8 @@ export interface ModelInfo {
   id: string;
   providerLabel: string;
   isCoordinator: boolean;
+  /** true when the whole server registry is MockProvider (no models.config.json) — see apps/api's ResolvedProvider.isMock. */
+  isMock: boolean;
 }
 
 export interface ProviderInfo {
@@ -149,6 +151,18 @@ export async function createConversation(
   return asJson<ConversationSummary>(res);
 }
 
+export async function renameConversation(
+  id: string,
+  title: string
+): Promise<ConversationSummary> {
+  const res = await fetch(`/api/conversations/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  return asJson<ConversationSummary>(res);
+}
+
 // Cascade-deletes the conversation's runs (API migration 0006).
 export async function deleteConversation(id: string): Promise<void> {
   const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
@@ -183,6 +197,14 @@ export async function listWorkspaceKeys(): Promise<SavedApiKeyMetadata[]> {
   return body.keys;
 }
 
+export async function deleteWorkspaceKey(id: string): Promise<void> {
+  const res = await fetch(`/api/workspace/keys/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `request failed with status ${res.status}`);
+  }
+}
+
 export async function createRun(
   conversationId: string,
   params: {
@@ -212,6 +234,14 @@ export async function getRun(id: string): Promise<RunRow> {
 export async function getRunResult(id: string): Promise<RunResult> {
   const res = await fetch(`/api/runs/${id}/result`);
   return asJson<RunResult>(res);
+}
+
+// Separate, call-once endpoint — never part of the polled getRun()/RunRow
+// (see apps/api's getRunImages() comment for why).
+export async function getRunImages(id: string): Promise<InputImageInput[]> {
+  const res = await fetch(`/api/runs/${id}/images`);
+  const body = await asJson<{ images: InputImageInput[] }>(res);
+  return body.images;
 }
 
 // M5.5: idempotent — returns the same token if this run was already shared.

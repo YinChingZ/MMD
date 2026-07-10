@@ -16,6 +16,8 @@ export interface BuildComposePromptParams {
   disputed: string[];
   rejected: string[];
   positionChanges: PositionChangeInput[];
+  /** M6.7: the immediately-previous run's question+answer in this conversation, if any. */
+  priorContext?: string;
 }
 
 export function buildComposePrompt(
@@ -28,6 +30,7 @@ export function buildComposePrompt(
     disputed,
     rejected,
     positionChanges,
+    priorContext,
   } = params;
 
   const systemPrompt = [
@@ -41,6 +44,7 @@ export function buildComposePrompt(
   ].join("\n\n");
 
   const userPrompt = [
+    ...(priorContext ? [priorContext] : []),
     `Question: ${question}`,
     `strong_consensus: ${JSON.stringify(strongConsensus)}`,
     `qualified_consensus: ${JSON.stringify(qualifiedConsensus)}`,

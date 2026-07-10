@@ -1,11 +1,16 @@
 "use client";
 
-import { Check, ChevronDown, Crown, X } from "lucide-react";
+import { useState } from "react";
+import { Check, ChevronDown, Crown, Star, X } from "lucide-react";
 import { formatCostUsd } from "../../lib/format";
 import { messages } from "../../lib/messages";
 import { modelColor, modelInitials } from "../../lib/model-colors";
 import { cn } from "../../lib/cn";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { getDefaultModels, isLegacyDefault, toggleLegacyDefault } from "../../lib/default-models";
+import { Popover, PopoverClose, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { IconButton } from "../ui/icon-button";
+import { Badge } from "../ui/badge";
+import { usePanelContext } from "../shell/WorkspaceShell";
 import type { RunConfig } from "./useRunConfig";
 
 const MODES = ["standard", "quick", "planning"] as const;
@@ -76,6 +81,8 @@ function ModePicker({ config }: { config: RunConfig }) {
 
 function ModelPicker({ config }: { config: RunConfig }) {
   const { models, modelIds, byokEntries } = config;
+  const panel = usePanelContext();
+  const [defaults, setDefaults] = useState(() => getDefaultModels());
   return (
     <Popover>
       <PopoverTrigger className={chipClass(config.selectedCount > 0)}>
@@ -96,41 +103,59 @@ function ModelPicker({ config }: { config: RunConfig }) {
         {models?.map((m) => {
           const checked = modelIds.includes(m.id);
           const color = modelColor(m.id);
+          const starred = isLegacyDefault(defaults, m.id);
           return (
-            <button
+            <div
               key={m.id}
-              type="button"
-              role="checkbox"
-              aria-checked={checked}
-              onClick={() => config.toggleModel(m.id)}
-              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-surface-hover"
+              className="flex w-full items-center gap-1 rounded-sm px-1 py-0.5 transition-colors hover:bg-surface-hover"
             >
-              <span
-                aria-hidden
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold"
-                style={{ backgroundColor: color.bg, color: color.fg }}
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={checked}
+                onClick={() => config.toggleModel(m.id)}
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-1 py-1 text-left"
               >
-                {modelInitials(m.id)}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm text-ink">{m.id}</span>
-                <span className="flex items-center gap-1 text-xs text-ink-faint">
-                  {m.providerLabel}
-                  {m.isCoordinator && (
-                    <span className="inline-flex items-center gap-0.5 text-accent">
-                      <Crown className="h-3 w-3" />
-                      {messages.models.coordinator}
-                    </span>
-                  )}
+                <span
+                  aria-hidden
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold"
+                  style={{ backgroundColor: color.bg, color: color.fg }}
+                >
+                  {modelInitials(m.id)}
                 </span>
-              </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-ink">{m.id}</span>
+                  <span className="flex items-center gap-1 text-xs text-ink-faint">
+                    {m.providerLabel}
+                    {m.isCoordinator && (
+                      <span className="inline-flex items-center gap-0.5 text-accent">
+                        <Crown className="h-3 w-3" />
+                        {messages.models.coordinator}
+                      </span>
+                    )}
+                    {m.isMock && <Badge tone="neutral">{messages.models.mockBadge}</Badge>}
+                  </span>
+                </span>
+              </button>
+              <IconButton
+                size="sm"
+                label={messages.models.toggleDefault}
+                onClick={() => setDefaults(toggleLegacyDefault(defaults, m.id))}
+              >
+                <Star
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    starred ? "fill-accent text-accent" : "text-ink-faint",
+                  )}
+                />
+              </IconButton>
               <Check
                 className={cn(
                   "h-4 w-4 shrink-0 text-accent",
                   !checked && "invisible",
                 )}
               />
-            </button>
+            </div>
           );
         })}
 
@@ -175,10 +200,15 @@ function ModelPicker({ config }: { config: RunConfig }) {
           </>
         )}
 
-        <p className="border-t border-border px-2 pb-1 pt-2 text-xs text-ink-faint">
-          {messages.models.addByok} →{" "}
-          {messages.composer.advancedSettings}
-        </p>
+        <PopoverClose asChild>
+          <button
+            type="button"
+            onClick={() => panel?.expand()}
+            className="mt-1 flex w-full items-center gap-1 border-t border-border px-2 pb-1 pt-2 text-left text-xs text-ink-faint transition-colors hover:text-accent"
+          >
+            {messages.models.addByok} → {messages.composer.advancedSettings}
+          </button>
+        </PopoverClose>
       </PopoverContent>
     </Popover>
   );

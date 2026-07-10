@@ -90,6 +90,54 @@ export async function getRun(
   return row ? toRunRow(row) : undefined;
 }
 
+/**
+ * Deliberately NOT part of getRun/RunRow — getRun backs useRunStatus.ts's 5s
+ * poll while a run is "running", and RunRow's Selectable<RunsTable> already
+ * pulls input_images off the wire via .selectAll() there. Mapping images
+ * into the polled response would repeatedly re-transfer the full base64
+ * payload to the browser for the run's whole duration. This is a separate,
+ * minimal-column, call-once query for M6.5's "let the owner view their
+ * attached images after the fact" — see 0009_input_images.sql's comment for
+ * the rest of the retention policy this still respects (never in GET
+ * /result, SSE, or the public share endpoint).
+ */
+export async function getRunImages(
+  db: Kysely<Database>,
+  runId: string
+): Promise<{ workspaceId: string | null; images: InputImage[] } | undefined> {
+  const row = await db
+    .selectFrom("runs")
+    .select(["workspace_id", "input_images"])
+    .where("id", "=", runId)
+    .executeTakeFirst();
+  if (!row) return undefined;
+  return {
+    workspaceId: row.workspace_id,
+    images: (row.input_images as InputImage[] | null) ?? [],
+  };
+}
+
+/**
+ * The most recently created completed run in a conversation, if any — used
+ * by RunService.start() to give the next run in the same conversation a
+ * one-turn memory of what was already asked/answered (M6.7). Deliberately
+ * just the immediately-previous turn, not the full conversation history —
+ * see docs/roadmap.md's M6.7 note on token-budget scope.
+ */
+export async function getLatestCompletedRun(
+  db: Kysely<Database>,
+  conversationId: string
+): Promise<{ id: string; question: string } | undefined> {
+  return db
+    .selectFrom("runs")
+    .select(["id", "question"])
+    .where("conversation_id", "=", conversationId)
+    .where("status", "=", "completed")
+    .orderBy("created_at", "desc")
+    .limit(1)
+    .executeTakeFirst();
+}
+
 export async function listRunsForConversation(
   db: Kysely<Database>,
   conversationId: string

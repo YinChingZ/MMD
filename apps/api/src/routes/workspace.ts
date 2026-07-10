@@ -1,7 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "../app.js";
 import { resolveWorkspace } from "../middleware/workspace.js";
-import { listApiKeysForWorkspace } from "../repositories/workspace-api-keys-repo.js";
+import {
+  deleteApiKey,
+  listApiKeysForWorkspace,
+} from "../repositories/workspace-api-keys-repo.js";
 
 export async function workspaceRoutes(
   fastify: FastifyInstance,
@@ -18,4 +21,15 @@ export async function workspaceRoutes(
     const keys = await listApiKeysForWorkspace(deps.db, request.workspaceId);
     return reply.send({ keys });
   });
+
+  fastify.delete<{ Params: { id: string } }>(
+    "/api/workspace/keys/:id",
+    async (request, reply) => {
+      await deleteApiKey(deps.db, {
+        workspaceId: request.workspaceId,
+        id: request.params.id,
+      });
+      return reply.code(204).send();
+    }
+  );
 }

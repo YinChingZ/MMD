@@ -1,11 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound } from "lucide-react";
+import { KeyRound, Star, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { deleteWorkspaceKey } from "../../lib/api";
 import { formatSavedRate } from "../../lib/cost";
+import { cn } from "../../lib/cn";
+import {
+  getDefaultModels,
+  isSavedKeyDefault,
+  removeDefaultModel,
+  toggleSavedKeyDefault,
+} from "../../lib/default-models";
 import { messages } from "../../lib/messages";
 import { parseOutputSchema } from "../../lib/output-schema";
 import { Button } from "../ui/button";
+import { Dialog, DialogClose, DialogContent } from "../ui/dialog";
+import { IconButton } from "../ui/icon-button";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
@@ -34,11 +45,29 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function SavedKeysSection({ config }: { config: RunConfig }) {
   const { savedKeys, byokEntries } = config;
+  const [defaults, setDefaults] = useState(() => getDefaultModels());
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+
   if (!savedKeys || savedKeys.length === 0) return null;
 
   const addedSavedKeyIds = byokEntries
     .map((e) => ("savedKeyId" in e.payload ? e.payload.savedKeyId : undefined))
     .filter((id): id is string => Boolean(id));
+
+  const confirmKey = savedKeys.find((k) => k.id === confirmId);
+
+  const handleDelete = async (id: string) => {
+    setConfirmId(null);
+    try {
+      await deleteWorkspaceKey(id);
+      config.removeSavedKey(id);
+      removeDefaultModel(id);
+      setDefaults((prev) => prev.filter((m) => !(m.kind === "byokSavedKey" && m.savedKeyId === id)));
+      toast.success(messages.models.deleteKeySuccess);
+    } catch {
+      toast.error(messages.shell.deleteFailed);
+    }
+  };
 
   return (
     <section className="flex flex-col gap-2">
@@ -47,6 +76,7 @@ function SavedKeysSection({ config }: { config: RunConfig }) {
         {savedKeys.map((key) => {
           const alreadyAdded = addedSavedKeyIds.includes(key.id);
           const label = key.label ?? `${key.providerId}:${key.modelId}`;
+          const starred = isSavedKeyDefault(defaults, key.id);
           return (
             <li
               key={key.id}
@@ -61,6 +91,26 @@ function SavedKeysSection({ config }: { config: RunConfig }) {
                   </span>
                 )}
               </span>
+              <IconButton
+                size="sm"
+                label={messages.models.toggleDefault}
+                onClick={() =>
+                  setDefaults(
+                    toggleSavedKeyDefault(defaults, {
+                      savedKeyId: key.id,
+                      label,
+                      providerLabel: key.providerId,
+                    }),
+                  )
+                }
+              >
+                <Star
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    starred ? "fill-accent text-accent" : "text-ink-faint",
+                  )}
+                />
+              </IconButton>
               <Button
                 size="sm"
                 variant="secondary"
@@ -79,10 +129,42 @@ function SavedKeysSection({ config }: { config: RunConfig }) {
               >
                 {alreadyAdded ? "已添加" : messages.models.useKey}
               </Button>
+              <IconButton
+                size="sm"
+                label={messages.common.delete}
+                onClick={() => setConfirmId(key.id)}
+              >
+                <Trash2 className="h-3.5 w-3.5 text-ink-faint" />
+              </IconButton>
             </li>
           );
         })}
       </ul>
+
+      <Dialog open={!!confirmKey} onOpenChange={(open) => !open && setConfirmId(null)}>
+        <DialogContent
+          title={messages.models.deleteKeyTitle}
+          description={messages.models.deleteKeyBody}
+        >
+          <p className="mt-3 truncate rounded-sm bg-surface-muted px-3 py-2 text-sm text-ink">
+            {confirmKey?.label ?? `${confirmKey?.providerId}:${confirmKey?.modelId}`}
+          </p>
+          <div className="mt-4 flex justify-end gap-2">
+            <DialogClose asChild>
+              <Button variant="secondary" size="sm">
+                {messages.common.cancel}
+              </Button>
+            </DialogClose>
+            <Button
+              size="sm"
+              className="bg-danger text-accent-foreground hover:bg-danger"
+              onClick={() => confirmKey && handleDelete(confirmKey.id)}
+            >
+              {messages.common.delete}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

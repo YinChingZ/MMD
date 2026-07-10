@@ -2,18 +2,21 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Copy } from "lucide-react";
+import { toast } from "sonner";
 import type { Phase } from "@mmd/protocol";
-import { getRunResult, type RunResult } from "@/lib/api";
+import { getRunImages, getRunResult, type RunResult } from "@/lib/api";
 import { messages } from "@/lib/messages";
 import { deriveRunProgress, phaseListForMode } from "@/lib/progress";
 import { ROOT_COMPOSE_KEY } from "@/lib/run-events";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useRunStatus } from "@/hooks/useRunStatus";
 import { ErrorPanel } from "@/components/ErrorPanel";
+import { ImageThumbnails } from "@/components/ImageThumbnails";
 import { RunResultView } from "@/components/RunResultView";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { ShareButton } from "@/components/ShareButton";
+import { IconButton } from "@/components/ui/icon-button";
 import { ConsensusSummary } from "@/components/results/ConsensusSection";
 import { ActivityStream } from "@/components/run/ActivityStream";
 import { ProtocolTimeline } from "@/components/run/ProtocolTimeline";
@@ -35,6 +38,10 @@ export function RunPageClient({ runId }: { runId: string }) {
     () => (run ? deriveRunProgress(events, run.mode) : null),
     [events, run],
   );
+  // 运行中/失败态下，ActivityStream 与 ProtocolTimeline 联动的当前阶段选择。
+  const [selectedPhase, setSelectedPhase] = useState<Phase | undefined>(
+    undefined,
+  );
 
   const [result, setResult] = useState<RunResult | null>(null);
   useEffect(() => {
@@ -47,6 +54,17 @@ export function RunPageClient({ runId }: { runId: string }) {
       cancelled = true;
     };
   }, [run?.status, runId]);
+
+  const [images, setImages] = useState<{ dataUrl: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getRunImages(runId).then((fetched) => {
+      if (!cancelled) setImages(fetched);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
 
   if (loading || !run) {
     return (
@@ -76,9 +94,22 @@ export function RunPageClient({ runId }: { runId: string }) {
           <ArrowLeft className="h-3 w-3" />
           {messages.shell.conversations}
         </Link>
-        <h1 className="text-xl font-semibold leading-snug text-ink">
-          {run.question}
-        </h1>
+        <div className="flex items-start gap-2">
+          <h1 className="min-w-0 flex-1 text-xl font-semibold leading-snug text-ink">
+            {run.question}
+          </h1>
+          <IconButton
+            size="sm"
+            label={messages.results.copyQuestion}
+            onClick={async () => {
+              await navigator.clipboard.writeText(run.question);
+              toast.success(messages.common.copied);
+            }}
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </IconButton>
+        </div>
+        <ImageThumbnails images={images} />
         <div className="flex items-center gap-2" aria-live="polite">
           <RunStatusBadge status={run.status} />
           <Badge tone="neutral">
@@ -88,14 +119,17 @@ export function RunPageClient({ runId }: { runId: string }) {
         </div>
       </header>
 
-      {/* 运行中 */}
-      {run.status === "running" && progress && (
+      {/* 运行中 / 失败——失败态下继续显示已产出的内容，而非清空 */}
+      {(run.status === "running" || run.status === "failed") && progress && (
         <>
           {progress.kind === "flat" ? (
             <div className="flex flex-col gap-4">
               <ActivityStream
                 itemProgress={progress.itemProgress}
                 phases={progress.phases}
+                phaseOrder={phaseListForMode(run.mode)}
+                selectedPhase={selectedPhase}
+                onSelectPhase={setSelectedPhase}
               />
               {progress.phases.compose === "in_progress" && (
                 <StreamingAnswer text={composeText[ROOT_COMPOSE_KEY] ?? ""} />
@@ -111,6 +145,8 @@ export function RunPageClient({ runId }: { runId: string }) {
                 phases={phaseListForMode(run.mode)}
                 statusFor={(phase) => progress.phases[phase] ?? "pending"}
                 modelProgressFor={(phase) => progress.modelProgress[phase]}
+                selectedPhase={selectedPhase}
+                onSelectPhase={setSelectedPhase}
               />
             ) : (
               <PlanningSummary progress={progress} />
@@ -119,12 +155,12 @@ export function RunPageClient({ runId }: { runId: string }) {
         </>
       )}
 
-      {/* 失败 */}
+      {/* 失败：错误说明 + 重试入口，出现在已产出内容下方 */}
       {run.status === "failed" && (
         <ErrorPanel
           error={run.error}
           failedPhase={failedPhase}
-          retryHref={`/conversations/${run.conversationId}`}
+          retryHref={`/conversations/${run.conversationId}?retry=${runId}`}
         />
       )}
 

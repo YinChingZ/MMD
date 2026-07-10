@@ -5,12 +5,14 @@ import { describeSchema } from "./schema-text.js";
 export interface BuildOutlinePromptParams {
   question: string;
   maxTopics?: number;
+  /** M6.7: the immediately-previous run's question+answer in this conversation, if any. */
+  priorContext?: string;
 }
 
 export function buildOutlinePrompt(
   params: BuildOutlinePromptParams
 ): CompletionRequest {
-  const { question, maxTopics = 8 } = params;
+  const { question, maxTopics = 8, priorContext } = params;
 
   const systemPrompt = [
     "Break the following question/request down into a bounded list of distinct topics to structure a multi-model deliberation around.",
@@ -22,7 +24,9 @@ export function buildOutlinePrompt(
     describeSchema(OutlineResultSchema, "OutlineResult"),
   ].join("\n\n");
 
-  const userPrompt = `Question: ${question}`;
+  const userPrompt = [priorContext, `Question: ${question}`]
+    .filter(Boolean)
+    .join("\n\n");
 
   return {
     systemPrompt,

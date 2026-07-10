@@ -12,7 +12,7 @@ export const PopoverContent = forwardRef<
   HTMLDivElement,
   ComponentPropsWithoutRef<typeof PopoverPrimitive.Content>
 >(function PopoverContent(
-  { className, sideOffset = 6, align = "start", ...props },
+  { className, sideOffset = 6, align = "start", collisionPadding = 12, ...props },
   ref,
 ) {
   return (
@@ -21,8 +21,9 @@ export const PopoverContent = forwardRef<
         ref={ref}
         sideOffset={sideOffset}
         align={align}
+        collisionPadding={collisionPadding}
         className={cn(
-          "mmd-enter z-50 rounded-md border border-border bg-surface p-3 shadow-raised focus:outline-none",
+          "mmd-enter z-50 max-h-[var(--radix-popover-content-available-height)] overflow-y-auto rounded-md border border-border bg-surface p-3 shadow-raised focus:outline-none",
           className,
         )}
         {...props}

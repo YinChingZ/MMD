@@ -9,6 +9,7 @@ import { getConversation } from "../repositories/conversations-repo.js";
 import {
   getOrCreateShareToken,
   getRun,
+  getRunImages,
   revokeShareToken,
 } from "../repositories/runs-repo.js";
 import { getResult } from "../repositories/results-repo.js";
@@ -369,6 +370,20 @@ export async function runsRoutes(
         status: run.status,
         ...result,
       });
+    }
+  );
+
+  // M6.5 follow-up: lets the owning workspace view the images it attached to
+  // a run after the fact. Deliberately a separate, call-once endpoint rather
+  // than projected onto GET /run — see getRunImages()'s comment for why.
+  fastify.get<{ Params: { id: string } }>(
+    "/api/runs/:id/images",
+    async (request, reply) => {
+      const record = await getRunImages(deps.db, request.params.id);
+      if (!record || record.workspaceId !== request.workspaceId) {
+        return reply.code(404).send({ error: "run not found" });
+      }
+      return reply.send({ images: record.images });
     }
   );
 

@@ -29,9 +29,9 @@ describe("GET /api/models", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.models).toEqual([
-      { id: "model_a", providerLabel: "mock", isCoordinator: false },
-      { id: "model_b", providerLabel: "mock", isCoordinator: false },
-      { id: "model_c", providerLabel: "mock", isCoordinator: false },
+      { id: "model_a", providerLabel: "mock", isCoordinator: false, isMock: true },
+      { id: "model_b", providerLabel: "mock", isCoordinator: false, isMock: true },
+      { id: "model_c", providerLabel: "mock", isCoordinator: false, isMock: true },
     ]);
   });
 

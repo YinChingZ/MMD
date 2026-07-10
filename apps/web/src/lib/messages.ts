@@ -36,6 +36,10 @@ export const messages = {
     deleteConversationBody: "该会话及其全部决策记录将被永久删除，无法恢复。",
     deleteSuccess: "会话已删除",
     deleteFailed: "删除失败，请重试",
+    renameConversationTitle: "重命名会话",
+    renamePlaceholder: "会话名称",
+    renameSuccess: "已重命名",
+    renameFailed: "重命名失败，请重试",
     conversationMenu: "会话操作",
     panelTitle: "决策面板",
     collapsePanel: "收起面板",
@@ -107,6 +111,11 @@ export const messages = {
     rememberKey: "在此设备加密保存",
     yourKey: "你的密钥",
     add: "添加",
+    deleteKeyTitle: "删除已保存的密钥？",
+    deleteKeyBody: "该密钥将从此设备移除，之后需要重新添加才能使用。",
+    deleteKeySuccess: "密钥已删除",
+    toggleDefault: "标记为默认模型",
+    mockBadge: "测试用",
   },
 
   jsonOutput: {
@@ -170,6 +179,13 @@ export const messages = {
     shareFailed: "分享操作失败",
     copyAnswer: "复制答案",
     answerCopied: "答案已复制",
+    copyQuestion: "复制提问",
+    copyTranscript: "复制协商过程",
+    transcriptCopied: "协商过程已复制",
+  },
+
+  images: {
+    viewTitle: "查看图片",
   },
 
   share: {
@@ -183,6 +199,9 @@ export const messages = {
     network: "网络请求失败",
     imageTooMany: (max: number) => `最多添加 ${max} 张图片`,
     imageInvalid: "不支持的图片格式或大小",
+    retryRestored: "已恢复上次配置，确认后可发送",
+    retryKeysNeeded: (labels: string[]) =>
+      `，以下模型需重新添加密钥：${labels.join("、")}`,
   },
 } as const;
 

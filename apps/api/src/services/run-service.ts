@@ -11,10 +11,11 @@ import type { Database } from "../db/client.js";
 import { appendRunEvent, extractTopicId } from "../repositories/events-repo.js";
 import {
   createRun,
+  getLatestCompletedRun,
   markRunCompleted,
   markRunFailed,
 } from "../repositories/runs-repo.js";
-import { saveResult } from "../repositories/results-repo.js";
+import { getResult, saveResult } from "../repositories/results-repo.js";
 import type { RunBroadcaster } from "../sse/broadcaster.js";
 
 export interface StartRunParams {
@@ -31,6 +32,35 @@ export interface StartRunParams {
   costLimitUsd?: number;
   /** M6.1 user-defined JSON output — see runs.ts's CreateRunBody for request-shape validation before this reaches the orchestrator. */
   outputFormat?: FormatUserOutputRequest;
+}
+
+// M6.7: one-turn memory — a follow-up question in the same conversation
+// carries the immediately-previous run's question+answer into propose/
+// compose (and planning's outline), not the whole conversation history.
+// Truncated so one very long prior answer can't blow out every prompt's
+// token budget indefinitely.
+const PRIOR_ANSWER_MAX_CHARS = 2000;
+
+async function buildPriorContext(
+  db: Kysely<Database>,
+  conversationId: string
+): Promise<string | undefined> {
+  const priorRun = await getLatestCompletedRun(db, conversationId);
+  if (!priorRun) return undefined;
+
+  const priorResult = await getResult(db, priorRun.id);
+  const final = priorResult?.final as { final_answer?: string } | undefined;
+  const planDocument = priorResult?.planDocument as
+    | { executive_summary?: string }
+    | undefined;
+  const answer = final?.final_answer ?? planDocument?.executive_summary;
+  if (!answer) return undefined;
+
+  const truncated =
+    answer.length > PRIOR_ANSWER_MAX_CHARS
+      ? `${answer.slice(0, PRIOR_ANSWER_MAX_CHARS)}…`
+      : answer;
+  return `此前该会话已讨论：\n问：${priorRun.question}\n答：${truncated}`;
 }
 
 const TERMINAL_TYPES = new Set(["run_completed", "run_failed"]);
@@ -58,6 +88,7 @@ export class RunService {
   async start(params: StartRunParams): Promise<{ runId: string }> {
     const runId = makeRunId();
     const budget = getBudget(params.mode);
+    const priorContext = await buildPriorContext(this.db, params.conversationId);
 
     await createRun(this.db, {
       id: runId,
@@ -126,6 +157,7 @@ export class RunService {
 
     runDeliberation({
       question: params.question,
+      priorContext,
       images: params.images,
       webSearch: params.webSearch,
       models: params.models,

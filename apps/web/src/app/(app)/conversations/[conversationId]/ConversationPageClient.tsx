@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { ArrowRight } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { ArrowRight, Copy, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import {
   createRun,
   getConversation,
+  getRunImages,
+  renameConversation,
   type ConversationSummary,
   type RunRow,
 } from "@/lib/api";
@@ -15,12 +17,25 @@ import { formatRelativeTime } from "@/lib/format";
 import { messages } from "@/lib/messages";
 import { buildCreateRunPayload } from "@/lib/model-sources";
 import { parseOutputSchema } from "@/lib/output-schema";
+import {
+  buildRetrySnapshot,
+  consumeRetrySnapshot,
+  saveRetrySnapshot,
+  type RetrySnapshot,
+} from "@/lib/retry-snapshot";
+import {
+  notifyConversationsChanged,
+  onConversationsChanged,
+} from "@/lib/workspace-events";
 import { AdvancedRunSettings } from "@/components/composer/AdvancedRunSettings";
 import { DecisionComposer } from "@/components/composer/DecisionComposer";
 import { useRunConfig } from "@/components/composer/useRunConfig";
+import { ImageThumbnails } from "@/components/ImageThumbnails";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { ContextPanel } from "@/components/shell/ContextPanel";
 import { PREFILL_KEY } from "@/components/shell/HomeHero";
+import { IconButton } from "@/components/ui/icon-button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export function ConversationPageClient({
@@ -29,6 +44,7 @@ export function ConversationPageClient({
   conversationId: string;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const config = useRunConfig();
   const [conversation, setConversation] = useState<
     (ConversationSummary & { runs: RunRow[] }) | null
@@ -38,11 +54,18 @@ export function ConversationPageClient({
 
   useEffect(() => {
     let cancelled = false;
-    getConversation(conversationId).then((c) => {
-      if (!cancelled) setConversation(c);
-    });
+    const load = () =>
+      getConversation(conversationId).then((c) => {
+        if (!cancelled) setConversation(c);
+      });
+    load();
+    // 侧边栏重命名/删除等操作与本页是各自独立的 fetch，靠这个事件总线
+    // 同步——否则在会话页里重命名侧边栏能看到，但反过来（侧边栏重命名）
+    // 本页标题不会更新，除非刷新。
+    const unsubscribe = onConversationsChanged(load);
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [conversationId]);
 
@@ -54,6 +77,44 @@ export function ConversationPageClient({
       setPrefill(stored);
     }
   }, []);
+
+  // 失败重试：从 ?retry=<runId> 回填上次的问题与配置，不自动发送。
+  // 拆成两步：读取在挂载时立刻发生（sessionStorage 一次性消费，且要尽快清掉
+  // URL 上的 query），但应用到 config 必须等 useRunConfig 自己的默认选择
+  // effect（等 models/savedKeys 加载完才 setModelIds）跑完之后，否则默认
+  // 选择会在 retry 填完之后再次覆盖它。
+  const [retrySnapshot, setRetrySnapshot] = useState<RetrySnapshot | null>(
+    null,
+  );
+  useEffect(() => {
+    const retryRunId = searchParams.get("retry");
+    if (!retryRunId) return;
+    const snapshot = consumeRetrySnapshot(retryRunId);
+    router.replace(`/conversations/${conversationId}`);
+    if (snapshot) setRetrySnapshot(snapshot);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const retryAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!retrySnapshot || retryAppliedRef.current || config.models === null) {
+      return;
+    }
+    retryAppliedRef.current = true;
+    config.setMode(retrySnapshot.mode);
+    config.setModelIds(retrySnapshot.modelIds);
+    config.setCostLimitUsd(retrySnapshot.costLimitUsd);
+    config.setOutputSchemaText(retrySnapshot.outputSchemaText);
+    config.setWebSearch(retrySnapshot.webSearch);
+    for (const entry of retrySnapshot.byokEntries) config.addByokEntry(entry);
+    setPrefill(retrySnapshot.question);
+    toast.success(
+      retrySnapshot.droppedByokLabels.length
+        ? `${messages.errors.retryRestored}${messages.errors.retryKeysNeeded(retrySnapshot.droppedByokLabels)}`
+        : messages.errors.retryRestored,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retrySnapshot, config.models]);
 
   const submit = async (question: string) => {
     const parsed = parseOutputSchema(config.outputSchemaText);
@@ -76,11 +137,50 @@ export function ConversationPageClient({
           webSearch: config.webSearch,
         }),
       );
+      saveRetrySnapshot(
+        runId,
+        buildRetrySnapshot({
+          question,
+          mode: config.mode,
+          modelIds: config.modelIds,
+          costLimitUsd: config.costLimitUsd,
+          outputSchemaText: config.outputSchemaText,
+          webSearch: config.webSearch,
+          byokEntries: config.byokEntries,
+        }),
+      );
       router.push(`/conversations/${conversationId}/runs/${runId}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : messages.errors.generic);
       setSubmitting(false);
     }
+  };
+
+  // 会话标题：点击进入编辑，回车/失焦保存，Esc 取消。
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+
+  const startEditTitle = () => {
+    setTitleDraft(conversation?.title ?? "");
+    setEditingTitle(true);
+  };
+
+  const commitTitle = async () => {
+    setEditingTitle(false);
+    const trimmed = titleDraft.trim();
+    if (!trimmed || trimmed === conversation?.title) return;
+    try {
+      const updated = await renameConversation(conversationId, trimmed);
+      setConversation((prev) => (prev ? { ...prev, title: updated.title } : prev));
+      notifyConversationsChanged();
+    } catch {
+      toast.error(messages.shell.renameFailed);
+    }
+  };
+
+  const onTitleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") e.currentTarget.blur();
+    if (e.key === "Escape") setEditingTitle(false);
   };
 
   // 旧→新排列，形成自上而下的决策时间线
@@ -93,10 +193,29 @@ export function ConversationPageClient({
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-12 shrink-0 items-center border-b border-border bg-background/80 px-6 backdrop-blur">
-        <h1 className="truncate text-sm font-medium text-ink">
-          {conversation?.title || messages.shell.untitled}
-        </h1>
+      <header className="flex h-12 shrink-0 items-center gap-1.5 border-b border-border bg-background/80 px-6 backdrop-blur">
+        {editingTitle ? (
+          <Input
+            autoFocus
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={onTitleKeyDown}
+            maxLength={200}
+            className="h-7 max-w-xs text-sm"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={startEditTitle}
+            className="group flex min-w-0 items-center gap-1.5 rounded-sm px-1 py-0.5 text-left transition-colors hover:bg-surface-hover"
+          >
+            <h1 className="truncate text-sm font-medium text-ink">
+              {conversation?.title || messages.shell.untitled}
+            </h1>
+            <Pencil className="h-3 w-3 shrink-0 text-ink-faint opacity-0 transition-opacity group-hover:opacity-100" />
+          </button>
+        )}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -141,14 +260,39 @@ export function ConversationPageClient({
 }
 
 function RunTimelineItem({ run }: { run: RunRow }) {
+  const [images, setImages] = useState<{ dataUrl: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getRunImages(run.id).then((fetched) => {
+      if (!cancelled) setImages(fetched);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [run.id]);
+
   return (
     <article className="flex flex-col gap-2">
       {/* 用户问题（右对齐气泡） */}
-      <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-lg rounded-br-sm bg-accent-muted px-4 py-2.5">
-          <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">
-            {run.question}
-          </p>
+      <div className="flex justify-end gap-1">
+        <IconButton
+          size="sm"
+          label={messages.results.copyQuestion}
+          className="mt-1 shrink-0"
+          onClick={async () => {
+            await navigator.clipboard.writeText(run.question);
+            toast.success(messages.common.copied);
+          }}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </IconButton>
+        <div className="flex max-w-[85%] flex-col items-end gap-1.5">
+          <div className="rounded-lg rounded-br-sm bg-accent-muted px-4 py-2.5">
+            <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">
+              {run.question}
+            </p>
+          </div>
+          <ImageThumbnails images={images} />
         </div>
       </div>
 

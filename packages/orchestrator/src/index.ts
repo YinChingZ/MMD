@@ -111,6 +111,27 @@ function reportModelResponded(
     });
 }
 
+/**
+ * Normalize/compose/outline/section_compose are single-coordinator calls with
+ * no fanOutWithQuorum layer of their own — without this, a timeout/abort on
+ * one of them propagates the raw fetch AbortError straight up with no phase
+ * attribution and no run_failed SSE event (see docs — the "This operation was
+ * aborted" bug report), unlike every quorum-wrapped phase above.
+ */
+function isAbortLikeError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err.name === "AbortError" || /aborted/i.test(err.message))
+  );
+}
+
+function describeCoordinatorFailure(err: unknown, phaseLabel: string): string {
+  if (isAbortLikeError(err)) {
+    return `协调模型响应超时或被中断（阶段：${phaseLabel}）`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export class DeliberationQuorumError extends Error {
   constructor(
     public readonly phase: Phase,
@@ -130,6 +151,8 @@ export class DeliberationQuorumError extends Error {
 
 export interface DeliberationInput {
   question: string;
+  /** M6.7: the immediately-previous run's question+answer in this conversation, if any — threaded into propose/compose (and planning's outline). */
+  priorContext?: string;
   /** M6.5: validated data URLs used only by independent propose calls. */
   images?: InputImage[];
   /** M6.6: unified, opt-in web-search switch for propose and critique. */
@@ -705,6 +728,7 @@ async function runStandardOrQuickDeliberation(
           modelId: config.id,
           images: input.images?.map((image) => image.dataUrl),
           webSearch: input.webSearch,
+          priorContext: input.priorContext,
         }),
         ProposalSchema,
         (usage) => recordUsage(costState, usage),
@@ -818,17 +842,24 @@ async function runStandardOrQuickDeliberation(
   assertWithinCostLimit("normalize");
   emit("phase_started", "normalize");
   t0 = Date.now();
-  const normalize = await structuredCall(
-    input.provider,
-    coordinator,
-    buildNormalizePrompt({
-      question: input.question,
-      claims: finalClaims,
-    }),
-    NormalizeResultSchema,
-    (usage) => recordUsage(costState, usage),
-    itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
-  );
+  let normalize: NormalizeResult;
+  try {
+    normalize = await structuredCall(
+      input.provider,
+      coordinator,
+      buildNormalizePrompt({
+        question: input.question,
+        claims: finalClaims,
+      }),
+      NormalizeResultSchema,
+      (usage) => recordUsage(costState, usage),
+      itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
+    );
+  } catch (err) {
+    const message = describeCoordinatorFailure(err, "归一");
+    emit("run_failed", "normalize", { message });
+    throw new Error(message);
+  }
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
     count: normalize.candidate_claims.length,
@@ -899,24 +930,32 @@ async function runStandardOrQuickDeliberation(
   assertWithinCostLimit("compose");
   emit("phase_started", "compose");
   t0 = Date.now();
-  const final = await structuredCall(
-    input.provider,
-    coordinator,
-    buildComposePrompt({
-      question: input.question,
-      strongConsensus,
-      qualifiedConsensus,
-      disputed,
-      rejected,
-      positionChanges,
-    }),
-    FinalAnswerSchema,
-    (usage) => recordUsage(costState, usage),
-    {
-      onDelta: makeTokenStreamHandler(emit, "compose", "final_answer"),
-      timeoutMs: fanout.timeoutMs,
-    }
-  );
+  let final: FinalAnswer;
+  try {
+    final = await structuredCall(
+      input.provider,
+      coordinator,
+      buildComposePrompt({
+        question: input.question,
+        priorContext: input.priorContext,
+        strongConsensus,
+        qualifiedConsensus,
+        disputed,
+        rejected,
+        positionChanges,
+      }),
+      FinalAnswerSchema,
+      (usage) => recordUsage(costState, usage),
+      {
+        onDelta: makeTokenStreamHandler(emit, "compose", "final_answer"),
+        timeoutMs: fanout.timeoutMs,
+      }
+    );
+  } catch (err) {
+    const message = describeCoordinatorFailure(err, "合成");
+    emit("run_failed", "compose", { message });
+    throw new Error(message);
+  }
   timings.compose = Date.now() - t0;
   emit("phase_completed", "compose");
 
@@ -981,6 +1020,7 @@ async function runStandardOrQuickDeliberation(
 interface RunTopicDeliberationParams {
   runId: string;
   question: string;
+  priorContext?: string;
   images?: InputImage[];
   webSearch?: boolean;
   toolRoundTripAllowanceMs?: number;
@@ -1005,6 +1045,7 @@ async function runTopicDeliberation(
   const {
     runId,
     question,
+    priorContext,
     images,
     webSearch,
     toolRoundTripAllowanceMs,
@@ -1067,6 +1108,7 @@ async function runTopicDeliberation(
           topic,
           images: images?.map((image) => image.dataUrl),
           webSearch,
+          priorContext,
         }),
         ProposalSchema,
         (usage) => recordUsage(costState, usage),
@@ -1171,14 +1213,22 @@ async function runTopicDeliberation(
   assertWithinCostLimit("normalize");
   emit("phase_started", "normalize");
   t0 = Date.now();
-  const normalize = await structuredCall(
-    provider,
-    coordinator,
-    buildNormalizePrompt({ question, claims: finalClaims, topic }),
-    NormalizeResultSchema,
-    (usage) => recordUsage(costState, usage),
-    itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
-  );
+  let normalize: NormalizeResult;
+  try {
+    normalize = await structuredCall(
+      provider,
+      coordinator,
+      buildNormalizePrompt({ question, claims: finalClaims, topic }),
+      NormalizeResultSchema,
+      (usage) => recordUsage(costState, usage),
+      itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
+    );
+  } catch (err) {
+    // 拆题-per-topic 的 normalize 失败会被外层 Promise.allSettled 捕获并
+    // 计入 failedTopics（已带 phase_completed/failed:true 上报），这里只需
+    // 把裸 AbortError 文案改写得更友好，不需要重复 emit run_failed。
+    throw new Error(describeCoordinatorFailure(err, `归一 · ${topic.title}`));
+  }
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
     count: normalize.candidate_claims.length,
@@ -1285,13 +1335,24 @@ async function runPlanningDeliberation(
   assertWithinCostLimit("outline");
   emit("phase_started", undefined, { step: "outline" });
   const outlineStart = Date.now();
-  const outline = await structuredCall(
-    input.provider,
-    coordinator,
-    buildOutlinePrompt({ question: input.question, maxTopics: budget.maxTopics }),
-    OutlineResultSchema,
-    (usage) => recordUsage(costState, usage)
-  );
+  let outline: OutlineResult;
+  try {
+    outline = await structuredCall(
+      input.provider,
+      coordinator,
+      buildOutlinePrompt({
+        question: input.question,
+        maxTopics: budget.maxTopics,
+        priorContext: input.priorContext,
+      }),
+      OutlineResultSchema,
+      (usage) => recordUsage(costState, usage)
+    );
+  } catch (err) {
+    const message = describeCoordinatorFailure(err, "拆题");
+    emit("run_failed", undefined, { step: "outline", message });
+    throw new Error(message);
+  }
   emit("phase_completed", undefined, {
     step: "outline",
     count: outline.topics.length,
@@ -1312,6 +1373,7 @@ async function runPlanningDeliberation(
       runTopicDeliberation({
         runId,
         question: input.question,
+        priorContext: input.priorContext,
         images: input.images,
         webSearch: input.webSearch,
         toolRoundTripAllowanceMs: budget.toolRoundTripAllowanceMs,
@@ -1376,27 +1438,41 @@ async function runPlanningDeliberation(
         topicResult.revisions
       );
       const sectionStart = Date.now();
-      const section = await structuredCall(
-        input.provider,
-        coordinator,
-        buildSectionComposePrompt({
-          question: input.question,
-          topic: topicResult.topic,
-          strongConsensus: buckets.strongConsensus,
-          qualifiedConsensus: buckets.qualifiedConsensus,
-          disputed: buckets.disputed,
-          rejected: buckets.rejected,
-          positionChanges,
-        }),
-        SectionAnswerSchema,
-        (usage) => recordUsage(costState, usage),
-        {
-          onDelta: makeTokenStreamHandler(emit, "compose", "section_answer", {
-            topicId: topicResult.topic.topic_id,
+      let section: SectionAnswer;
+      try {
+        section = await structuredCall(
+          input.provider,
+          coordinator,
+          buildSectionComposePrompt({
+            question: input.question,
+            topic: topicResult.topic,
+            strongConsensus: buckets.strongConsensus,
+            qualifiedConsensus: buckets.qualifiedConsensus,
+            disputed: buckets.disputed,
+            rejected: buckets.rejected,
+            positionChanges,
           }),
-          timeoutMs: fanout.timeoutMs,
-        }
-      );
+          SectionAnswerSchema,
+          (usage) => recordUsage(costState, usage),
+          {
+            onDelta: makeTokenStreamHandler(emit, "compose", "section_answer", {
+              topicId: topicResult.topic.topic_id,
+            }),
+            timeoutMs: fanout.timeoutMs,
+          }
+        );
+      } catch (err) {
+        const message = describeCoordinatorFailure(
+          err,
+          `合成 · ${topicResult.topic.title}`
+        );
+        emit("run_failed", undefined, {
+          step: "section_compose",
+          topicId: topicResult.topic.topic_id,
+          message,
+        });
+        throw new Error(message);
+      }
       topicResult.timings.compose = Date.now() - sectionStart;
       return stampSectionAnswer(topicResult.topic, section);
     })

@@ -140,6 +140,7 @@ export function TopicProgress({
               <ActivityStream
                 itemProgress={topic.itemProgress}
                 phases={topic.phases}
+                phaseOrder={TOPIC_PHASES}
               />
             </div>
             {topic.phases.compose === "in_progress" && (

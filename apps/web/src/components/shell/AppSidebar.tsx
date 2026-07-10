@@ -9,6 +9,7 @@ import {
   createConversation,
   deleteConversation,
   listConversations,
+  renameConversation,
   type ConversationSummary,
 } from "../../lib/api";
 import { dateGroupKey, type DateGroupKey } from "../../lib/format";
@@ -67,6 +68,19 @@ export function AppSidebar() {
       }
     } catch {
       toast.error(messages.shell.deleteFailed);
+    }
+  };
+
+  const handleRename = async (id: string, title: string) => {
+    try {
+      const updated = await renameConversation(id, title);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? updated : c)),
+      );
+      notifyConversationsChanged();
+      toast.success(messages.shell.renameSuccess);
+    } catch {
+      toast.error(messages.shell.renameFailed);
     }
   };
 
@@ -142,6 +156,7 @@ export function AppSidebar() {
                   conversation={c}
                   active={pathname?.startsWith(`/conversations/${c.id}`) ?? false}
                   onDelete={() => handleDelete(c.id)}
+                  onRename={(title) => handleRename(c.id, title)}
                 />
               ))}
             </ul>

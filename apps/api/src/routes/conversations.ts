@@ -7,11 +7,19 @@ import {
   deleteConversation,
   getConversation,
   listConversations,
+  updateConversationTitle,
 } from "../repositories/conversations-repo.js";
 import { listRunsForConversation } from "../repositories/runs-repo.js";
 
 const CreateConversationBody = z.object({
   title: z.string().min(1).optional(),
+});
+
+const UpdateConversationBody = z.object({
+  title: z
+    .string()
+    .transform((s) => s.trim())
+    .pipe(z.string().min(1).max(200)),
 });
 
 export async function conversationsRoutes(
@@ -52,6 +60,26 @@ export async function conversationsRoutes(
       }
       const runs = await listRunsForConversation(deps.db, request.params.id);
       return reply.send({ ...conversation, runs });
+    }
+  );
+
+  fastify.patch<{ Params: { id: string } }>(
+    "/api/conversations/:id",
+    async (request, reply) => {
+      const conversation = await getConversation(deps.db, request.params.id);
+      if (!conversation || conversation.workspaceId !== request.workspaceId) {
+        return reply.code(404).send({ error: "conversation not found" });
+      }
+      const parsed = UpdateConversationBody.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.message });
+      }
+      const updated = await updateConversationTitle(
+        deps.db,
+        request.params.id,
+        parsed.data.title
+      );
+      return reply.send(updated);
     }
   );
 

@@ -32,15 +32,20 @@ export const PHASE_ICONS: Record<string, LucideIcon> = {
 /**
  * 右栏协议时间轴：六阶段（或快速模式三阶段）垂直流程，
  * 四态（待执行/进行中/完成/失败）+ 进行中阶段的模型响应进度。
+ * 非 pending 的节点可点击，联动中央 ActivityStream 切换查看该阶段的产物。
  */
 export function ProtocolTimeline({
   phases,
   statusFor,
   modelProgressFor,
+  selectedPhase,
+  onSelectPhase,
 }: {
   phases: Phase[];
   statusFor: (phase: Phase) => PhaseStatus;
   modelProgressFor?: (phase: Phase) => PhaseModelProgress | undefined;
+  selectedPhase?: Phase;
+  onSelectPhase?: (phase: Phase) => void;
 }) {
   return (
     <ol className="flex flex-col">
@@ -49,6 +54,7 @@ export function ProtocolTimeline({
         const progress = modelProgressFor?.(phase);
         const Icon = PHASE_ICONS[phase] ?? FileText;
         const isLast = i === phases.length - 1;
+        const clickable = Boolean(onSelectPhase) && status !== "pending";
         return (
           <li key={phase} className="relative flex gap-3 pb-1">
             {/* 连接线 */}
@@ -62,9 +68,17 @@ export function ProtocolTimeline({
               />
             )}
             {/* 阶段图标节点 */}
-            <span
+            <button
+              type="button"
+              disabled={!clickable}
+              onClick={() => onSelectPhase?.(phase)}
+              aria-label={messages.run.phases[phase] ?? phase}
               className={cn(
-                "z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border",
+                "z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-shadow",
+                clickable && "cursor-pointer hover:opacity-80",
+                !clickable && "cursor-default",
+                phase === selectedPhase &&
+                  "ring-2 ring-accent ring-offset-2 ring-offset-surface",
                 status === "pending" && "border-border bg-surface text-ink-faint",
                 status === "in_progress" &&
                   "border-accent/50 bg-accent-muted text-accent",
@@ -80,7 +94,7 @@ export function ProtocolTimeline({
               ) : (
                 <Icon className={cn("h-4 w-4", status === "in_progress" && "mmd-pulse")} />
               )}
-            </span>
+            </button>
 
             <div className="min-w-0 flex-1 pb-3 pt-1">
               <div className="flex items-center gap-2">

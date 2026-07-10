@@ -1,5 +1,11 @@
+"use client";
+
+import { ClipboardList } from "lucide-react";
+import { toast } from "sonner";
 import type { RunResult } from "@/lib/api";
 import { messages } from "@/lib/messages";
+import { buildTranscript } from "@/lib/transcript";
+import { Button } from "./ui/button";
 import { ConsensusSection } from "./results/ConsensusSection";
 import { DeliberationRecord } from "./results/DeliberationRecord";
 import { FinalAnswerCard } from "./results/FinalAnswerCard";
@@ -17,8 +23,20 @@ import { PlanDocumentView } from "./PlanDocumentView";
  * 审议过程（默认收起）、结构化输出。
  */
 export function RunResultView({ result }: { result: RunResult }) {
+  const copyTranscript = async () => {
+    await navigator.clipboard.writeText(buildTranscript(result));
+    toast.success(messages.results.transcriptCopied);
+  };
+
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <Button size="sm" variant="secondary" onClick={copyTranscript}>
+          <ClipboardList className="h-3.5 w-3.5" />
+          {messages.results.copyTranscript}
+        </Button>
+      </div>
+
       {result.planDocument ? (
         <PlanDocumentView
           planDocument={result.planDocument}

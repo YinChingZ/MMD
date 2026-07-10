@@ -34,6 +34,20 @@ export async function getConversation(
   return row ? toSummary(row) : undefined;
 }
 
+export async function updateConversationTitle(
+  db: Kysely<Database>,
+  id: string,
+  title: string
+): Promise<ConversationSummary> {
+  const row = await db
+    .updateTable("conversations")
+    .set({ title, updated_at: new Date() })
+    .where("id", "=", id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
+  return toSummary(row);
+}
+
 /**
  * Relies on the M5.3 `ON DELETE CASCADE` migration (0006) to remove every
  * dependent row (runs, and each run's claims/reviews/candidates/votes/

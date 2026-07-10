@@ -7,6 +7,7 @@ import { createConversation, createRun } from "../../lib/api";
 import { messages } from "../../lib/messages";
 import { buildCreateRunPayload } from "../../lib/model-sources";
 import { parseOutputSchema } from "../../lib/output-schema";
+import { buildRetrySnapshot, saveRetrySnapshot } from "../../lib/retry-snapshot";
 import { notifyConversationsChanged } from "../../lib/workspace-events";
 import { AdvancedRunSettings } from "../composer/AdvancedRunSettings";
 import { DecisionComposer } from "../composer/DecisionComposer";
@@ -44,6 +45,18 @@ export function HomeHero() {
           outputFormat: parsed.outputFormat,
           images: config.images.map(({ dataUrl }) => ({ dataUrl })),
           webSearch: config.webSearch,
+        }),
+      );
+      saveRetrySnapshot(
+        runId,
+        buildRetrySnapshot({
+          question,
+          mode: config.mode,
+          modelIds: config.modelIds,
+          costLimitUsd: config.costLimitUsd,
+          outputSchemaText: config.outputSchemaText,
+          webSearch: config.webSearch,
+          byokEntries: config.byokEntries,
         }),
       );
       router.push(`/conversations/${conversation.id}/runs/${runId}`);

@@ -20,6 +20,8 @@ interface PanelContextValue {
   /** ContextPanel 挂载/卸载时增减，决定右栏是否显示 */
   addContent: () => () => void;
   setTitle: (title: string | null) => void;
+  /** 单向展开右栏（不切换）——供"高级配置"等入口从别处唤起面板。 */
+  expand: () => void;
 }
 
 const PanelContext = createContext<PanelContextValue | null>(null);
@@ -52,6 +54,11 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     });
   };
 
+  const expand = useCallback(() => {
+    localStorage.setItem(COLLAPSE_KEY, "0");
+    setCollapsed(false);
+  }, []);
+
   const addContent = useCallback(() => {
     setContentCount((n) => n + 1);
     return () => setContentCount((n) => n - 1);
@@ -60,7 +67,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const hasPanel = contentCount > 0;
 
   return (
-    <PanelContext.Provider value={{ container, addContent, setTitle }}>
+    <PanelContext.Provider value={{ container, addContent, setTitle, expand }}>
       <div className="flex h-screen overflow-hidden bg-background">
         <AppSidebar />
         <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>

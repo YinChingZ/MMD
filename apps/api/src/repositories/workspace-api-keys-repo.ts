@@ -79,6 +79,18 @@ export async function listApiKeysForWorkspace(
   return rows.map(toMetadata);
 }
 
+/** Scoped to workspaceId so one workspace can never delete another's saved key by guessing an id. Idempotent — deleting an already-gone/foreign id is a silent no-op, matching this file's other mutation semantics. */
+export async function deleteApiKey(
+  db: Kysely<Database>,
+  params: { workspaceId: string; id: string }
+): Promise<void> {
+  await db
+    .deleteFrom("workspace_api_keys")
+    .where("id", "=", params.id)
+    .where("workspace_id", "=", params.workspaceId)
+    .execute();
+}
+
 /** Scoped to workspaceId so one workspace can never decrypt another's saved key by guessing an id. */
 export async function getDecryptedApiKey(
   db: Kysely<Database>,

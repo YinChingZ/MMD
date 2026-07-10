@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { MoreHorizontal, Trash2 } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import type { ConversationSummary } from "../../lib/api";
 import { cn } from "../../lib/cn";
 import { messages } from "../../lib/messages";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogContent } from "../ui/dialog";
+import { Input } from "../ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,12 +20,24 @@ export function SidebarItem({
   conversation,
   active,
   onDelete,
+  onRename,
 }: {
   conversation: ConversationSummary;
   active: boolean;
   onDelete: () => void;
+  onRename: (title: string) => void;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(conversation.title ?? "");
+
+  const submitRename = (e: FormEvent) => {
+    e.preventDefault();
+    const trimmed = titleDraft.trim();
+    if (!trimmed) return;
+    setRenameOpen(false);
+    onRename(trimmed);
+  };
 
   return (
     <li className="group relative">
@@ -56,12 +69,46 @@ export function SidebarItem({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
+          <DropdownMenuItem
+            onSelect={() => {
+              setTitleDraft(conversation.title ?? "");
+              setRenameOpen(true);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            {messages.common.rename}
+          </DropdownMenuItem>
           <DropdownMenuItem tone="danger" onSelect={() => setConfirmOpen(true)}>
             <Trash2 className="h-3.5 w-3.5" />
             {messages.common.delete}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent title={messages.shell.renameConversationTitle}>
+          <form onSubmit={submitRename}>
+            <Input
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              placeholder={messages.shell.renamePlaceholder}
+              maxLength={200}
+              className="mt-3"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <DialogClose asChild>
+                <Button type="button" variant="secondary" size="sm">
+                  {messages.common.cancel}
+                </Button>
+              </DialogClose>
+              <Button type="submit" size="sm" disabled={!titleDraft.trim()}>
+                {messages.common.save}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent

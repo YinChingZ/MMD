@@ -6,13 +6,14 @@ export async function modelsRoutes(
   deps: AppDeps
 ): Promise<void> {
   fastify.get("/api/models", async (_request, reply) => {
-    const { availableModelIds, modelIdToProviderLabel, coordinatorModelId } =
+    const { availableModelIds, modelIdToProviderLabel, coordinatorModelId, isMock } =
       deps.resolvedProvider;
     return reply.send({
       models: availableModelIds.map((id) => ({
         id,
         providerLabel: modelIdToProviderLabel(id),
         isCoordinator: id === coordinatorModelId,
+        isMock,
       })),
     });
   });

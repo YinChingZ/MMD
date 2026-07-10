@@ -12,12 +12,22 @@ export interface BuildProposePromptParams {
   webSearch?: boolean;
   /** v0.2 planning mode: scope this proposal to a single outline topic. Omit for standard/quick mode. */
   topic?: Topic;
+  /** M6.7: the immediately-previous run's question+answer in this conversation, if any. */
+  priorContext?: string;
 }
 
 export function buildProposePrompt(
   params: BuildProposePromptParams
 ): CompletionRequest {
-  const { question, modelId, maxClaims = 6, images = [], webSearch = false, topic } = params;
+  const {
+    question,
+    modelId,
+    maxClaims = 6,
+    images = [],
+    webSearch = false,
+    topic,
+    priorContext,
+  } = params;
 
   const systemPrompt = [
     "You are one of several independent models answering a user's question before a multi-model deliberation.",
@@ -38,9 +48,14 @@ export function buildProposePrompt(
     describeSchema(ProposalSchema, "Proposal"),
   ].join("\n\n");
 
-  const questionText = topic
-    ? `Question: ${question}\n\nTopic: ${topic.title} — ${topic.description}`
-    : `Question: ${question}`;
+  const questionText = [
+    priorContext,
+    topic
+      ? `Question: ${question}\n\nTopic: ${topic.title} — ${topic.description}`
+      : `Question: ${question}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   const userPrompt: string | ContentPart[] = images.length
     ? [
         { type: "text", text: questionText },
