@@ -20,6 +20,7 @@ export function phaseListForMode(mode: RunMode): Phase[] {
 export interface PhaseModelProgress {
   responded: { modelId: string; ok: boolean; latencyMs: number }[];
   total: number;
+  retrying?: string[];
 }
 
 export interface ItemProgressEntry {
@@ -64,6 +65,7 @@ function recordModelResponded(
     ...entry.responded,
     { modelId: data.modelId, ok: data.ok, latencyMs: data.latencyMs },
   ];
+  entry.retrying = entry.retrying?.filter((modelId) => modelId !== data.modelId);
   entry.total = data.total;
   modelProgress[phase] = entry;
 }
@@ -74,6 +76,24 @@ interface ItemProgressData {
   index: number;
   item: unknown;
   attempt: number;
+}
+
+interface ModelAttemptData {
+  modelId: string;
+  attempt: number;
+  transport: string;
+}
+
+function recordModelAttempt(
+  modelProgress: Partial<Record<Phase, PhaseModelProgress>>,
+  itemProgress: Partial<Record<Phase, PhaseItemProgress>>,
+  phase: Phase,
+  data: ModelAttemptData,
+): void {
+  const entry = modelProgress[phase] ?? { responded: [], total: 0 };
+  entry.retrying = [...new Set([...(entry.retrying ?? []), data.modelId])];
+  modelProgress[phase] = entry;
+  if (itemProgress[phase]) delete itemProgress[phase]![data.modelId];
 }
 
 /**
@@ -131,6 +151,8 @@ export function deriveRunProgress(
       else if (event.type === "run_failed") phases[phase] = "failed";
       else if (event.type === "model_responded") {
         recordModelResponded(modelProgress, phase, event.data as ModelRespondedData);
+      } else if (event.type === "model_attempt") {
+        recordModelAttempt(modelProgress, itemProgress, phase, event.data as ModelAttemptData);
       } else if (event.type === "item_progress") {
         recordItemProgress(itemProgress, phase, event.data as ItemProgressData);
       }
@@ -185,6 +207,13 @@ export function deriveRunProgress(
       topic.failed = true;
     } else if (event.type === "model_responded") {
       recordModelResponded(topic.modelProgress, phase, event.data as ModelRespondedData);
+    } else if (event.type === "model_attempt") {
+      recordModelAttempt(
+        topic.modelProgress,
+        topic.itemProgress,
+        phase,
+        event.data as ModelAttemptData,
+      );
     } else if (event.type === "item_progress") {
       recordItemProgress(topic.itemProgress, phase, event.data as ItemProgressData);
     }

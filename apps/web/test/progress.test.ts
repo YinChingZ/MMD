@@ -123,6 +123,28 @@ describe("deriveRunProgress — standard/quick mode", () => {
     expect(progress.itemProgress.propose?.model_a?.items).toEqual([{ claim_id: "fresh" }]);
   });
 
+  it("clears stale streamed items while a model retries in non-stream mode", () => {
+    const events = [
+      event({ seq: 1, type: "phase_started", phase: "propose" }),
+      event({
+        seq: 2,
+        type: "item_progress",
+        phase: "propose",
+        data: { modelId: "model_a", arrayField: "claims", index: 0, item: { claim_id: "stale" }, attempt: 0 },
+      }),
+      event({
+        seq: 3,
+        type: "model_attempt",
+        phase: "propose",
+        data: { modelId: "model_a", attempt: 1, transport: "non_stream" },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "quick");
+    if (progress.kind !== "flat") throw new Error("expected flat");
+    expect(progress.itemProgress.propose?.model_a).toBeUndefined();
+    expect(progress.modelProgress.propose?.retrying).toEqual(["model_a"]);
+  });
+
   it("tracks item_progress independently per model within a phase", () => {
     const events = [
       event({ seq: 1, type: "phase_started", phase: "propose" }),

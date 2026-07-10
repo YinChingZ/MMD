@@ -16,6 +16,26 @@ export interface ByokEntryUI {
   payload: ByokModelInput;
 }
 
+export function byokEntryIdentity(entry: ByokEntryUI): string {
+  return "savedKeyId" in entry.payload
+    ? `saved:${entry.payload.savedKeyId}`
+    : `client:${entry.clientId}`;
+}
+
+/** Last occurrence wins so an explicitly restored snapshot overrides defaults. */
+export function dedupeByokEntries(entries: ByokEntryUI[]): ByokEntryUI[] {
+  const seen = new Set<string>();
+  const result: ByokEntryUI[] = [];
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index]!;
+    const identity = byokEntryIdentity(entry);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    result.unshift(entry);
+  }
+  return result;
+}
+
 export interface MergedModelRow {
   key: string;
   kind: "legacy" | "byok";
@@ -59,7 +79,7 @@ export function buildCreateRunPayload(params: {
     mode: params.mode,
     modelIds: params.modelIds.length ? params.modelIds : undefined,
     byokModels: params.byokEntries.length
-      ? params.byokEntries.map((e) => e.payload)
+      ? dedupeByokEntries(params.byokEntries).map((e) => e.payload)
       : undefined,
     costLimitUsd: params.costLimitUsd,
     outputFormat: params.outputFormat,

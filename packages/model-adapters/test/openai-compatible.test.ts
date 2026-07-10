@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OpenAICompatibleProvider } from "../src/providers/openai-compatible.js";
+import {
+  OpenAICompatibleProvider,
+  ProviderStreamError,
+} from "../src/providers/openai-compatible.js";
 
 function fakeResponse(body: unknown, ok = true, status = 200) {
   return {
@@ -280,6 +283,71 @@ describe("OpenAICompatibleProvider", () => {
     expect(result.usage?.promptTokens).toBe(5);
   });
 
+  it("completeStream: handles CRLF, comments, and resolves at [DONE] without waiting for EOF", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const encoder = new TextEncoder();
+    let readCount = 0;
+    let cancelled = false;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "x-generation-id": "gen-123" }),
+      body: {
+        getReader() {
+          return {
+            async read() {
+              readCount++;
+              if (readCount === 1) {
+                return {
+                  done: false,
+                  value: encoder.encode(
+                    ': OPENROUTER PROCESSING\r\n\r\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\r\n\r\ndata: [DONE]\r\n\r\n',
+                  ),
+                };
+              }
+              return new Promise(() => {});
+            },
+            async cancel() { cancelled = true; },
+          };
+        },
+      },
+    } as unknown as Response);
+    const provider = new OpenAICompatibleProvider({ baseUrl: "https://example.com/v1", apiKey: "k" });
+    const result = await provider.completeStream!(
+      { id: "some-model", provider: "openrouter" },
+      request,
+      () => {},
+    );
+    expect(result.text).toBe("ok");
+    expect(result.diagnostics?.providerRequestId).toBe("gen-123");
+    expect(cancelled).toBe(true);
+  });
+
+  it("completeStream: surfaces OpenRouter mid-stream errors with partial text", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(fakeSseResponse([
+      sseFrame({ choices: [{ delta: { content: '{"claims":[' } }] }),
+      sseFrame({
+        error: { code: 429, message: "busy", metadata: { error_type: "provider_overloaded" } },
+        choices: [{ delta: { content: "" }, finish_reason: "error" }],
+      }),
+    ]));
+    const provider = new OpenAICompatibleProvider({ baseUrl: "https://example.com/v1", apiKey: "k" });
+    try {
+      await provider.completeStream!(
+        { id: "some-model", provider: "openrouter" },
+        request,
+        () => {},
+      );
+      throw new Error("expected stream failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProviderStreamError);
+      expect((error as ProviderStreamError).errorType).toBe("provider_overloaded");
+      expect((error as ProviderStreamError).partialText).toBe('{"claims":[');
+      expect((error as ProviderStreamError).retryable).toBe(true);
+    }
+  });
+
   it("completeStream: sets stream:true and stream_options.include_usage in the request body", async () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue(
@@ -338,7 +406,7 @@ describe("OpenAICompatibleProvider", () => {
     }
   });
 
-  it("completeStream: aborts the underlying request when timeoutMs elapses", async () => {
+  it("completeStream: aborts the underlying request when the caller signal fires", async () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation((_url: string, init: RequestInit) => {
       return new Promise((_resolve, reject) => {
@@ -352,12 +420,14 @@ describe("OpenAICompatibleProvider", () => {
       apiKey: "k",
     });
 
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5);
     await expect(
       provider.completeStream!(
         { id: "some-model", provider: "openai-compatible" },
         request,
         () => {},
-        { timeoutMs: 5 }
+        { signal: controller.signal }
       )
     ).rejects.toThrow();
     const [, init] = fetchMock.mock.calls[0];

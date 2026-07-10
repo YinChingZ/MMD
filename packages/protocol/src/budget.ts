@@ -18,6 +18,8 @@ export interface RunBudget {
   critiqueRounds: number;
   targetP50Ms: number;
   targetP95Ms: number;
+  /** Hard deadline for one provider attempt. Kept separate from UX latency estimates. */
+  providerTimeoutMs: number;
   phases: Phase[];
   /** Extra per-call timeout used only by M6.6 web-search-enabled propose/critique. */
   toolRoundTripAllowanceMs?: number;
@@ -28,17 +30,14 @@ export interface RunBudget {
 // 回填自 docs/protocol.md「真实耗时基线」一节：同厂商组合单次 run 耗时
 // 96-250s，跨厂商组合（OpenRouter 统一接入）164-301s，样本量小、不是严格
 // 意义上的百分位统计，取整个观测区间的中段/上界作为 p50/p95。
-// 注意 targetP95Ms 同时是 fanOutWithQuorum 单次模型调用的默认超时
-// （见 packages/orchestrator/src/index.ts 的 timeoutMs），比整个 run 的
-// p95 宽松是刻意的——单个 phase 里一次模型调用的耗时远小于全部六阶段的
-// 总耗时，用整 run 的 p95 当单次调用超时只会让真正卡死的调用更晚被发现，
-// 但目前没有单独的分阶段耗时数据来校准更紧的超时值，先用这个偏宽松但不
-// 会误杀真实调用的值。
+// providerTimeoutMs 与展示用的 p50/p95 明确分离：展示估计可以表达“快速”，
+// 但不能因此误杀仍在正常生成的 reasoning stream。
 export const STANDARD_BUDGET: RunBudget = {
   modelCount: 3,
   critiqueRounds: 1,
   targetP50Ms: 150_000,
   targetP95Ms: 300_000,
+  providerTimeoutMs: 300_000,
   phases: [...PHASES],
   toolRoundTripAllowanceMs: 15_000,
 };
@@ -54,6 +53,7 @@ export const QUICK_MODE_BUDGET: RunBudget = {
   critiqueRounds: 0,
   targetP50Ms: 20_000,
   targetP95Ms: 40_000,
+  providerTimeoutMs: 120_000,
   phases: ["propose", "normalize", "compose"],
   toolRoundTripAllowanceMs: 15_000,
 };
@@ -67,6 +67,7 @@ export const PLANNING_BUDGET: RunBudget = {
   critiqueRounds: 1,
   targetP50Ms: 150_000,
   targetP95Ms: 300_000,
+  providerTimeoutMs: 300_000,
   phases: [...PHASES],
   toolRoundTripAllowanceMs: 15_000,
   maxTopics: 8,

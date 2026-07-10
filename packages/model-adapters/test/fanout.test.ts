@@ -10,6 +10,21 @@ const configs: ModelConfig[] = [
 ];
 
 describe("fanOutWithQuorum (M0 risk #4: single-model failure must not fail the whole run)", () => {
+  it("does not retry an error explicitly marked non-retryable", async () => {
+    let calls = 0;
+    const error = Object.assign(new Error("authentication failed"), { retryable: false });
+    const outcome = await fanOutWithQuorum(
+      [configs[0]],
+      async () => {
+        calls++;
+        throw error;
+      },
+      { timeoutMs: 100, retries: 1, backoffMs: 1 },
+    );
+    expect(calls).toBe(1);
+    expect(outcome.succeeded).toHaveLength(0);
+  });
+
   it("all succeed -> quorum met, not partial", async () => {
     const outcome = await fanOutWithQuorum(
       configs,

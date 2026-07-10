@@ -3,6 +3,7 @@ import type {
   CompletionResult,
   ModelConfig,
   ModelProvider,
+  ProviderCallOptions,
 } from "../provider.js";
 
 export interface RoutingProviderRoute {
@@ -26,7 +27,8 @@ export class RoutingProvider implements ModelProvider {
 
   async complete(
     config: ModelConfig,
-    request: CompletionRequest
+    request: CompletionRequest,
+    opts?: ProviderCallOptions
   ): Promise<CompletionResult> {
     const route = this.routes.get(config.id);
     if (!route) {
@@ -34,7 +36,8 @@ export class RoutingProvider implements ModelProvider {
     }
     return route.provider.complete(
       { id: route.apiModelId, provider: config.provider },
-      request
+      request,
+      opts
     );
   }
 
@@ -51,7 +54,7 @@ export class RoutingProvider implements ModelProvider {
     config: ModelConfig,
     request: CompletionRequest,
     onDelta: (delta: string) => void,
-    opts?: { timeoutMs?: number }
+    opts?: ProviderCallOptions
   ): Promise<CompletionResult> {
     const route = this.routes.get(config.id);
     if (!route) {
@@ -61,6 +64,6 @@ export class RoutingProvider implements ModelProvider {
     if (route.provider.completeStream) {
       return route.provider.completeStream(apiConfig, request, onDelta, opts);
     }
-    return route.provider.complete(apiConfig, request);
+    return route.provider.complete(apiConfig, request, opts);
   }
 }

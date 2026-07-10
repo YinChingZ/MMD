@@ -6,22 +6,28 @@
  * 组件内不允许硬编码色值 —— 未来暗色主题只需追加一套 .dark 变量。
  */
 :root {
-  /* 基底：中性暖白 + 石墨 */
-  --background: oklch(0.977 0.005 85); /* ≈ #faf8f4 暖米白 */
-  --surface: oklch(1 0 0); /* 卡片白 */
-  --surface-muted: oklch(0.955 0.007 85); /* 内嵌面板 / 代码底 */
-  --surface-hover: oklch(0.945 0.008 85);
-  --border: oklch(0.905 0.008 85); /* 低对比边框 */
-  --border-strong: oklch(0.84 0.01 85);
-  --ink: oklch(0.26 0.012 60); /* 石墨正文 */
-  --ink-muted: oklch(0.5 0.015 70); /* 辅助信息 */
-  --ink-faint: oklch(0.64 0.012 75); /* 占位 / 最弱层级 */
+  /* 冷静的决策控制台：冷灰工作区 + 石板蓝操作色。 */
+  --background: #f4f6f8;
+  --surface: #ffffff;
+  --surface-muted: #eef1f4;
+  --surface-hover: #e8ecf0;
+  --border: #dce2e8;
+  --border-strong: #c4cdd7;
+  --ink: #202938;
+  --ink-muted: #5d6878;
+  --ink-faint: #8792a1;
 
-  /* 品牌强调色：陶土暖色（单一令牌，可整体换色） */
-  --accent: oklch(0.62 0.13 40); /* ≈ #c9634a */
-  --accent-hover: oklch(0.57 0.13 40);
-  --accent-foreground: oklch(0.99 0 0);
-  --accent-muted: oklch(0.945 0.028 45); /* accent 淡底 */
+  --accent: #52627a;
+  --accent-hover: #445268;
+  --accent-foreground: #ffffff;
+  --accent-muted: #e8ecf1;
+  --live: #3e777a;
+  --live-muted: #e4eeee;
+  --sidebar: #18202c;
+  --sidebar-hover: #232e3e;
+  --sidebar-ink: #f3f6fa;
+  --sidebar-muted: #9eabbc;
+  --sidebar-border: #303b4b;
 
   --ring: var(--accent);
   --danger: oklch(0.55 0.19 25);
@@ -38,11 +44,11 @@
   --consensus-rejected-bg: oklch(0.95 0.03 25);
 
   /* 圆角 / 阴影 */
-  --radius-sm: 0.5rem; /* 8px 小控件 */
-  --radius-md: 0.75rem; /* 12px 常规 */
-  --radius-lg: 1rem; /* 16px 卡片 / 输入器 */
-  --shadow-card: 0 1px 2px oklch(0.2 0.02 60 / 0.05), 0 1px 4px oklch(0.2 0.02 60 / 0.04);
-  --shadow-raised: 0 2px 8px oklch(0.2 0.02 60 / 0.07), 0 8px 24px oklch(0.2 0.02 60 / 0.06);
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.5rem;
+  --shadow-card: 0 1px 2px rgb(24 32 44 / 0.05);
+  --shadow-raised: 0 6px 20px rgb(24 32 44 / 0.08);
   --shadow-overlay: 0 4px 16px oklch(0.2 0.02 60 / 0.12), 0 12px 40px oklch(0.2 0.02 60 / 0.12);
 }
 
@@ -60,6 +66,13 @@
   --color-accent-hover: var(--accent-hover);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent-muted: var(--accent-muted);
+  --color-live: var(--live);
+  --color-live-muted: var(--live-muted);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-ink: var(--sidebar-ink);
+  --color-sidebar-muted: var(--sidebar-muted);
+  --color-sidebar-border: var(--sidebar-border);
   --color-ring: var(--ring);
   --color-danger: var(--danger);
   --color-danger-muted: var(--danger-muted);
@@ -110,7 +123,7 @@ body {
   width: 0.5em;
   height: 1.1em;
   vertical-align: text-bottom;
-  background: var(--accent);
+  background: var(--live);
   border-radius: 2px;
 }
 

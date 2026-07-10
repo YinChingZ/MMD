@@ -22,6 +22,7 @@ export interface RunEventMessage {
 export const SSE_EVENT_TYPES = [
   "run_started",
   "phase_started",
+  "model_attempt",
   "model_responded",
   "item_progress",
   "phase_completed",

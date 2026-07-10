@@ -18,7 +18,7 @@ import {
   type SelectedImage,
 } from "../../lib/image-input";
 import { messages } from "../../lib/messages";
-import type { ByokEntryUI } from "../../lib/model-sources";
+import { dedupeByokEntries, type ByokEntryUI } from "../../lib/model-sources";
 
 // Mirrors apps/api/src/routes/runs.ts's DEFAULT_COST_LIMIT_USD — kept as an
 // independent constant since the two apps don't share a config package for
@@ -38,6 +38,7 @@ export interface RunConfig {
   toggleModel: (id: string) => void;
   byokEntries: ByokEntryUI[];
   addByokEntry: (entry: ByokEntryUI) => void;
+  replaceByokEntries: (entries: ByokEntryUI[]) => void;
   removeByokEntry: (clientId: string) => void;
   providers: ProviderInfo[] | null;
   savedKeys: SavedApiKeyMetadata[] | null;
@@ -98,7 +99,7 @@ export function useRunConfig(): RunConfig {
           for (const mark of marks) {
             if (mark.kind !== "byokSavedKey") continue;
             if (!fetchedKeys.some((k) => k.id === mark.savedKeyId)) continue;
-            setByokEntries((prev) => [
+            setByokEntries((prev) => dedupeByokEntries([
               ...prev,
               {
                 clientId: crypto.randomUUID(),
@@ -106,7 +107,7 @@ export function useRunConfig(): RunConfig {
                 providerLabel: mark.providerLabel,
                 payload: { savedKeyId: mark.savedKeyId },
               },
-            ]);
+            ]));
           }
         } else if (fetchedKeys.length > 0) {
           // 有已存密钥：默认选内置列表前三个，而非全部。
@@ -152,7 +153,9 @@ export function useRunConfig(): RunConfig {
     setModelIds,
     toggleModel,
     byokEntries,
-    addByokEntry: (entry) => setByokEntries((prev) => [...prev, entry]),
+    addByokEntry: (entry) =>
+      setByokEntries((prev) => dedupeByokEntries([...prev, entry])),
+    replaceByokEntries: (entries) => setByokEntries(dedupeByokEntries(entries)),
     removeByokEntry: (clientId) =>
       setByokEntries((prev) => prev.filter((e) => e.clientId !== clientId)),
     providers,

@@ -55,6 +55,12 @@ export const messages = {
   home: {
     heading: "让多个模型独立判断、相互质疑，形成可追溯的结论",
     subheading: "MMD 将你的问题交给多个大模型，经过提议、质疑、修订与投票，产出标注共识强度的答案。",
+    eyebrow: "DECISION WORKBENCH",
+    protocol: [
+      { step: "01", title: "独立提议", hint: "隔离首轮观点，避免相互锚定" },
+      { step: "02", title: "交叉审阅", hint: "质疑证据、假设与风险" },
+      { step: "03", title: "共识输出", hint: "保留分歧并形成可追溯结论" },
+    ],
     examplesLabel: "试试这些问题",
     examples: [
       "我们的后端应该从 REST 迁移到 GraphQL 吗？团队 5 人，主要服务移动端。",

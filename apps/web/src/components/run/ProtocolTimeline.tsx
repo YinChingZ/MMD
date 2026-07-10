@@ -81,7 +81,7 @@ export function ProtocolTimeline({
                   "ring-2 ring-accent ring-offset-2 ring-offset-surface",
                 status === "pending" && "border-border bg-surface text-ink-faint",
                 status === "in_progress" &&
-                  "border-accent/50 bg-accent-muted text-accent",
+                  "border-live/50 bg-live-muted text-live",
                 status === "done" &&
                   "border-consensus-strong/40 bg-consensus-strong-bg text-consensus-strong",
                 status === "failed" && "border-danger/50 bg-danger-muted text-danger",
@@ -115,13 +115,18 @@ export function ProtocolTimeline({
                   </span>
                 )}
               </div>
+              {status === "in_progress" && Boolean(progress?.retrying?.length) && (
+                <p className="mt-1 text-xs text-live">
+                  {progress!.retrying!.join("、")} 已切换稳定模式重试
+                </p>
+              )}
 
               {/* 进行中：进度条 + 模型芯片 */}
               {status === "in_progress" && progress && progress.total > 0 && (
                 <>
                   <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface-muted">
                     <div
-                      className="h-full rounded-full bg-accent transition-[width] duration-500"
+                      className="h-full rounded-full bg-live transition-[width] duration-500"
                       style={{
                         width: `${Math.round(
                           (progress.responded.length / progress.total) * 100,
@@ -144,7 +149,7 @@ export function ProtocolTimeline({
                       <span
                         key={idx}
                         aria-hidden
-                        className="mmd-pulse h-5 w-5 rounded-full bg-surface-muted ring-2 ring-accent/30"
+                        className="mmd-pulse h-5 w-5 rounded-full bg-surface-muted ring-2 ring-live/30"
                       />
                     ))}
                   </div>

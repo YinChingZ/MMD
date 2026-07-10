@@ -97,20 +97,46 @@ export function ConversationPageClient({
 
   const retryAppliedRef = useRef(false);
   useEffect(() => {
-    if (!retrySnapshot || retryAppliedRef.current || config.models === null) {
+    if (
+      !retrySnapshot ||
+      retryAppliedRef.current ||
+      config.models === null ||
+      config.savedKeys === null
+    ) {
       return;
     }
     retryAppliedRef.current = true;
     config.setMode(retrySnapshot.mode);
-    config.setModelIds(retrySnapshot.modelIds);
+    config.setModelIds(
+      retrySnapshot.modelIds.filter((id) => config.models?.some((model) => model.id === id)),
+    );
     config.setCostLimitUsd(retrySnapshot.costLimitUsd);
     config.setOutputSchemaText(retrySnapshot.outputSchemaText);
     config.setWebSearch(retrySnapshot.webSearch);
-    for (const entry of retrySnapshot.byokEntries) config.addByokEntry(entry);
+    const availableSavedKeyIds = new Set(config.savedKeys.map((key) => key.id));
+    const missingSavedLabels = retrySnapshot.byokEntries
+      .filter(
+        (entry) =>
+          "savedKeyId" in entry.payload &&
+          !availableSavedKeyIds.has(entry.payload.savedKeyId),
+      )
+      .map((entry) => entry.label);
+    const restoredEntries = retrySnapshot.byokEntries
+      .filter(
+        (entry) =>
+          "savedKeyId" in entry.payload &&
+          availableSavedKeyIds.has(entry.payload.savedKeyId),
+      )
+      .map((entry) => ({ ...entry, clientId: crypto.randomUUID() }));
+    config.replaceByokEntries(restoredEntries);
     setPrefill(retrySnapshot.question);
+    const missingLabels = [
+      ...retrySnapshot.droppedByokLabels,
+      ...missingSavedLabels,
+    ];
     toast.success(
-      retrySnapshot.droppedByokLabels.length
-        ? `${messages.errors.retryRestored}${messages.errors.retryKeysNeeded(retrySnapshot.droppedByokLabels)}`
+      missingLabels.length
+        ? `${messages.errors.retryRestored}${messages.errors.retryKeysNeeded(missingLabels)}`
         : messages.errors.retryRestored,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -231,7 +257,9 @@ export function ConversationPageClient({
               {messages.shell.emptyConversation}
             </p>
           )}
-          {runs?.map((run) => <RunTimelineItem key={run.id} run={run} />)}
+          {runs?.map((run, index) => (
+            <RunTimelineItem key={run.id} run={run} index={index + 1} />
+          ))}
         </div>
       </div>
 
@@ -259,7 +287,7 @@ export function ConversationPageClient({
   );
 }
 
-function RunTimelineItem({ run }: { run: RunRow }) {
+function RunTimelineItem({ run, index }: { run: RunRow; index: number }) {
   const [images, setImages] = useState<{ dataUrl: string }[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -272,13 +300,20 @@ function RunTimelineItem({ run }: { run: RunRow }) {
   }, [run.id]);
 
   return (
-    <article className="flex flex-col gap-2">
-      {/* 用户问题（右对齐气泡） */}
-      <div className="flex justify-end gap-1">
+    <article className="overflow-hidden rounded-md border border-border bg-surface shadow-card">
+      <div className="flex items-start gap-3 border-b border-border bg-surface-muted/60 px-4 py-3">
+        <span className="mt-0.5 font-mono text-[11px] font-semibold text-live">
+          {String(index).padStart(2, "0")}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="whitespace-pre-wrap text-[15px] font-medium leading-relaxed text-ink">
+            {run.question}
+          </p>
+          <ImageThumbnails images={images} />
+        </div>
         <IconButton
           size="sm"
           label={messages.results.copyQuestion}
-          className="mt-1 shrink-0"
           onClick={async () => {
             await navigator.clipboard.writeText(run.question);
             toast.success(messages.common.copied);
@@ -286,21 +321,12 @@ function RunTimelineItem({ run }: { run: RunRow }) {
         >
           <Copy className="h-3.5 w-3.5" />
         </IconButton>
-        <div className="flex max-w-[85%] flex-col items-end gap-1.5">
-          <div className="rounded-lg rounded-br-sm bg-accent-muted px-4 py-2.5">
-            <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">
-              {run.question}
-            </p>
-          </div>
-          <ImageThumbnails images={images} />
-        </div>
       </div>
 
-      {/* 运行卡（左对齐） */}
-      <div className="flex justify-start">
+      <div className="p-3">
         <Link
           href={`/conversations/${run.conversationId}/runs/${run.id}`}
-          className="group max-w-[85%] rounded-lg border border-border bg-surface px-4 py-3 shadow-card transition-colors hover:border-border-strong"
+          className="group block rounded-sm px-1 py-1 transition-colors hover:bg-surface-hover"
         >
           <div className="flex items-center gap-2">
             <RunStatusBadge status={run.status} />

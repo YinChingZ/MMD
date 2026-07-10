@@ -36,6 +36,8 @@ import {
 import {
   fanOutWithQuorum,
   callStructured,
+  extractJson,
+  ProviderStreamError,
   callJsonSchema,
   createValidatedArrayItemWatcher,
   createStringFieldWatcher,
@@ -45,6 +47,7 @@ import {
   type CompletionUsage,
   type FanoutOutcome,
   type FanoutResult,
+  type FanoutAttemptContext,
 } from "@mmd/model-adapters";
 import {
   buildProposePrompt,
@@ -67,6 +70,7 @@ export type { FormatUserOutputRequest };
 export type RunEventType =
   | "run_started"
   | "phase_started"
+  | "model_attempt"
   | "model_responded"
   | "item_progress"
   | "token"
@@ -109,6 +113,24 @@ function reportModelResponded(
       total,
       ...(result.ok ? {} : { error: result.error.message }),
     });
+}
+
+function withModelAttempt<T>(
+  emit: (type: RunEventType, phase?: Phase, data?: Record<string, unknown>) => void,
+  phase: Phase,
+  modelId: string,
+  context: FanoutAttemptContext | undefined,
+  call: () => Promise<T>
+): Promise<T> {
+  if ((context?.attempt ?? 0) > 0) {
+    emit("model_attempt", phase, {
+      modelId,
+      attempt: context!.attempt,
+      transport: "non_stream",
+      reason: "retryable_stream_failure",
+    });
+  }
+  return call();
 }
 
 /**
@@ -485,8 +507,10 @@ interface StreamHooks {
    * call site invocation), and callStructured's own repair-retry loop reuses
    * the same `stream` object across attempts within one call. */
   onDelta?: (delta: string, attempt: number) => void;
-  /** Passed through to provider.completeStream's own abort timer. */
+  /** Used for coordinator calls that do not already receive a fan-out AbortSignal. */
   timeoutMs?: number;
+  signal?: AbortSignal;
+  preferStream?: boolean;
 }
 
 async function structuredCall<T>(
@@ -507,22 +531,97 @@ async function structuredCall<T>(
               : [...request.userPrompt, { type: "text", text: repairNote }],
         }
       : request;
-    if (provider.completeStream && stream?.onDelta) {
-      const result = await provider.completeStream(
-        config,
-        req,
-        (delta) => stream.onDelta!(delta, attempt),
-        { timeoutMs: stream.timeoutMs }
-      );
-      onUsage?.(result.usage);
-      return result;
+    const runProviderCall = <R>(call: (signal?: AbortSignal) => Promise<R>) =>
+      stream?.signal
+        ? call(stream.signal)
+        : withProviderDeadline(stream?.timeoutMs, call);
+    if (provider.completeStream && stream?.onDelta && stream.preferStream !== false) {
+      try {
+        const result = await runProviderCall((signal) =>
+          provider.completeStream!(
+            config,
+            req,
+            (delta) => stream.onDelta!(delta, attempt),
+            { signal }
+          )
+        );
+        onUsage?.(result.usage);
+        return result;
+      } catch (err) {
+        if (err instanceof ProviderStreamError && canRecoverStructuredPartial(err, schema)) {
+          return {
+            text: err.partialText,
+            latencyMs: 0,
+            diagnostics: {
+              transport: "stream" as const,
+              providerRequestId: err.providerRequestId,
+              finishReason: err.finishReason,
+              errorType: err.errorType,
+              recovered: true,
+              degraded: true,
+            },
+          };
+        }
+        if (err instanceof ProviderStreamError && err.retryable && !stream.signal) {
+          const result = await withProviderDeadline(stream.timeoutMs, (signal) =>
+            provider.complete(config, req, { signal })
+          );
+          onUsage?.(result.usage);
+          return {
+            ...result,
+            diagnostics: {
+              ...result.diagnostics,
+              transport: "non_stream" as const,
+              degraded: true,
+              errorType: err.errorType,
+            },
+          };
+        }
+        throw err;
+      }
     }
-    const result = await provider.complete(config, req);
+    const result = await runProviderCall((signal) =>
+      provider.complete(config, req, { signal })
+    );
     // Every attempt costs money, including repair retries — report each one,
     // not just the final accepted attempt.
     onUsage?.(result.usage);
     return result;
   }, schema);
+}
+
+async function withProviderDeadline<T>(
+  timeoutMs: number | undefined,
+  call: (signal?: AbortSignal) => Promise<T>
+): Promise<T> {
+  if (!timeoutMs) return call(undefined);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`provider timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([call(controller.signal), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function canRecoverStructuredPartial<T>(
+  err: ProviderStreamError,
+  schema: z.ZodType<T, z.ZodTypeDef, any>
+): boolean {
+  if (["content_filter", "authentication", "invalid_request"].includes(err.errorType)) {
+    return false;
+  }
+  try {
+    return schema.safeParse(JSON.parse(extractJson(err.partialText))).success;
+  } catch {
+    return false;
+  }
 }
 
 /** Per-phase item-array field + element schema, for M6.3's progressive
@@ -574,11 +673,17 @@ function itemStreamHooks(
   emit: (type: RunEventType, phase?: Phase, data?: Record<string, unknown>) => void,
   phase: Phase,
   modelId: string,
-  timeoutMs: number
+  timeoutMs: number,
+  context?: FanoutAttemptContext
 ): StreamHooks | undefined {
   const cfg = ARRAY_STREAM_CONFIG[phase];
   if (!cfg) return undefined;
-  return { onDelta: makeItemStreamHandler(emit, phase, cfg.field, cfg.schema, modelId), timeoutMs };
+  return {
+    onDelta: makeItemStreamHandler(emit, phase, cfg.field, cfg.schema, modelId),
+    timeoutMs,
+    signal: context?.signal,
+    preferStream: (context?.attempt ?? 0) === 0,
+  };
 }
 
 /** M6.4: builds a `StreamHooks.onDelta` that relays a prose field's unescaped
@@ -673,10 +778,10 @@ async function runStandardOrQuickDeliberation(
   const mode = input.mode ?? "standard";
   const budget = getBudget(mode);
   const fanout = {
-    // Defaults to the run's own p95 budget rather than an arbitrary constant —
-    // reasoning models can easily take 30-60s+ on a real structured-output
-    // prompt, so a flat 15s (fine for MockProvider) was timing out real calls.
-    timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.targetP95Ms,
+    // Network deadlines are independent from the UI latency estimate. Quick
+    // mode in particular used to reuse its unbenchmarked 40s p95 here, which
+    // aborted healthy reasoning streams after they had already emitted items.
+    timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.providerTimeoutMs,
     retries: input.fanoutOptions?.retries ?? 1,
     backoffMs: input.fanoutOptions?.backoffMs ?? 200,
   };
@@ -719,8 +824,8 @@ async function runStandardOrQuickDeliberation(
   let t0 = Date.now();
   const proposeOutcome = await fanOutWithQuorum(
     input.models,
-    (config) =>
-      structuredCall(
+    (config, context) =>
+      withModelAttempt(emit, "propose", config.id, context, () => structuredCall(
         input.provider,
         config,
         buildProposePrompt({
@@ -732,8 +837,8 @@ async function runStandardOrQuickDeliberation(
         }),
         ProposalSchema,
         (usage) => recordUsage(costState, usage),
-        itemStreamHooks(emit, "propose", config.id, fanout.timeoutMs)
-      ),
+        itemStreamHooks(emit, "propose", config.id, toolFanout.timeoutMs, context)
+      )),
     { ...toolFanout, onSettled: reportModelResponded(emit, "propose") }
   );
   timings.propose = Date.now() - t0;
@@ -760,8 +865,8 @@ async function runStandardOrQuickDeliberation(
     t0 = Date.now();
     const critiqueOutcome = await fanOutWithQuorum(
       input.models,
-      (config) =>
-        structuredCall(
+      (config, context) =>
+        withModelAttempt(emit, "critique", config.id, context, () => structuredCall(
           input.provider,
           config,
           buildCritiquePrompt({
@@ -772,8 +877,8 @@ async function runStandardOrQuickDeliberation(
           }),
           CritiqueSchema,
           (usage) => recordUsage(costState, usage),
-          itemStreamHooks(emit, "critique", config.id, fanout.timeoutMs)
-        ),
+          itemStreamHooks(emit, "critique", config.id, toolFanout.timeoutMs, context)
+        )),
       { ...toolFanout, onSettled: reportModelResponded(emit, "critique") }
     );
     timings.critique = Date.now() - t0;
@@ -801,8 +906,8 @@ async function runStandardOrQuickDeliberation(
     t0 = Date.now();
     const reviseOutcome = await fanOutWithQuorum(
       input.models,
-      (config) =>
-        structuredCall(
+      (config, context) =>
+        withModelAttempt(emit, "revise", config.id, context, () => structuredCall(
           input.provider,
           config,
           buildRevisePrompt({
@@ -814,8 +919,8 @@ async function runStandardOrQuickDeliberation(
           }),
           RevisionSetSchema,
           (usage) => recordUsage(costState, usage),
-          itemStreamHooks(emit, "revise", config.id, fanout.timeoutMs)
-        ),
+          itemStreamHooks(emit, "revise", config.id, fanout.timeoutMs, context)
+        )),
       { ...fanout, onSettled: reportModelResponded(emit, "revise") }
     );
     timings.revise = Date.now() - t0;
@@ -873,8 +978,8 @@ async function runStandardOrQuickDeliberation(
     t0 = Date.now();
     const voteOutcome = await fanOutWithQuorum(
       input.models,
-      (config) =>
-        structuredCall(
+      (config, context) =>
+        withModelAttempt(emit, "vote", config.id, context, () => structuredCall(
           input.provider,
           config,
           buildVotePrompt({
@@ -887,8 +992,8 @@ async function runStandardOrQuickDeliberation(
           }),
           VoteSetSchema,
           (usage) => recordUsage(costState, usage),
-          itemStreamHooks(emit, "vote", config.id, fanout.timeoutMs)
-        ),
+          itemStreamHooks(emit, "vote", config.id, fanout.timeoutMs, context)
+        )),
       { ...fanout, onSettled: reportModelResponded(emit, "vote") }
     );
     timings.vote = Date.now() - t0;
@@ -1098,8 +1203,8 @@ async function runTopicDeliberation(
   let t0 = Date.now();
   const proposeOutcome = await fanOutWithQuorum(
     models,
-    (config) =>
-      structuredCall(
+    (config, context) =>
+      withModelAttempt(emit, "propose", config.id, context, () => structuredCall(
         provider,
         config,
         buildProposePrompt({
@@ -1112,8 +1217,8 @@ async function runTopicDeliberation(
         }),
         ProposalSchema,
         (usage) => recordUsage(costState, usage),
-        itemStreamHooks(emit, "propose", config.id, fanout.timeoutMs)
-      ),
+        itemStreamHooks(emit, "propose", config.id, toolFanout.timeoutMs, context)
+      )),
     { ...toolFanout, onSettled: reportModelResponded(emit, "propose") }
   );
   timings.propose = Date.now() - t0;
@@ -1137,8 +1242,8 @@ async function runTopicDeliberation(
   t0 = Date.now();
   const critiqueOutcome = await fanOutWithQuorum(
     models,
-    (config) =>
-      structuredCall(
+    (config, context) =>
+      withModelAttempt(emit, "critique", config.id, context, () => structuredCall(
         provider,
         config,
         buildCritiquePrompt({
@@ -1150,8 +1255,8 @@ async function runTopicDeliberation(
         }),
         CritiqueSchema,
         (usage) => recordUsage(costState, usage),
-        itemStreamHooks(emit, "critique", config.id, fanout.timeoutMs)
-      ),
+        itemStreamHooks(emit, "critique", config.id, toolFanout.timeoutMs, context)
+      )),
     { ...toolFanout, onSettled: reportModelResponded(emit, "critique") }
   );
   timings.critique = Date.now() - t0;
@@ -1175,8 +1280,8 @@ async function runTopicDeliberation(
   t0 = Date.now();
   const reviseOutcome = await fanOutWithQuorum(
     models,
-    (config) =>
-      structuredCall(
+    (config, context) =>
+      withModelAttempt(emit, "revise", config.id, context, () => structuredCall(
         provider,
         config,
         buildRevisePrompt({
@@ -1188,8 +1293,8 @@ async function runTopicDeliberation(
         }),
         RevisionSetSchema,
         (usage) => recordUsage(costState, usage),
-        itemStreamHooks(emit, "revise", config.id, fanout.timeoutMs)
-      ),
+        itemStreamHooks(emit, "revise", config.id, fanout.timeoutMs, context)
+      )),
     { ...fanout, onSettled: reportModelResponded(emit, "revise") }
   );
   timings.revise = Date.now() - t0;
@@ -1239,8 +1344,8 @@ async function runTopicDeliberation(
   t0 = Date.now();
   const voteOutcome = await fanOutWithQuorum(
     models,
-    (config) =>
-      structuredCall(
+    (config, context) =>
+      withModelAttempt(emit, "vote", config.id, context, () => structuredCall(
         provider,
         config,
         buildVotePrompt({
@@ -1253,8 +1358,8 @@ async function runTopicDeliberation(
         }),
         VoteSetSchema,
         (usage) => recordUsage(costState, usage),
-        itemStreamHooks(emit, "vote", config.id, fanout.timeoutMs)
-      ),
+        itemStreamHooks(emit, "vote", config.id, fanout.timeoutMs, context)
+      )),
     { ...fanout, onSettled: reportModelResponded(emit, "vote") }
   );
   timings.vote = Date.now() - t0;
@@ -1299,7 +1404,7 @@ async function runPlanningDeliberation(
   const runId = input.runId ?? makeRunId();
   const budget = getBudget("planning");
   const fanout = {
-    timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.targetP95Ms,
+    timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.providerTimeoutMs,
     retries: input.fanoutOptions?.retries ?? 1,
     backoffMs: input.fanoutOptions?.backoffMs ?? 200,
   };

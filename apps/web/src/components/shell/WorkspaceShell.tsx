@@ -33,7 +33,7 @@ export function usePanelContext(): PanelContextValue | null {
 const COLLAPSE_KEY = "mmd.panel.collapsed";
 
 /**
- * 三栏桌面工作区：左侧 272px 侧栏 / 中央内容 / 右侧 320px 决策面板。
+ * 三栏桌面工作区：左侧 248px 控制栏 / 中央内容 / 右侧 344px 检查器。
  * 右栏内容由页面通过 <ContextPanel> 注入（portal），无内容时整栏隐藏。
  */
 export function WorkspaceShell({ children }: { children: ReactNode }) {
@@ -75,7 +75,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
           className={cn(
             "hidden shrink-0 border-l border-border bg-surface transition-[width] duration-200 lg:flex lg:flex-col",
             !hasPanel && "lg:hidden",
-            collapsed ? "w-12" : "w-80",
+            collapsed ? "w-12" : "w-[344px]",
           )}
         >
           <div

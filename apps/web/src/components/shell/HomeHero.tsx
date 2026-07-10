@@ -67,18 +67,21 @@ export function HomeHero() {
   };
 
   return (
-    <div className="flex h-full flex-col items-center justify-center px-8">
-      <div className="w-full max-w-2xl">
-        <div className="text-center">
-          <h1 className="text-2xl font-semibold leading-snug tracking-tight text-ink">
+    <div className="min-h-full px-6 py-12 sm:px-10 lg:px-14 lg:py-16">
+      <div className="mx-auto w-full max-w-5xl">
+        <div className="max-w-3xl">
+          <p className="font-mono text-[11px] font-semibold tracking-[0.16em] text-accent">
+            {messages.home.eyebrow}
+          </p>
+          <h1 className="mt-3 max-w-2xl text-3xl font-semibold leading-tight tracking-tight text-ink sm:text-4xl">
             {messages.home.heading}
           </h1>
-          <p className="mx-auto mt-3 max-w-xl text-[15px] leading-relaxed text-ink-muted">
+          <p className="mt-4 max-w-2xl text-[15px] leading-relaxed text-ink-muted">
             {messages.home.subheading}
           </p>
         </div>
 
-        <div className="mt-8">
+        <div className="mt-8 max-w-3xl">
           <DecisionComposer
             config={config}
             onSubmit={submit}
@@ -88,15 +91,25 @@ export function HomeHero() {
           />
         </div>
 
-        <div className="mt-6 text-center">
-          <p className="text-sm text-ink-faint">{messages.home.examplesLabel}</p>
-          <div className="mt-3 flex flex-wrap justify-center gap-2">
+        <ol className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
+          {messages.home.protocol.map((item) => (
+            <li key={item.step} className="bg-surface p-4">
+              <span className="font-mono text-[11px] font-semibold text-live">{item.step}</span>
+              <p className="mt-2 text-sm font-semibold text-ink">{item.title}</p>
+              <p className="mt-1 text-xs leading-relaxed text-ink-muted">{item.hint}</p>
+            </li>
+          ))}
+        </ol>
+
+        <div className="mt-8 border-t border-border pt-5">
+          <p className="text-xs font-medium uppercase tracking-[0.12em] text-ink-faint">{messages.home.examplesLabel}</p>
+          <div className="mt-3 flex flex-wrap gap-2">
             {messages.home.examples.map((example) => (
               <button
                 key={example}
                 type="button"
                 onClick={() => setPrefill(example)}
-                className="rounded-full border border-border bg-surface px-3.5 py-1.5 text-[13px] text-ink-muted transition-colors hover:border-border-strong hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                className="rounded-md border border-border bg-surface px-3.5 py-2 text-left text-[13px] text-ink-muted transition-colors hover:border-border-strong hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
               >
                 {example}
               </button>

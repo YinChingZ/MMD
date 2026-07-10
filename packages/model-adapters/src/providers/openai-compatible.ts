@@ -1,11 +1,27 @@
 import { calculateCostUsd, type UserProvidedRate } from "@mmd/protocol";
+import { createParser } from "eventsource-parser";
 import type {
   CompletionRequest,
   CompletionResult,
   CompletionUsage,
   ModelConfig,
   ModelProvider,
+  ProviderCallOptions,
 } from "../provider.js";
+
+export class ProviderStreamError extends Error {
+  constructor(
+    message: string,
+    public readonly partialText: string,
+    public readonly errorType: string,
+    public readonly retryable: boolean,
+    public readonly providerRequestId?: string,
+    public readonly finishReason?: string
+  ) {
+    super(message);
+    this.name = "ProviderStreamError";
+  }
+}
 
 export interface OpenAICompatibleOptions {
   /** Base URL of an OpenAI-compatible chat completions API. */
@@ -104,7 +120,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
   async complete(
     config: ModelConfig,
-    request: CompletionRequest
+    request: CompletionRequest,
+    opts?: ProviderCallOptions
   ): Promise<CompletionResult> {
     if (request.tools?.some((tool) => tool.type === "web_search")) {
       if (!this.useResponsesApi) {
@@ -112,7 +129,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
           throw new Error("web search requires a direct OpenAI Responses API or OpenRouter provider");
         }
       } else {
-        return this.completeWithResponses(config, request);
+        return this.completeWithResponses(config, request, opts);
       }
     }
     const apiKey = this.literalApiKey ?? process.env[this.apiKeyEnvVar];
@@ -129,6 +146,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: opts?.signal,
       body: JSON.stringify({
         model: config.id,
         messages: [
@@ -151,6 +169,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
       text,
       latencyMs: Date.now() - start,
       usage: this.parseUsage(data.usage, config.id),
+      diagnostics: {
+        transport: "non_stream",
+        providerRequestId: res.headers?.get?.("x-generation-id") ?? undefined,
+      },
     };
   }
 
@@ -158,7 +180,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     config: ModelConfig,
     request: CompletionRequest,
     onDelta: (delta: string) => void,
-    opts?: { timeoutMs?: number }
+    opts?: ProviderCallOptions
   ): Promise<CompletionResult> {
     // Responses API tool runs are complete server-side and this first version
     // intentionally does not parse its event stream. Returning the settled
@@ -173,11 +195,12 @@ export class OpenAICompatibleProvider implements ModelProvider {
       );
     }
 
-    const controller = new AbortController();
-    const timer = opts?.timeoutMs
-      ? setTimeout(() => controller.abort(), opts.timeoutMs)
-      : undefined;
     const start = Date.now();
+    let text = "";
+    let finishReason: string | undefined;
+    let usageRaw: Record<string, unknown> | undefined;
+    let providerRequestId: string | undefined;
+    let timeToFirstTokenMs: number | undefined;
     try {
       const res = await fetch(`${this.baseUrl}/chat/completions`, {
         method: "POST",
@@ -185,7 +208,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        signal: controller.signal,
+        signal: opts?.signal,
         body: JSON.stringify({
           model: config.id,
           stream: true,
@@ -199,47 +222,120 @@ export class OpenAICompatibleProvider implements ModelProvider {
       });
 
       if (!res.ok || !res.body) {
-        throw new Error(
-          `${this.name} stream request failed for "${config.id}": ${res.status} ${await res
-            .text()
-            .catch(() => "")}`
+        const body = await res.text().catch(() => "");
+        throw new ProviderStreamError(
+          `${this.name} stream request failed for "${config.id}": ${res.status} ${body}`,
+          "",
+          `http_${res.status}`,
+          res.status === 408 || res.status === 429 || res.status >= 500,
+          res.headers?.get?.("x-generation-id") ?? undefined
         );
       }
 
-      let text = "";
-      let usageRaw: Record<string, unknown> | undefined;
+      providerRequestId = res.headers?.get?.("x-generation-id") ?? undefined;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buf = "";
-      for (;;) {
+      let doneReceived = false;
+      let parsingError: Error | undefined;
+      const parser = createParser({
+        maxBufferSize: 2 * 1024 * 1024,
+        onEvent: (event) => {
+          if (event.data.trim() === "[DONE]") {
+            doneReceived = true;
+            return;
+          }
+          try {
+            const chunk = JSON.parse(event.data) as Record<string, any>;
+            providerRequestId = providerRequestId ?? asString(chunk.id);
+            if (chunk.error) {
+              const errorType = asString(chunk.error?.metadata?.error_type) ?? "provider_error";
+              parsingError = new ProviderStreamError(
+                `provider stream failed: ${asString(chunk.error?.message) ?? errorType}`,
+                text,
+                errorType,
+                isRetryableStreamError(errorType, Number(chunk.error?.code)),
+                providerRequestId,
+                "error"
+              );
+              return;
+            }
+            const choice = chunk.choices?.[0];
+            const nextFinishReason = asString(choice?.finish_reason);
+            if (nextFinishReason) finishReason = nextFinishReason;
+            const delta = choice?.delta?.content;
+            if (typeof delta === "string" && delta.length > 0) {
+              timeToFirstTokenMs ??= Date.now() - start;
+              text += delta;
+              onDelta(delta);
+            }
+            if (chunk.usage) usageRaw = chunk.usage;
+          } catch (err) {
+            parsingError = err instanceof Error ? err : new Error(String(err));
+          }
+        },
+        onError: (error) => {
+          parsingError = new Error(`invalid SSE stream: ${error.message}`);
+        },
+      });
+
+      while (!doneReceived && !parsingError) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf("\n\n")) !== -1) {
-          const frame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const line = frame.split("\n").find((l) => l.startsWith("data: "));
-          if (!line) continue;
-          const payload = line.slice(6).trim();
-          if (payload === "[DONE]") continue;
-          const chunk = JSON.parse(payload);
-          const delta = chunk.choices?.[0]?.delta?.content;
-          if (typeof delta === "string" && delta.length > 0) {
-            text += delta;
-            onDelta(delta);
-          }
-          if (chunk.usage) usageRaw = chunk.usage;
-        }
+        parser.feed(decoder.decode(value, { stream: true }));
+      }
+      if (doneReceived) {
+        await reader.cancel?.().catch(() => undefined);
+      } else {
+        parser.feed(decoder.decode());
+        parser.reset({ consume: true });
+      }
+
+      if (parsingError) throw parsingError;
+      if (!doneReceived && finishReason !== "stop") {
+        throw new ProviderStreamError(
+          "provider stream ended before a terminal frame",
+          text,
+          "unexpected_eof",
+          true,
+          providerRequestId,
+          finishReason
+        );
+      }
+      if (finishReason && finishReason !== "stop") {
+        const retryable = finishReason === "error";
+        throw new ProviderStreamError(
+          `provider stream ended with finish_reason=${finishReason}`,
+          text,
+          finishReason,
+          retryable,
+          providerRequestId,
+          finishReason
+        );
       }
 
       return {
         text,
         latencyMs: Date.now() - start,
         usage: this.parseUsage(usageRaw, config.id),
+        diagnostics: {
+          transport: "stream",
+          providerRequestId,
+          finishReason,
+          timeToFirstTokenMs,
+          degraded: !doneReceived,
+        },
       };
-    } finally {
-      if (timer) clearTimeout(timer);
+    } catch (err) {
+      if (err instanceof ProviderStreamError) throw err;
+      const aborted = opts?.signal?.aborted || (err instanceof Error && err.name === "AbortError");
+      throw new ProviderStreamError(
+        aborted ? "provider stream timed out" : err instanceof Error ? err.message : String(err),
+        text,
+        aborted ? "timeout" : "network_error",
+        true,
+        providerRequestId,
+        finishReason
+      );
     }
   }
 
@@ -262,7 +358,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
   private async completeWithResponses(
     config: ModelConfig,
-    request: CompletionRequest
+    request: CompletionRequest,
+    opts?: ProviderCallOptions
   ): Promise<CompletionResult> {
     const apiKey = this.literalApiKey ?? process.env[this.apiKeyEnvVar];
     if (!apiKey) {
@@ -277,6 +374,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: opts?.signal,
       body: JSON.stringify({
         model: config.id,
         instructions: request.systemPrompt,
@@ -328,4 +426,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isRetryableStreamError(errorType: string, code: number): boolean {
+  return ["timeout", "provider_overloaded", "provider_unavailable", "server"].includes(errorType) ||
+    code === 408 || code === 429 || code >= 500;
 }

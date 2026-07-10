@@ -101,7 +101,12 @@ export function buildRunProvider(params: {
 
   const byokLabels = byokModels.map((m) => m.label);
   if (new Set(byokLabels).size !== byokLabels.length) {
-    throw new Error("byokModels contains duplicate labels");
+    const duplicateLabels = [...new Set(byokLabels.filter(
+      (label, index) => byokLabels.indexOf(label) !== index
+    ))];
+    throw new Error(
+      `duplicate labels: ${duplicateLabels.join(", ")}（重复添加了相同的 BYOK 模型，请移除重复项后重试。）`
+    );
   }
   const collidingLabels = selectedLegacyIds.filter((id) =>
     byokLabels.includes(id)

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, Star, Trash2 } from "lucide-react";
+import { Copy, KeyRound, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { deleteWorkspaceKey } from "../../lib/api";
 import { formatSavedRate } from "../../lib/cost";
@@ -80,62 +80,70 @@ function SavedKeysSection({ config }: { config: RunConfig }) {
           return (
             <li
               key={key.id}
-              className="flex items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-2"
+              className="rounded-md border border-border bg-surface px-3 py-2.5"
             >
-              <KeyRound className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm text-ink">{label}</span>
-                {key.pricing && (
-                  <span className="block truncate font-mono text-[11px] text-ink-faint">
-                    {formatSavedRate(key.pricing)}
-                  </span>
-                )}
-              </span>
-              <IconButton
-                size="sm"
-                label={messages.models.toggleDefault}
-                onClick={() =>
-                  setDefaults(
-                    toggleSavedKeyDefault(defaults, {
-                      savedKeyId: key.id,
-                      label,
-                      providerLabel: key.providerId,
-                    }),
-                  )
-                }
-              >
-                <Star
-                  className={cn(
+              <div className="flex items-start gap-2">
+                <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-ink">{label}</p>
+                  <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+                    {key.providerId}
+                  </p>
+                  <div className="mt-1 flex items-start gap-1.5">
+                    <code
+                      className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted [overflow-wrap:anywhere]"
+                      title={key.modelId}
+                    >
+                      {key.modelId}
+                    </code>
+                    <IconButton
+                      size="sm"
+                      label={`${messages.common.copy} ${key.modelId}`}
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(key.modelId);
+                        toast.success(messages.common.copied);
+                      }}
+                    >
+                      <Copy className="h-3 w-3" />
+                    </IconButton>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 flex items-center gap-1.5 border-t border-border pt-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint">
+                  {key.pricing ? formatSavedRate(key.pricing) : "BYOK"}
+                </span>
+                <IconButton
+                  size="sm"
+                  label={messages.models.toggleDefault}
+                  onClick={() => setDefaults(toggleSavedKeyDefault(defaults, {
+                    savedKeyId: key.id,
+                    label,
+                    providerLabel: key.providerId,
+                  }))}
+                >
+                  <Star className={cn(
                     "h-3.5 w-3.5",
                     starred ? "fill-accent text-accent" : "text-ink-faint",
-                  )}
-                />
-              </IconButton>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={alreadyAdded}
-                onClick={() =>
-                  config.addByokEntry({
+                  )} />
+                </IconButton>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={alreadyAdded}
+                  onClick={() => config.addByokEntry({
                     clientId: crypto.randomUUID(),
                     label,
                     providerLabel: key.providerId,
-                    payload: {
-                      savedKeyId: key.id,
-                      label: key.label ?? undefined,
-                    },
-                  })
-                }
-              >
-                {alreadyAdded ? "已添加" : messages.models.useKey}
-              </Button>
-              <IconButton
-                size="sm"
-                label={messages.common.delete}
-                onClick={() => setConfirmId(key.id)}
-              >
-                <Trash2 className="h-3.5 w-3.5 text-ink-faint" />
-              </IconButton>
+                    payload: { savedKeyId: key.id, label: key.label ?? undefined },
+                  })}
+                >
+                  {alreadyAdded ? "已添加" : messages.models.useKey}
+                </Button>
+                <IconButton size="sm" label={messages.common.delete} onClick={() => setConfirmId(key.id)}>
+                  <Trash2 className="h-3.5 w-3.5 text-ink-faint" />
+                </IconButton>
+              </div>
             </li>
           );
         })}

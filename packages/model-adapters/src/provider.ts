@@ -57,11 +57,28 @@ export interface CompletionResult {
   usage?: CompletionUsage;
   /** Provider-reported tool activity for diagnostics; never feeds later phases. */
   toolCalls?: Array<{ type: string }>;
+  diagnostics?: {
+    transport: "stream" | "non_stream";
+    providerRequestId?: string;
+    finishReason?: string;
+    errorType?: string;
+    recovered?: boolean;
+    degraded?: boolean;
+    timeToFirstTokenMs?: number;
+  };
+}
+
+export interface ProviderCallOptions {
+  signal?: AbortSignal;
 }
 
 export interface ModelProvider {
   readonly name: string;
-  complete(config: ModelConfig, request: CompletionRequest): Promise<CompletionResult>;
+  complete(
+    config: ModelConfig,
+    request: CompletionRequest,
+    opts?: ProviderCallOptions
+  ): Promise<CompletionResult>;
   /**
    * Optional streaming variant, added for M6.3/M6.4. Providers that don't
    * implement it (MockProvider by default, any future provider) keep working
@@ -75,6 +92,6 @@ export interface ModelProvider {
     config: ModelConfig,
     request: CompletionRequest,
     onDelta: (delta: string) => void,
-    opts?: { timeoutMs?: number }
+    opts?: ProviderCallOptions
   ): Promise<CompletionResult>;
 }

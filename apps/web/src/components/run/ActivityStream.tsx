@@ -123,7 +123,7 @@ export function ActivityStream({
             className={cn(
               "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
               phase === active
-                ? "bg-accent-muted text-accent"
+                ? "bg-live-muted text-live"
                 : "text-ink-faint hover:bg-surface-hover hover:text-ink",
             )}
           >
@@ -131,7 +131,7 @@ export function ActivityStream({
             {phases[phase] === "in_progress" && (
               <span
                 aria-hidden
-                className="mmd-pulse h-1.5 w-1.5 rounded-full bg-accent"
+                className="mmd-pulse h-1.5 w-1.5 rounded-full bg-live"
               />
             )}
           </button>

@@ -46,8 +46,8 @@ export function SidebarItem({
         className={cn(
           "block truncate rounded-sm px-2 py-1.5 pr-8 text-sm transition-colors",
           active
-            ? "bg-accent-muted font-medium text-ink"
-            : "text-ink-muted hover:bg-surface-hover hover:text-ink",
+            ? "bg-sidebar-hover font-medium text-sidebar-ink"
+            : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-ink",
         )}
       >
         {conversation.title || messages.shell.untitled}
@@ -59,8 +59,8 @@ export function SidebarItem({
             type="button"
             aria-label={messages.shell.conversationMenu}
             className={cn(
-              "absolute right-1 top-1/2 -translate-y-1/2 rounded-sm p-1 text-ink-faint",
-              "opacity-0 transition-opacity hover:bg-surface-hover hover:text-ink",
+              "absolute right-1 top-1/2 -translate-y-1/2 rounded-sm p-1 text-sidebar-muted",
+              "opacity-0 transition-opacity hover:bg-sidebar-hover hover:text-sidebar-ink",
               "focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-ring",
               "group-hover:opacity-100 data-[state=open]:opacity-100",
             )}

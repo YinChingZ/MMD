@@ -103,17 +103,17 @@ export function AppSidebar() {
   }, [conversations]);
 
   return (
-    <aside className="hidden w-[272px] shrink-0 flex-col border-r border-border bg-surface md:flex">
+    <aside className="hidden w-[248px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex">
       {/* 品牌行 */}
       <Link
         href="/"
-        className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border px-4"
+        className="flex h-14 shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4"
       >
         <BrandMark className="h-6 w-6" />
-        <span className="text-[15px] font-semibold tracking-tight text-ink">
+        <span className="text-[15px] font-semibold tracking-tight text-sidebar-ink">
           {messages.common.appName}
         </span>
-        <span className="text-xs text-ink-faint">
+        <span className="text-xs text-sidebar-muted">
           {messages.common.appTagline}
         </span>
       </Link>
@@ -123,7 +123,7 @@ export function AppSidebar() {
           type="button"
           onClick={createNew}
           disabled={creating}
-          className="flex w-full items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground shadow-card transition-colors hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-50"
+          className="flex w-full items-center gap-2 rounded-md border border-sidebar-border bg-sidebar-hover px-3 py-2 text-sm font-medium text-sidebar-ink transition-colors hover:border-sidebar-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sidebar-ink disabled:opacity-50"
         >
           <Plus className="h-4 w-4" />
           {messages.shell.newDecision}
@@ -140,13 +140,13 @@ export function AppSidebar() {
           </div>
         )}
         {loaded && conversations.length === 0 && (
-          <p className="px-2 pt-2 text-sm text-ink-faint">
+          <p className="px-2 pt-2 text-sm text-sidebar-muted">
             {messages.shell.empty}
           </p>
         )}
         {groups.map((group) => (
           <div key={group.key} className="mt-3 first:mt-1">
-            <h2 className="px-2 pb-1 text-xs font-medium text-ink-faint">
+            <h2 className="px-2 pb-1 text-[11px] font-medium uppercase tracking-[0.12em] text-sidebar-muted">
               {messages.shell.dateGroups[group.key]}
             </h2>
             <ul className="flex flex-col gap-0.5">

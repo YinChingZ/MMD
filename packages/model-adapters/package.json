@@ -12,6 +12,7 @@
   "dependencies": {
     "@mmd/protocol": "*",
     "ajv": "^8.17.1",
+    "eventsource-parser": "^3.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

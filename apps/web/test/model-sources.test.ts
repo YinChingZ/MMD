@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../src/lib/api";
 import {
   buildCreateRunPayload,
+  dedupeByokEntries,
   mergeModelSources,
   type ByokEntryUI,
 } from "../src/lib/model-sources";
@@ -97,6 +98,24 @@ describe("mergeModelSources", () => {
 });
 
 describe("buildCreateRunPayload", () => {
+  it("deduplicates a saved key restored on top of the same starred default", () => {
+    const original = byokEntry({
+      clientId: "default",
+      label: "saved-model",
+      payload: { savedKeyId: "key-1" },
+    });
+    const restored = { ...original, clientId: "retry" };
+    expect(dedupeByokEntries([original, restored])).toEqual([restored]);
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "quick",
+      modelIds: [],
+      byokEntries: [original, restored],
+      costLimitUsd: 5,
+    });
+    expect(payload.byokModels).toEqual([{ savedKeyId: "key-1" }]);
+  });
+
   it("omits modelIds (rather than sending []) for a pure-BYOK submission with no legacy models checked", () => {
     const payload = buildCreateRunPayload({
       question: "Q?",

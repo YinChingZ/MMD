@@ -29,10 +29,16 @@ export interface FanoutOptions {
   retries: number;
   backoffMs: number;
   quorumRatio?: number;
+  shouldRetry?: (error: unknown) => boolean;
   /** Fires the instant each model's call settles (success or failure), rather
    * than waiting for the whole Promise.all — lets callers surface per-model
    * progress within a phase instead of only at phase boundaries. */
   onSettled?: (result: FanoutResult<unknown>, index: number, total: number) => void;
+}
+
+export interface FanoutAttemptContext {
+  attempt: number;
+  signal: AbortSignal;
 }
 
 /**
@@ -43,7 +49,7 @@ export interface FanoutOptions {
  */
 export async function fanOutWithQuorum<T>(
   configs: ModelConfig[],
-  call: (config: ModelConfig) => Promise<T>,
+  call: (config: ModelConfig, context?: FanoutAttemptContext) => Promise<T>,
   opts: FanoutOptions
 ): Promise<FanoutOutcome<T>> {
   const total = configs.length;
@@ -52,8 +58,28 @@ export async function fanOutWithQuorum<T>(
       const t0 = Date.now();
       try {
         const value = await withRetry(
-          () => withTimeout(call(config), opts.timeoutMs, config.id),
-          { retries: opts.retries, backoffMs: opts.backoffMs }
+          (attempt) => {
+            const controller = new AbortController();
+            return withTimeout(
+              call(config, { attempt, signal: controller.signal }),
+              opts.timeoutMs,
+              config.id,
+              () => controller.abort()
+            );
+          },
+          {
+            retries: opts.retries,
+            backoffMs: opts.backoffMs,
+            shouldRetry:
+              opts.shouldRetry ??
+              ((error) =>
+                !(
+                  error &&
+                  typeof error === "object" &&
+                  "retryable" in error &&
+                  (error as { retryable?: boolean }).retryable === false
+                )),
+          }
         );
         const result: FanoutResult<T> = {
           config,
