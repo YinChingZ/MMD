@@ -482,6 +482,7 @@ def test_provider_forwards_tools_to_panel_and_trace_only_marks_availability():
                 "analysis_models": ["router/model-a", "router/model-b"],
                 "coordinator_model": "router/coordinator",
                 "max_tool_calls": 2,
+                "tool_mode": "experimental_passthrough",
                 "return_trace": True,
             },
         )
@@ -501,6 +502,8 @@ def test_provider_forwards_tools_to_panel_and_trace_only_marks_availability():
         "tool_count": 1,
         "tool_choice": "auto",
         "max_tool_calls": 2,
+        "tool_mode": "experimental_passthrough",
+        "experimental": True,
     }
 
 
@@ -524,11 +527,53 @@ def test_provider_can_forward_tools_to_coordinator_when_enabled():
                 "coordinator_model": "router/coordinator",
                 "tools": [tool],
                 "coordinator_tools_enabled": True,
+                "tool_mode": "experimental_passthrough",
             },
         )
     )
 
     assert all(call["tools"] == [tool] for call in router.calls)
+
+
+def test_provider_rejects_tools_by_default():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Provider-managed web search.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    with pytest.raises(MMDProviderBadRequestError) as excinfo:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                tools=[tool],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                },
+            )
+        )
+    assert excinfo.value.status_code == 400
+    assert "tool_mode" in str(excinfo.value)
+
+
+def test_provider_rejects_tool_choice_only_without_tools_by_default():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    with pytest.raises(MMDProviderBadRequestError) as excinfo:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                tool_choice="auto",
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                },
+            )
+        )
+    assert excinfo.value.status_code == 400
 
 
 def test_provider_prefers_explicit_client_over_router():
@@ -727,3 +772,127 @@ def test_provider_maps_structured_output_failure_to_api_error():
     assert error.status_code == 500
     assert error.error_payload()["code"] == "mmd_api_error"
     assert error.error_payload()["mmd"]["cause"] == "ValueError"
+
+
+def test_provider_preserves_system_message_and_history_in_deliberation_context():
+    router = FakeRouter()
+    provider = MMDLiteLLMProvider(router=router)
+    asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "What should we build next?"},
+                {"role": "assistant", "content": "Let me check a tool."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "search results: monorepo pros/cons",
+                },
+                {"role": "user", "content": "Given that, what do you recommend?"},
+            ],
+            optional_params={
+                "analysis_models": ["router/model-a", "router/model-b"],
+                "coordinator_model": "router/coordinator",
+            },
+        )
+    )
+
+    propose_prompt = router.calls[0]["messages"][1]["content"]
+    assert "Conversation context so far:" in propose_prompt
+    assert "Be concise." in propose_prompt
+    assert "What should we build next?" in propose_prompt
+    assert "Let me check a tool." in propose_prompt
+    assert "search results: monorepo pros/cons" in propose_prompt
+    assert "Question: Given that, what do you recommend?" in propose_prompt
+
+
+def test_provider_rejects_unsupported_multimodal_content_part():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    with pytest.raises(MMDProviderBadRequestError) as excinfo:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": "http://x"}}
+                        ],
+                    }
+                ],
+                optional_params={"analysis_models": ["model_a", "model_b"]},
+            )
+        )
+    assert excinfo.value.status_code == 400
+    assert "image_url" in str(excinfo.value)
+
+
+class _FakeMessage:
+    def __init__(self) -> None:
+        self.content = None
+        self.role = "assistant"
+
+
+class _FakeChoice:
+    def __init__(self) -> None:
+        self.message = _FakeMessage()
+        self.finish_reason = "stop"
+
+
+class _FakeModelResponse:
+    def __init__(self) -> None:
+        self.id = None
+        self.created = None
+        self.model = None
+        self.object = None
+        self.usage = None
+        self.choices = [_FakeChoice()]
+
+
+def test_provider_populates_supplied_model_response_object_in_place():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    fake = _FakeModelResponse()
+    result = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            model_response=fake,
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "return_trace": True,
+            },
+        )
+    )
+
+    assert result is fake
+    assert fake.model == "mmd/fusion"
+    assert fake.choices[0].message.content == (
+        "Use a small TypeScript monorepo for this project."
+    )
+    assert fake.choices[0].finish_reason == "stop"
+    assert fake.mmd["trace_version"] == 1
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("litellm") is None,
+    reason="LiteLLM is an optional runtime dependency",
+)
+def test_provider_populates_real_litellm_model_response_when_absent():
+    import litellm
+    from litellm.types.utils import ModelResponse
+
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    result = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={"analysis_models": ["model_a", "model_b"]},
+        )
+    )
+
+    assert isinstance(result, ModelResponse)
+    assert result.choices[0].message.content == (
+        "Use a small TypeScript monorepo for this project."
+    )
+    assert result.model == "mmd/fusion"

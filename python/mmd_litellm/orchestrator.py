@@ -70,6 +70,7 @@ class CompletionClient(Protocol):
 
 class DeliberationConfig(BaseModel):
     question: str = Field(min_length=1)
+    conversation_context: str | None = None
     analysis_models: list[str] = Field(min_length=1)
     coordinator_model: str | None = None
     preset: PresetName | None = None
@@ -90,6 +91,7 @@ class DeliberationConfig(BaseModel):
     tool_choice: Any | None = None
     max_tool_calls: int | None = Field(default=None, ge=0)
     coordinator_tools_enabled: bool = False
+    tool_mode: Literal["reject", "experimental_passthrough"] = "reject"
     model_params: dict[str, Any] = Field(default_factory=dict)
     analysis_model_params: dict[str, Any] = Field(default_factory=dict)
     coordinator_model_params: dict[str, Any] = Field(default_factory=dict)
@@ -172,6 +174,8 @@ class DeliberationConfig(BaseModel):
             tool_count=len(self.tools),
             tool_choice=self.tool_choice,
             max_tool_calls=self.max_tool_calls,
+            tool_mode=self.tool_mode,
+            experimental=bool(self.tools) and self.tool_mode == "experimental_passthrough",
         )
 
 
@@ -186,6 +190,8 @@ class ToolTraceInfo(BaseModel):
     tool_count: int = 0
     tool_choice: Any | None = None
     max_tool_calls: int | None = None
+    tool_mode: Literal["reject", "experimental_passthrough"] = "reject"
+    experimental: bool = False
 
 
 class UsageEvent(BaseModel):
@@ -649,7 +655,10 @@ async def _fanout_propose(
     async def call_one(model: str) -> tuple[str, Proposal | Exception]:
         try:
             request = build_propose_prompt(
-                question=config.question, model_id=model, topic=topic
+                question=config.question,
+                model_id=model,
+                topic=topic,
+                conversation_context=config.conversation_context,
             )
             proposal = await _call_model_structured(
                 client=client,
@@ -1342,6 +1351,7 @@ async def run_planning_deliberation(
         request=build_outline_prompt(
             question=config.question,
             max_topics=config.max_topics,
+            conversation_context=config.conversation_context,
         ),
         schema=OutlineResult,
         timeout=config.per_model_timeout,

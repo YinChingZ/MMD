@@ -461,7 +461,39 @@ def test_config_forwards_tools_to_panel_by_default():
         "tool_count": 1,
         "tool_choice": "auto",
         "max_tool_calls": 2,
+        "tool_mode": "reject",
+        "experimental": False,
     }
+
+
+def test_tool_trace_info_defaults_to_reject_mode_metadata():
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+    )
+    info = config.tool_trace_info()
+    assert info.tool_mode == "reject"
+    assert info.experimental is False
+
+
+def test_tool_trace_info_marks_experimental_when_passthrough_enabled():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search provider-managed context.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        tools=[tool],
+        tool_mode="experimental_passthrough",
+    )
+    info = config.tool_trace_info()
+    assert info.tool_mode == "experimental_passthrough"
+    assert info.experimental is True
 
 
 def test_config_can_enable_tools_for_coordinator():

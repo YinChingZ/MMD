@@ -57,6 +57,7 @@ def build_propose_prompt(
     model_id: str,
     max_claims: int = 6,
     topic: Topic | None = None,
+    conversation_context: str | None = None,
 ) -> CompletionRequest:
     scope = _topic_scope(topic)
     system_prompt = "\n\n".join(
@@ -64,6 +65,9 @@ def build_propose_prompt(
         for line in [
             "You are one of several independent models answering a user's question before a multi-model deliberation.",
             "Think independently. Do not try to predict or match what other models might say.",
+            "A conversation context block, if present, is prior background only; the Question line is what you must actually answer."
+            if conversation_context
+            else "",
             scope,
             f"Break your answer into at most {max_claims} discrete claims.",
             "Each claim must be typed as fact, judgment, recommendation, assumption, or risk.",
@@ -74,7 +78,10 @@ def build_propose_prompt(
         ]
         if line
     )
-    user_parts = [f"Question: {question}"]
+    user_parts = []
+    if conversation_context:
+        user_parts.append(f"Conversation context so far:\n{conversation_context}")
+    user_parts.append(f"Question: {question}")
     if scope:
         user_parts.append(scope)
     return CompletionRequest(
@@ -292,10 +299,19 @@ def build_compose_prompt(
     )
 
 
-def build_outline_prompt(*, question: str, max_topics: int = 8) -> CompletionRequest:
+def build_outline_prompt(
+    *,
+    question: str,
+    max_topics: int = 8,
+    conversation_context: str | None = None,
+) -> CompletionRequest:
     system_prompt = "\n\n".join(
-        [
+        line
+        for line in [
             "Break the following question/request down into a bounded list of distinct topics to structure a multi-model deliberation around.",
+            "A conversation context block, if present, is prior background only; the Question line is what you must actually decompose into topics."
+            if conversation_context
+            else "",
             f"Produce at most {max_topics} topics.",
             "Each topic must be a genuinely separate decision area; do not split one decision into multiple overlapping topics.",
             "Give each topic a short title and a one-sentence description of its scope, precise enough that a model addressing only that topic knows what is and is not in scope.",
@@ -303,10 +319,15 @@ def build_outline_prompt(*, question: str, max_topics: int = 8) -> CompletionReq
             "Return ONLY JSON matching this schema, no prose outside the JSON:",
             describe_schema(OutlineResult, "OutlineResult"),
         ]
+        if line
     )
+    user_parts = []
+    if conversation_context:
+        user_parts.append(f"Conversation context so far:\n{conversation_context}")
+    user_parts.append(f"Question: {question}")
     return CompletionRequest(
         system_prompt=system_prompt,
-        user_prompt=f"Question: {question}",
+        user_prompt="\n\n".join(user_parts),
         meta={"phase": "outline", "question": question, "max_topics": max_topics},
     )
 

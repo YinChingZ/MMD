@@ -19,7 +19,7 @@ MMD 的目标是 LiteLLM 生态中的开源、自托管、多模型 deliberation
 | M2' LiteLLM provider 核心 | 完成第一版 | Python/Pydantic `mmd/fusion`、Proxy、Router 注入、usage、trace/callback、异常、timeout/call budget、wheel 和 smoke。 |
 | 原 M3 Web / M4 自建产品化 | 暂停 | 降级为未来 trace viewer / demo；不与 LiteLLM gateway 重复建设。 |
 
-目前的验证基线：Python 69 tests、TypeScript 102 tests、各自构建通过；scripted Proxy smoke 和核心真实模型 smoke 已运行。真实 smoke 未保存质量、成本或 latency artifact，不能作为性能或效果基准。
+目前的验证基线：Python 114 tests（含 8 个真实 Proxy 子进程 e2e test，`litellm[proxy]` 未安装时自动 skip）、TypeScript 102 tests，各自构建通过；scripted Proxy smoke 和核心真实模型 smoke 已运行。真实 smoke 未保存质量、成本或 latency artifact，不能作为性能或效果基准。
 
 ## 当前工作：M2' upstream-readiness
 
@@ -31,13 +31,13 @@ M2' 的目标不是匆忙把 MMD 并入 LiteLLM，而是先形成可独立安装
 
 **工作项**：
 
-1. 显式实现 `completion`、`acompletion`、`streaming`、`astreaming`，使用 LiteLLM 当前签名与传入的 `ModelResponse`；去除以 `mock_response` 二次构造 response 的路径。
-2. 定义 conversation adapter，保留 system/developer、多轮 assistant、tool result 和 text content parts；不支持的 multimodal 类型必须 fail-fast，不得静默丢弃。
-3. 为 `stream=True` 实现诚实 streaming：先完成 deliberation，再产生最终答案 chunks，并标记首 token 前 deliberation 已完成。阶段事件若要暴露，使用独立事件协议而非伪装成 token。
-4. 对 tools 做产品决策：短期显式拒绝，或提供标注为实验性的 passthrough；长期才实现受限 tool loop / result adapter。`max_total_calls` 应在语义上更名或补充全局 tool budget。
-5. 添加 Proxy e2e：normal、stream、callback 仅一次、Router alias/fallback、native error、recursion、budget 和超时。
+1. ✅ 已完成。显式实现 `completion`、`acompletion`，使用 LiteLLM 当前签名与传入的 `ModelResponse`；去除了以 `mock_response` 二次构造 response 的路径（`mmd_litellm/litellm_provider.py` 的 `_finalize_response`/`_populate_model_response`）。
+2. ✅ 已完成。新增 conversation adapter（`mmd_litellm/conversation.py`），保留 system/developer、多轮 assistant、tool result 和 text content parts 作为 deliberation 的背景 context；不支持的 multimodal content part（如 `image_url`）会 fail-fast 抛出 400，不再静默丢弃。
+3. ✅ 已完成。实现了 `streaming`/`astreaming`：先完整跑完 deliberation，再把最终答案按 ~40 字符词边界切块，通过 `GenericStreamingChunk` 逐块返回；`mmd`/`mmd_analysis` 通过终块的 `provider_specific_fields` 暴露。**已验证的 LiteLLM 行为，非 MMD 特有**：调用方必须在请求里设置 `stream_options.include_usage=true` 才能在流中收到 `usage`（标准 OpenAI/LiteLLM 语义，LiteLLM 默认丢弃 usage）。阶段/进度事件仍未实现，保持推迟；这是唯一未做的子项。
+4. ✅ 已完成。对 tools 做了产品决策：默认 `tool_mode="reject"`，请求携带 `tools`/非空 `tool_choice` 时返回 400；调用方可显式设置 `tool_mode="experimental_passthrough"` 退回到透传行为，响应会在 `mmd.tooling.experimental` 中标注。**推迟**：`max_total_calls` 的更名/补充全局 tool budget——由于尚无 tool-execution loop，此刻引入会是针对未构建功能的推测性设计（该想法来自 `docs/research/fusion-litellm-alignment-2026-07-09/report.md`，非权威快照），留到实现真正的 tool loop 时再评估。
+5. ✅ 已完成。新增 Proxy e2e pytest（`python/tests/test_proxy_e2e.py` + `python/tests/conftest.py`），真实启动 `litellm` Proxy 子进程覆盖：normal、stream（含 usage/trace frame 断言）、callback 仅一次、Router alias、native error 4xx 契约、recursion guard、call budget、timeout，共 8 个场景；`litellm[proxy]` 未安装时自动 skip。**已验证的 LiteLLM 行为，写测试前务必确认**：(a) 用 `litellm_settings.callbacks`（而非 `success_callback`）注册 `CustomLogger` 实例——`success_callback` 的自动 async/sync 路由对纯对象实例误判为同步回调，导致 async 回调永远不会触发；(b) client 可见的 JSON 错误体（`ProxyException.to_dict()`）只含 `{message, type, param, code}`，`code` 是 HTTP 状态码字符串，MMD 自身的 `mmd_bad_request` 等 code 不会出现在响应体里，断言只能用状态码 + message 子串。
 
-**验收**：所有支持路径具有 unit + Proxy test；所有不支持路径给出稳定的 4xx 错误；示例可在干净环境只通过安装包和 shim 启动。
+**验收**：所有支持路径具有 unit + Proxy test；所有不支持路径给出稳定的 4xx 错误；示例可在干净环境只通过安装包和 shim 启动。P0 五项已全部完成并通过验证；下一阶段进入 P1。
 
 ### P1 — Fusion 级可用性差距
 

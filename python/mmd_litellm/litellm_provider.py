@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator, Iterator
 
 from pydantic import ValidationError
 
 from .client import LiteLLMCompletionClient
+from .conversation import extract_conversation
 from .errors import (
     MMDProviderAPIError,
     MMDProviderBadRequestError,
@@ -29,11 +30,15 @@ from .response import openai_chat_completion_response
 try:
     import litellm
     from litellm import CustomLLM
+    from litellm.types.utils import ModelResponse
 except ImportError:  # Keep protocol tests runnable without the LiteLLM extra.
     litellm = None
 
     class CustomLLM:  # type: ignore[no-redef]
         pass
+
+    class ModelResponse:  # type: ignore[no-redef]
+        """Placeholder only; never instantiated when litellm isn't installed."""
 
 
 class MMDLiteLLMProvider(CustomLLM):
@@ -51,24 +56,132 @@ class MMDLiteLLMProvider(CustomLLM):
         self.client = client or LiteLLMCompletionClient(router=router)
         self.trace_logger = trace_logger
 
-    def completion(self, *args: Any, **kwargs: Any) -> Any:
+    def completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        model_response: Any | None = None,
+        optional_params: dict[str, Any] | None = None,
+        logging_obj: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.acompletion(*args, **kwargs))
+            return asyncio.run(
+                self.acompletion(
+                    model=model,
+                    messages=messages,
+                    model_response=model_response,
+                    optional_params=optional_params,
+                    logging_obj=logging_obj,
+                    **kwargs,
+                )
+            )
         raise RuntimeError("MMDLiteLLMProvider.completion cannot run inside an event loop")
 
-    async def acompletion(self, *args: Any, **kwargs: Any) -> Any:
-        public_model = _extract_model(args, kwargs)
+    async def acompletion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        model_response: Any | None = None,
+        optional_params: dict[str, Any] | None = None,
+        logging_obj: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        public_model = str(model or "mmd/fusion")
+        response = await self._run_deliberation_and_build_response(
+            public_model=public_model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            extra=kwargs,
+        )
+        return _finalize_response(response, model_response)
+
+    async def astreaming(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        model_response: Any | None = None,
+        optional_params: dict[str, Any] | None = None,
+        logging_obj: Any | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        public_model = str(model or "mmd/fusion")
+        response = await self._run_deliberation_and_build_response(
+            public_model=public_model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            extra=kwargs,
+        )
+        for chunk in _stream_chunks_from_response(response):
+            yield chunk
+
+    def streaming(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        model_response: Any | None = None,
+        optional_params: dict[str, Any] | None = None,
+        logging_obj: Any | None = None,
+        **kwargs: Any,
+    ) -> Iterator[dict[str, Any]]:
         try:
-            return await self._acompletion_impl(public_model, kwargs)
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("MMDLiteLLMProvider.streaming cannot run inside an event loop")
+
+        async def _collect() -> list[dict[str, Any]]:
+            return [
+                chunk
+                async for chunk in self.astreaming(
+                    model=model,
+                    messages=messages,
+                    model_response=model_response,
+                    optional_params=optional_params,
+                    logging_obj=logging_obj,
+                    **kwargs,
+                )
+            ]
+
+        yield from asyncio.run(_collect())
+
+    async def _run_deliberation_and_build_response(
+        self,
+        *,
+        public_model: str,
+        messages: list[dict[str, Any]],
+        optional_params: dict[str, Any] | None,
+        logging_obj: Any | None,
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return await self._acompletion_impl(
+                public_model=public_model,
+                messages=messages,
+                optional_params=optional_params,
+                logging_obj=logging_obj,
+                extra=extra,
+            )
         except MMDProviderError:
             raise
         except Exception as error:
             raise _provider_api_error(public_model, error) from error
 
-    async def _acompletion_impl(self, public_model: str, kwargs: dict[str, Any]) -> Any:
-        optional_params = dict(kwargs.get("optional_params") or {})
+    async def _acompletion_impl(
+        self,
+        *,
+        public_model: str,
+        messages: list[dict[str, Any]],
+        optional_params: dict[str, Any] | None,
+        logging_obj: Any | None,
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged_optional_params = dict(optional_params or {})
         for key in (
             "analysis_models",
             "coordinator_model",
@@ -89,6 +202,7 @@ class MMDLiteLLMProvider(CustomLLM):
             "tool_choice",
             "max_tool_calls",
             "coordinator_tools_enabled",
+            "tool_mode",
             "model_params",
             "analysis_model_params",
             "coordinator_model_params",
@@ -98,13 +212,13 @@ class MMDLiteLLMProvider(CustomLLM):
             "max_log_trace_candidates",
             "mmd_trace_logger",
         ):
-            if key in kwargs:
-                optional_params[key] = kwargs[key]
+            if key in extra:
+                merged_optional_params[key] = extra[key]
 
         config = _build_config(
             public_model=public_model,
-            kwargs=kwargs,
-            optional_params=optional_params,
+            messages=messages,
+            optional_params=merged_optional_params,
         )
         try:
             result = await run_deliberation(config, self.client)
@@ -120,7 +234,7 @@ class MMDLiteLLMProvider(CustomLLM):
         metadata = result.trace_payload() if config.return_trace else None
         analysis = (
             result.analysis_payload()
-            if bool(optional_params.get("return_analysis", False))
+            if bool(merged_optional_params.get("return_analysis", False))
             else None
         )
         response = openai_chat_completion_response(
@@ -131,26 +245,26 @@ class MMDLiteLLMProvider(CustomLLM):
             usage=result.usage.openai_usage(),
         )
         trace_logging = await _emit_trace_logging(
-            enabled=bool(optional_params.get("mmd_log_trace", False)),
+            enabled=bool(merged_optional_params.get("mmd_log_trace", False)),
             payload=result.logging_trace_payload(
                 max_candidates=config.max_log_trace_candidates
             ),
-            request_kwargs=kwargs,
+            request_kwargs={"messages": messages, "metadata": extra.get("metadata")},
             response=response,
             public_model=public_model,
-            optional_params=optional_params,
+            optional_params=merged_optional_params,
             configured_logger=self.trace_logger,
-            logging_obj=kwargs.get("logging_obj"),
+            logging_obj=logging_obj,
         )
         if metadata is not None and trace_logging["attempted"]:
             metadata["trace_logging"] = trace_logging
-        return _maybe_litellm_response(response)
+        return response
 
 
 def _build_config(
     *,
     public_model: str,
-    kwargs: dict[str, Any],
+    messages: list[dict[str, Any]],
     optional_params: dict[str, Any],
 ) -> DeliberationConfig:
     try:
@@ -158,9 +272,23 @@ def _build_config(
         if depth and int(depth) >= 1:
             raise ValueError("recursive MMD invocation is not allowed")
 
-        question = _extract_user_question(kwargs.get("messages") or [])
+        tool_mode = optional_params.get("tool_mode", "reject")
+        has_tool_intent = bool(optional_params.get("tools")) or (
+            optional_params.get("tool_choice") is not None
+        )
+        if has_tool_intent and tool_mode == "reject":
+            raise ValueError(
+                "MMD does not execute a tool-calling loop; this request includes "
+                "tools/tool_choice. Set tool_mode='experimental_passthrough' to opt "
+                "into raw (unexecuted) passthrough of tools/tool_choice to "
+                "panel/coordinator models, or remove tools/tool_choice from the "
+                "request."
+            )
+
+        conversation = extract_conversation(messages or [])
         return DeliberationConfig(
-            question=question,
+            question=conversation.question,
+            conversation_context=conversation.rendered_context_block(),
             analysis_models=optional_params.get("analysis_models") or [],
             coordinator_model=optional_params.get("coordinator_model"),
             preset=optional_params.get("preset"),
@@ -187,6 +315,7 @@ def _build_config(
             coordinator_tools_enabled=optional_params.get(
                 "coordinator_tools_enabled", False
             ),
+            tool_mode=tool_mode,
             model_params=optional_params.get("model_params") or {},
             analysis_model_params=optional_params.get("analysis_model_params") or {},
             coordinator_model_params=optional_params.get(
@@ -203,32 +332,6 @@ def _build_config(
             model=public_model,
             details={"cause": type(error).__name__},
         ) from error
-
-
-def _extract_model(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
-    model = kwargs.get("model")
-    if model is None and args:
-        model = args[0]
-    return str(model or "mmd/fusion")
-
-
-def _extract_user_question(messages: list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            text_parts = [
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            ]
-            text = "\n".join(part for part in text_parts if part)
-            if text:
-                return text
-    raise ValueError("MMD provider requires at least one user message with text content")
 
 
 def _provider_quorum_error(
@@ -275,24 +378,102 @@ def _provider_api_error(public_model: str, error: Exception) -> MMDProviderAPIEr
     )
 
 
-def _maybe_litellm_response(response: dict) -> Any:
+def _finalize_response(response: dict, model_response: Any | None) -> Any:
+    """Populate the caller-supplied ``ModelResponse`` in place, or build a fresh one.
+
+    LiteLLM's ``CustomLLM`` dispatch always passes a ``model_response`` object to
+    populate. ``ModelResponse`` supports attribute assignment but not ``__setitem__``
+    (e.g. ``mr.model = x`` works, ``mr["model"] = x`` raises), so mutation below is
+    attribute-based throughout.
+    """
+    if model_response is not None:
+        _populate_model_response(model_response, response)
+        return model_response
     if litellm is None:
         return response
-    try:
-        model_response = litellm.completion(
-            model="openai/gpt-3.5-turbo",
-            messages=[{"role": "user", "content": "MMD response wrapper"}],
-            mock_response=response["choices"][0]["message"]["content"],
-        )
-        model_response["model"] = response["model"]
-        model_response["usage"] = response["usage"]
-        if "mmd" in response:
-            model_response["mmd"] = response["mmd"]
-        if "mmd_analysis" in response:
-            model_response["mmd_analysis"] = response["mmd_analysis"]
-        return model_response
-    except Exception:
-        return response
+    fresh = ModelResponse()
+    _populate_model_response(fresh, response)
+    return fresh
+
+
+def _populate_model_response(target: Any, response: dict) -> None:
+    message = response["choices"][0]["message"]
+    target.id = response["id"]
+    target.created = response["created"]
+    target.model = response["model"]
+    target.object = response.get("object", "chat.completion")
+    choice = target.choices[0]
+    choice.finish_reason = response["choices"][0].get("finish_reason", "stop")
+    choice.message.role = message.get("role", "assistant")
+    choice.message.content = message["content"]
+    if response.get("usage"):
+        target.usage = response["usage"]
+    if "mmd" in response:
+        target.mmd = response["mmd"]
+    if "mmd_analysis" in response:
+        target.mmd_analysis = response["mmd_analysis"]
+
+
+def _chunk_text(text: str, chunk_size: int = 40) -> list[str]:
+    """Greedily pack whitespace-split words into pieces <= chunk_size chars.
+
+    An over-long single word is kept whole as its own chunk. Always returns at
+    least one chunk (possibly "") so terminal-chunk logic stays uniform for
+    empty/short content. Internal whitespace runs (including newlines) are
+    normalized to single spaces. Every chunk but the last carries a trailing
+    space so that raw concatenation (`"".join(chunks)`, as a real streaming
+    client does with successive `delta.content` values) reconstructs the
+    original text exactly -- callers must NOT re-join with an extra separator.
+    """
+    words = text.split()
+    if not words:
+        return [""]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for word in words:
+        added_len = len(word) if not current else len(word) + 1
+        if current and current_len + added_len > chunk_size:
+            chunks.append(" ".join(current) + " ")
+            current, current_len = [word], len(word)
+        else:
+            current.append(word)
+            current_len += added_len
+    chunks.append(" ".join(current))
+    return chunks
+
+
+def _stream_chunks_from_response(response: dict) -> list[dict[str, Any]]:
+    """Translate the non-streaming `response` dict into GenericStreamingChunk-shaped
+    dicts. Streaming and non-streaming expose identical content/usage/trace/analysis
+    -- only delivery shape differs. `mmd`/`mmd_analysis`, when present, are exposed via
+    `provider_specific_fields` on the terminal chunk (LiteLLM's CustomStreamWrapper
+    applies these via setattr onto that chunk's stream object).
+    """
+    message = response["choices"][0]["message"]
+    pieces = _chunk_text(message.get("content") or "")
+
+    chunks: list[dict[str, Any]] = [
+        {"text": piece, "is_finished": False, "finish_reason": "", "usage": None}
+        for piece in pieces[:-1]
+    ]
+
+    provider_specific_fields: dict[str, Any] = {}
+    if "mmd" in response:
+        provider_specific_fields["mmd"] = response["mmd"]
+    if "mmd_analysis" in response:
+        provider_specific_fields["mmd_analysis"] = response["mmd_analysis"]
+
+    terminal: dict[str, Any] = {
+        "text": pieces[-1],
+        "is_finished": True,
+        "finish_reason": response["choices"][0].get("finish_reason", "stop"),
+        "usage": response.get("usage"),
+    }
+    if provider_specific_fields:
+        terminal["provider_specific_fields"] = provider_specific_fields
+    chunks.append(terminal)
+    return chunks
 
 
 async def _emit_trace_logging(
