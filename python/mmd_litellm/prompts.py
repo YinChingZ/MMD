@@ -381,3 +381,36 @@ def build_section_compose_prompt(
             "position_changes": position_changes,
         },
     )
+
+
+def build_direct_answer_prompt(
+    *,
+    question: str,
+    conversation_context: str | None = None,
+) -> CompletionRequest:
+    """Plain-text prompt for `deliberation_policy="off"`'s single-model bypass.
+
+    Deliberately has no JSON schema instruction, unlike every other builder in this
+    module: this path exists to be the cheapest possible answer, not another
+    structured-output round trip.
+    """
+    system_prompt = "\n\n".join(
+        line
+        for line in [
+            "You are answering a user's question directly. No multi-model deliberation is being run for this request.",
+            "A conversation context block, if present, is prior background only; the Question line is what you must actually answer."
+            if conversation_context
+            else "",
+            "Answer directly and concisely in plain text. Do not output JSON.",
+        ]
+        if line
+    )
+    user_parts = []
+    if conversation_context:
+        user_parts.append(f"Conversation context so far:\n{conversation_context}")
+    user_parts.append(f"Question: {question}")
+    return CompletionRequest(
+        system_prompt=system_prompt,
+        user_prompt="\n\n".join(user_parts),
+        meta={"phase": "direct_answer", "question": question},
+    )

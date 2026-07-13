@@ -16,6 +16,7 @@ class TokenUsage(BaseModel):
 class CompletionOutput(BaseModel):
     text: str
     usage: TokenUsage | None = None
+    cost_usd: float | None = None
 
 
 class LiteLLMCompletionClient:
@@ -57,7 +58,38 @@ class LiteLLMCompletionClient:
         return CompletionOutput(
             text=_extract_content(response),
             usage=_extract_usage(response),
+            cost_usd=_extract_cost(response),
         )
+
+    def discover_model_groups(self) -> list[str] | None:
+        """Best-effort discovery of caller-facing model group/alias names known to
+        the injected Router, for default-panel resolution when `analysis_models` is
+        omitted (see `litellm_provider._resolve_analysis_models`).
+
+        Returns `None` when there is nothing safe to discover: no router was
+        injected (direct `litellm.acompletion`/bare-SDK mode has no notion of
+        "available models"), or introspection failed/behaved unexpectedly. This is
+        an informally-stable LiteLLM surface (heavily relied on by LiteLLM's own
+        Proxy code), not a formally versioned public API - any failure here must
+        degrade to "no default panel available," never crash the request.
+
+        Deliberately reads `router.get_model_names()` and NEVER
+        `router.model_list` / `router.get_model_list()`: those return live,
+        resolved deployment configs including plaintext `litellm_params.api_key`
+        (confirmed empirically against litellm==1.91.0). `get_model_names()`
+        returns only caller-facing `model_name` group/alias strings, one entry per
+        deployment (so a multi-deployment group appears more than once) - deduped
+        here while preserving order (`dict.fromkeys`, not `set()`), since
+        downstream truncation (`DeliberationConfig.validate_and_limit_models`)
+        takes the first N names.
+        """
+        if self.router is None:
+            return None
+        try:
+            names = self.router.get_model_names()
+            return list(dict.fromkeys(names))
+        except Exception:
+            return None
 
 
 def coerce_completion_output(value: str | CompletionOutput) -> CompletionOutput:
@@ -98,6 +130,24 @@ def _extract_usage(response: Any) -> TokenUsage | None:
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
     )
+
+
+def _extract_cost(response: Any) -> float | None:
+    """Read LiteLLM's own already-computed cost off the response, if present.
+
+    LiteLLM populates `_hidden_params["response_cost"]` on every real completion
+    via its own pricing map (the same one `litellm.cost_per_token` reads) - reusing
+    it here means MMD never runs a second, possibly-diverging cost computation for
+    calls that actually went through LiteLLM. It's `None` when LiteLLM couldn't
+    price the model (mirrors `litellm.cost_per_token` being unable to either).
+    """
+    hidden_params = _get(response, "_hidden_params")
+    if hidden_params is None:
+        return None
+    cost = _get(hidden_params, "response_cost")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        return float(cost)
+    return None
 
 
 def _int_or_zero(value: Any) -> int:

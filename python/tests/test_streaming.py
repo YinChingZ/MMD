@@ -5,6 +5,7 @@ import pytest
 from mmd_litellm.errors import (
     MMDProviderBadRequestError,
     MMDProviderBudgetError,
+    MMDProviderQuorumError,
     MMDProviderTimeoutError,
 )
 from mmd_litellm.litellm_provider import (
@@ -126,6 +127,47 @@ def test_astreaming_yields_chunks_matching_acompletion_content_and_usage():
     assert stream_mmd["mode"] == response["mmd"]["mode"]
 
 
+def test_astreaming_yields_analysis_payload_in_terminal_chunk():
+    provider = MMDLiteLLMProvider(client=UsageScriptedClient())
+    chunks = _collect_async(
+        provider.astreaming(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "return_analysis": True,
+            },
+        )
+    )
+    terminal = chunks[-1]
+    assert terminal["is_finished"] is True
+    analysis = terminal["provider_specific_fields"]["mmd_analysis"]
+    assert analysis["analysis_version"] == 1
+    assert analysis["protocol"] == "mmd.analysis.v1"
+    assert analysis["mode"] == "quick"
+
+
+def test_astreaming_supports_deliberation_policy_off_end_to_end():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    chunks = _collect_async(
+        provider.astreaming(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "deliberation_policy": "off",
+                "return_trace": True,
+            },
+        )
+    )
+    terminal = chunks[-1]
+    assert terminal["is_finished"] is True
+    mmd = terminal["provider_specific_fields"]["mmd"]
+    assert mmd["policy"]["policy"] == "off"
+    assert mmd["policy"]["deliberated"] is False
+    assert mmd["proposals"] == []
+
+
 def test_astreaming_maps_bad_request_error_before_first_chunk():
     provider = MMDLiteLLMProvider(client=ScriptedClient())
 
@@ -172,6 +214,29 @@ def test_astreaming_maps_run_timeout_error():
                 },
             )
         )
+
+
+def test_astreaming_maps_quorum_not_met_error():
+    provider = MMDLiteLLMProvider(
+        client=ScriptedClient(fail_models={"model_b", "model_c"})
+    )
+
+    with pytest.raises(MMDProviderQuorumError) as exc_info:
+        _collect_async(
+            provider.astreaming(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b", "model_c"],
+                },
+            )
+        )
+
+    error = exc_info.value
+    payload = error.error_payload()
+    assert error.status_code == 500
+    assert payload["code"] == "mmd_quorum_not_met"
+    assert payload["mmd"]["phase"] == "propose"
 
 
 def test_streaming_sync_wrapper_yields_same_chunks_as_astreaming():

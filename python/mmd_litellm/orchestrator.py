@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, Field, model_validator
 
 from .client import CompletionOutput, TokenUsage, coerce_completion_output
 from .consensus import ClassifyCandidateResult, classify_candidate
+from .cost import estimate_call_cost
 from .ids import make_run_id, scoped_id
+from .policy import DeliberationPolicy, PolicyTraceInfo, resolve_deliberation_policy
 from .prompts import (
     CompletionRequest,
     build_compose_prompt,
     build_critique_prompt,
+    build_direct_answer_prompt,
     build_normalize_prompt,
     build_outline_prompt,
     build_propose_prompt,
@@ -23,6 +27,7 @@ from .quorum import QuorumCheck, check_quorum
 from .schemas import (
     Ballot,
     CandidateClaim,
+    ConfidenceSummary,
     Critique,
     FinalAnswer,
     NormalizeResult,
@@ -61,6 +66,16 @@ PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 
+def _is_mmd_alias(model: str) -> bool:
+    """True for MMD's own recursive-invocation aliases (`mmd-fusion` / `mmd/*`).
+
+    Shared by `DeliberationConfig.validate_and_limit_models`'s recursion guard and
+    `litellm_provider._build_config`'s default-panel discovery filter, so the same
+    check isn't duplicated in two places.
+    """
+    return model == "mmd-fusion" or model.startswith("mmd/")
+
+
 class CompletionClient(Protocol):
     async def acomplete(
         self, model: str, request: CompletionRequest, *, timeout: float | None = None
@@ -75,6 +90,7 @@ class DeliberationConfig(BaseModel):
     coordinator_model: str | None = None
     preset: PresetName | None = None
     mmd_mode: MMDMode = "quick"
+    deliberation_policy: DeliberationPolicy = "required"
     quorum_ratio: float = Field(default=0.66, gt=0, le=1)
     per_model_timeout: float | None = Field(default=None, gt=0)
     max_run_timeout: float | None = Field(default=None, gt=0)
@@ -90,6 +106,7 @@ class DeliberationConfig(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     tool_choice: Any | None = None
     max_tool_calls: int | None = Field(default=None, ge=0)
+    parallel_tool_calls: bool | None = None
     coordinator_tools_enabled: bool = False
     tool_mode: Literal["reject", "experimental_passthrough"] = "reject"
     model_params: dict[str, Any] = Field(default_factory=dict)
@@ -124,11 +141,7 @@ class DeliberationConfig(BaseModel):
         configured = [*self.analysis_models]
         if self.coordinator_model:
             configured.append(self.coordinator_model)
-        recursive = [
-            model
-            for model in configured
-            if model == "mmd-fusion" or model.startswith("mmd/")
-        ]
+        recursive = [model for model in configured if _is_mmd_alias(model)]
         if recursive:
             raise ValueError(
                 "analysis/coordinator models must be real base models, not MMD aliases: "
@@ -162,6 +175,8 @@ class DeliberationConfig(BaseModel):
                 params["tool_choice"] = self.tool_choice
             if self.max_tool_calls is not None:
                 params["max_tool_calls"] = self.max_tool_calls
+            if self.parallel_tool_calls is not None:
+                params["parallel_tool_calls"] = self.parallel_tool_calls
 
         return {key: value for key, value in params.items() if value is not None}
 
@@ -174,6 +189,7 @@ class DeliberationConfig(BaseModel):
             tool_count=len(self.tools),
             tool_choice=self.tool_choice,
             max_tool_calls=self.max_tool_calls,
+            parallel_tool_calls=self.parallel_tool_calls,
             tool_mode=self.tool_mode,
             experimental=bool(self.tools) and self.tool_mode == "experimental_passthrough",
         )
@@ -190,6 +206,7 @@ class ToolTraceInfo(BaseModel):
     tool_count: int = 0
     tool_choice: Any | None = None
     max_tool_calls: int | None = None
+    parallel_tool_calls: bool | None = None
     tool_mode: Literal["reject", "experimental_passthrough"] = "reject"
     experimental: bool = False
 
@@ -199,8 +216,12 @@ class UsageEvent(BaseModel):
     phase: str
     model_id: str
     topic_id: str | None = None
+    role: Literal["panel", "coordinator"]
     usage: TokenUsage | None = None
     usage_unavailable: bool = False
+    duration_seconds: float | None = None
+    cost_usd: float | None = None
+    cost_unavailable: bool = False
 
 
 class UsageSummary(BaseModel):
@@ -219,6 +240,28 @@ class UsageSummary(BaseModel):
         }
 
 
+class RolePerformance(BaseModel):
+    role: Literal["panel", "coordinator", "overall"]
+    call_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    success_rate: float | None = None
+    partial: bool = False
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    total_duration_seconds: float = 0.0
+    cost_usd: float | None = None
+    cost_unavailable: bool = False
+    cost_unavailable_count: int = 0
+
+
+class PerformanceSummary(BaseModel):
+    panel: RolePerformance
+    coordinator: RolePerformance
+    overall: RolePerformance
+
+
 class UsageTracker:
     def __init__(self) -> None:
         self.events: list[UsageEvent] = []
@@ -229,15 +272,28 @@ class UsageTracker:
         model: str,
         request: CompletionRequest,
         usage: TokenUsage | None,
+        duration_seconds: float,
+        precomputed_cost_usd: float | None = None,
     ) -> None:
+        phase = str(request.meta.get("phase", "unknown"))
+        role: Literal["panel", "coordinator"] = (
+            "panel" if phase in PANEL_PHASES else "coordinator"
+        )
+        cost_estimate = estimate_call_cost(
+            model, usage, precomputed_cost_usd=precomputed_cost_usd
+        )
         self.events.append(
             UsageEvent(
                 call_index=len(self.events),
-                phase=str(request.meta.get("phase", "unknown")),
+                phase=phase,
                 model_id=model,
                 topic_id=request.meta.get("topic_id"),
+                role=role,
                 usage=usage,
                 usage_unavailable=usage is None,
+                duration_seconds=duration_seconds,
+                cost_usd=cost_estimate.cost_usd,
+                cost_unavailable=cost_estimate.cost_unavailable,
             )
         )
 
@@ -271,9 +327,17 @@ class UsageCollectingClient:
     async def acomplete(
         self, model: str, request: CompletionRequest, *, timeout: float | None = None
     ) -> str | CompletionOutput:
+        start = time.monotonic()
         output = await self.client.acomplete(model, request, timeout=timeout)
+        duration_seconds = time.monotonic() - start
         completion = coerce_completion_output(output)
-        self.tracker.record(model=model, request=request, usage=completion.usage)
+        self.tracker.record(
+            model=model,
+            request=request,
+            usage=completion.usage,
+            duration_seconds=duration_seconds,
+            precomputed_cost_usd=completion.cost_usd,
+        )
         return output
 
 
@@ -348,6 +412,8 @@ class DeliberationResult(BaseModel):
     plan_document: PlanDocument | None = None
     usage: UsageSummary = Field(default_factory=UsageSummary)
     tooling: ToolTraceInfo = Field(default_factory=ToolTraceInfo)
+    policy: PolicyTraceInfo | None = None
+    performance: PerformanceSummary | None = None
 
     def trace_payload(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"final"}, exclude_none=True)
@@ -456,6 +522,11 @@ class DeliberationResult(BaseModel):
             ),
             "notable_unique_points": _notable_unique_points(
                 self.normalize, self.classifications, self.proposals
+            ),
+            "performance": (
+                self.performance.model_dump(mode="json")
+                if self.performance is not None
+                else None
             ),
             "limitations": _analysis_limitations(self),
         }
@@ -608,6 +679,19 @@ async def _call_model_structured(
     return await call_structured(
         complete, schema, max_repair_attempts=max_repair_attempts
     )
+
+
+async def _call_model_raw(
+    *,
+    client: CompletionClient,
+    model: str,
+    request: CompletionRequest,
+    timeout: float | None,
+    call_params: dict[str, Any] | None = None,
+) -> str:
+    base_request = request.with_litellm_params(call_params or {})
+    output = await client.acomplete(model, base_request, timeout=timeout)
+    return coerce_completion_output(output).text
 
 
 def _stamp_proposal(
@@ -943,12 +1027,133 @@ def _notable_unique_points(
     return unique_points
 
 
+def _compute_performance_summary(result: DeliberationResult) -> PerformanceSummary:
+    """Per-role (panel/coordinator) tokens, cost, duration, success rate, partial status.
+
+    Known asymmetry, by construction: coordinator-role phases (`normalize`,
+    `compose`, `outline`, `section_compose`, `direct_answer`) are single calls with
+    no try/except around them, unlike panel-role fan-out phases - a coordinator
+    call failure aborts the whole `run_deliberation()` call before any
+    `DeliberationResult` exists. So `coordinator.failure_count` is always 0 and
+    `coordinator.partial` is always False in any *returned* result; there is no
+    "coordinator partially failed" state to represent. Likewise, a planning-mode
+    topic that fails before completing (e.g. quorum not met) loses its per-model
+    failure detail - visible only as a string in `failed_topics`, not attributed here.
+    """
+    buckets: dict[str, dict[str, Any]] = {
+        role: {
+            "success_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "duration": 0.0,
+            "cost_usd": 0.0,
+            "cost_present": False,
+            "cost_unavailable_count": 0,
+        }
+        for role in ("panel", "coordinator")
+    }
+    for event in result.usage.events:
+        bucket = buckets[event.role]
+        bucket["success_count"] += 1
+        if event.usage is not None:
+            bucket["prompt_tokens"] += event.usage.prompt_tokens
+            bucket["completion_tokens"] += event.usage.completion_tokens
+            bucket["total_tokens"] += event.usage.total_tokens
+        if event.duration_seconds is not None:
+            bucket["duration"] += event.duration_seconds
+        if event.cost_unavailable:
+            bucket["cost_unavailable_count"] += 1
+        elif event.cost_usd is not None:
+            bucket["cost_usd"] += event.cost_usd
+            bucket["cost_present"] = True
+
+    failure_counts = {"panel": 0, "coordinator": 0}
+
+    def _tally_failures(failures: dict[str, list[PhaseFailure]]) -> None:
+        for phase, phase_failures in failures.items():
+            role = "panel" if phase in PANEL_PHASES else "coordinator"
+            failure_counts[role] += len(phase_failures)
+
+    _tally_failures(result.failures)
+    for topic_result in result.topics:
+        _tally_failures(topic_result.failures)
+
+    partial = {"panel": False, "coordinator": False}
+
+    def _tally_partial(quorum: dict[str, QuorumCheck]) -> None:
+        for check in quorum.values():
+            if check.partial:
+                partial["panel"] = True
+
+    _tally_partial(result.quorum)
+    for topic_result in result.topics:
+        _tally_partial(topic_result.quorum)
+
+    def _role_performance(role: Literal["panel", "coordinator"]) -> RolePerformance:
+        bucket = buckets[role]
+        success_count = int(bucket["success_count"])
+        failure_count = failure_counts[role]
+        call_count = success_count + failure_count
+        return RolePerformance(
+            role=role,
+            call_count=call_count,
+            success_count=success_count,
+            failure_count=failure_count,
+            success_rate=(success_count / call_count) if call_count > 0 else None,
+            partial=partial[role],
+            prompt_tokens=int(bucket["prompt_tokens"]),
+            completion_tokens=int(bucket["completion_tokens"]),
+            total_tokens=int(bucket["total_tokens"]),
+            total_duration_seconds=float(bucket["duration"]),
+            cost_usd=float(bucket["cost_usd"]) if bucket["cost_present"] else None,
+            cost_unavailable=bool(bucket["cost_unavailable_count"]),
+            cost_unavailable_count=int(bucket["cost_unavailable_count"]),
+        )
+
+    panel = _role_performance("panel")
+    coordinator = _role_performance("coordinator")
+    combined_calls = panel.call_count + coordinator.call_count
+    combined_success = panel.success_count + coordinator.success_count
+    combined_cost_present = panel.cost_usd is not None or coordinator.cost_usd is not None
+    overall = RolePerformance(
+        role="overall",
+        call_count=combined_calls,
+        success_count=combined_success,
+        failure_count=panel.failure_count + coordinator.failure_count,
+        success_rate=(combined_success / combined_calls) if combined_calls > 0 else None,
+        partial=panel.partial or coordinator.partial,
+        prompt_tokens=panel.prompt_tokens + coordinator.prompt_tokens,
+        completion_tokens=panel.completion_tokens + coordinator.completion_tokens,
+        total_tokens=panel.total_tokens + coordinator.total_tokens,
+        total_duration_seconds=panel.total_duration_seconds
+        + coordinator.total_duration_seconds,
+        cost_usd=(
+            (panel.cost_usd or 0.0) + (coordinator.cost_usd or 0.0)
+            if combined_cost_present
+            else None
+        ),
+        cost_unavailable=panel.cost_unavailable or coordinator.cost_unavailable,
+        cost_unavailable_count=panel.cost_unavailable_count
+        + coordinator.cost_unavailable_count,
+    )
+    return PerformanceSummary(panel=panel, coordinator=coordinator, overall=overall)
+
+
 def _analysis_limitations(result: DeliberationResult) -> list[str]:
     limitations = [
         "This analysis is derived deterministically from MMD consensus data; it is not a separate factual verification step."
     ]
     if result.usage.usage_unavailable:
         limitations.append("Some underlying model calls did not report token usage.")
+    if result.performance is not None and result.performance.overall.cost_unavailable:
+        limitations.append(
+            "Cost estimates were unavailable for some model calls (litellm not installed or the model is not in litellm's pricing map)."
+        )
+    if result.policy is not None and not result.policy.deliberated:
+        limitations.append(
+            f"deliberation_policy={result.policy.policy}: no cross-model consensus was computed for this response."
+        )
     for phase, quorum in result.quorum.items():
         if quorum.partial:
             limitations.append(f'Phase "{phase}" met quorum with partial responses.')
@@ -974,6 +1179,48 @@ def _analysis_limitations(result: DeliberationResult) -> list[str]:
         )
         limitations.append(f"Planning mode omitted failed topics: {failed_topics}.")
     return limitations
+
+
+async def _run_single_model_completion(
+    config: DeliberationConfig, client: CompletionClient
+) -> DeliberationResult:
+    """`deliberation_policy` off/auto-skip path: one direct call, no fan-out."""
+    usage_tracker = UsageTracker()
+    client = UsageCollectingClient(client, usage_tracker)
+    run_id = make_run_id()
+    coordinator = config.coordinator_model or config.analysis_models[0]
+
+    text = await _call_model_raw(
+        client=client,
+        model=coordinator,
+        request=build_direct_answer_prompt(
+            question=config.question,
+            conversation_context=config.conversation_context,
+        ),
+        timeout=config.per_model_timeout,
+        call_params=config.call_params_for_phase("direct_answer"),
+    )
+    final = FinalAnswer(
+        final_answer=text,
+        confidence_summary=ConfidenceSummary(
+            consensus_strength="high",
+            notes="deliberation_policy=off: single-model direct response; no cross-model consensus was computed.",
+        ),
+    )
+
+    return DeliberationResult(
+        run_id=run_id,
+        question=config.question,
+        mode=config.mmd_mode,
+        proposals=[],
+        normalize=NormalizeResult(candidate_claims=[]),
+        classifications={},
+        final=final,
+        quorum={},
+        failures={},
+        usage=usage_tracker.summary(),
+        tooling=config.tool_trace_info(),
+    )
 
 
 async def run_quick_deliberation(
@@ -1457,7 +1704,13 @@ async def run_deliberation(
     if config.max_total_calls is not None:
         client = CallLimitedClient(client, config.max_total_calls)
 
-    async def run_mode() -> DeliberationResult:
+    policy_decision = resolve_deliberation_policy(
+        config.deliberation_policy, config.question, config.conversation_context
+    )
+
+    async def run_selected() -> DeliberationResult:
+        if not policy_decision.deliberated:
+            return await _run_single_model_completion(config, client)
         if config.mmd_mode == "quick":
             return await run_quick_deliberation(config, client)
         if config.mmd_mode == "standard":
@@ -1467,8 +1720,16 @@ async def run_deliberation(
         raise NotImplementedError(f"unsupported mmd_mode: {config.mmd_mode}")
 
     if config.max_run_timeout is None:
-        return await run_mode()
-    try:
-        return await asyncio.wait_for(run_mode(), timeout=config.max_run_timeout)
-    except asyncio.TimeoutError as error:
-        raise DeliberationTimeoutError(config.max_run_timeout) from error
+        result = await run_selected()
+    else:
+        try:
+            result = await asyncio.wait_for(
+                run_selected(), timeout=config.max_run_timeout
+            )
+        except asyncio.TimeoutError as error:
+            raise DeliberationTimeoutError(config.max_run_timeout) from error
+
+    performance = _compute_performance_summary(result)
+    return result.model_copy(
+        update={"policy": policy_decision, "performance": performance}
+    )

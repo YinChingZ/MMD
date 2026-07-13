@@ -104,6 +104,8 @@ def test_extract_conversation_renders_system_history_and_tool_results():
 
 
 def test_extract_conversation_treats_toolcall_only_assistant_message_as_empty_turn():
+    # Deliberately has no "tool_calls" key at all (distinct from the populated-
+    # tool_calls tests below) - this is the "no content, no tool_calls" case.
     conversation = extract_conversation(
         [
             {"role": "user", "content": "Search for X."},
@@ -113,3 +115,74 @@ def test_extract_conversation_treats_toolcall_only_assistant_message_as_empty_tu
     )
     assert conversation.question == "Now summarize."
     assert conversation.rendered_context_block() is not None
+
+
+def test_extract_conversation_renders_developer_role_in_context():
+    conversation = extract_conversation(
+        [
+            {"role": "developer", "content": "Follow the internal style guide."},
+            {"role": "user", "content": "What should we build next?"},
+        ]
+    )
+    context = conversation.rendered_context_block()
+    assert context is not None
+    assert "[developer] Follow the internal style guide." in context
+
+
+def test_extract_conversation_renders_name_field_when_present():
+    conversation = extract_conversation(
+        [
+            {"role": "user", "content": "What tool should I call?", "name": "alice"},
+            {"role": "assistant", "content": "Use search."},
+        ]
+    )
+    context = conversation.rendered_context_block()
+    assert context is not None
+    assert "user, name=alice" in context
+
+
+def test_extract_conversation_renders_tool_calls_on_assistant_message():
+    conversation = extract_conversation(
+        [
+            {"role": "user", "content": "Search for X."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query": "X"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "Now summarize."},
+        ]
+    )
+    context = conversation.rendered_context_block()
+    assert context is not None
+    assert 'requested tool calls: web_search({"query": "X"})' in context
+
+
+def test_extract_conversation_skips_malformed_tool_call_entries_without_raising():
+    conversation = extract_conversation(
+        [
+            {"role": "user", "content": "Search for X."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "call_1"},  # missing "function"
+                    "not-a-dict",
+                    {"id": "call_2", "function": {"arguments": "{}"}},  # missing "name"
+                ],
+            },
+            {"role": "user", "content": "Now summarize."},
+        ]
+    )
+    context = conversation.rendered_context_block()
+    assert context is not None
+    assert "requested tool calls" not in context

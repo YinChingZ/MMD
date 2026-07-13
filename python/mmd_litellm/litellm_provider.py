@@ -23,6 +23,7 @@ from .orchestrator import (
     DeliberationTimeoutError,
     DeliberationConfig,
     QuorumNotMetError,
+    _is_mmd_alias,
     run_deliberation,
 )
 from .response import openai_chat_completion_response
@@ -187,6 +188,7 @@ class MMDLiteLLMProvider(CustomLLM):
             "coordinator_model",
             "preset",
             "mmd_mode",
+            "deliberation_policy",
             "quorum_ratio",
             "per_model_timeout",
             "max_run_timeout",
@@ -201,8 +203,10 @@ class MMDLiteLLMProvider(CustomLLM):
             "tools",
             "tool_choice",
             "max_tool_calls",
+            "parallel_tool_calls",
             "coordinator_tools_enabled",
             "tool_mode",
+            "response_format",
             "model_params",
             "analysis_model_params",
             "coordinator_model_params",
@@ -219,6 +223,7 @@ class MMDLiteLLMProvider(CustomLLM):
             public_model=public_model,
             messages=messages,
             optional_params=merged_optional_params,
+            client=self.client,
         )
         try:
             result = await run_deliberation(config, self.client)
@@ -261,11 +266,49 @@ class MMDLiteLLMProvider(CustomLLM):
         return response
 
 
+def _resolve_analysis_models(
+    *,
+    explicit_models: list[str],
+    client: CompletionClient | None,
+    public_model: str,
+) -> list[str]:
+    """`analysis_models` is optional as of the default-panel round: when the caller
+    omits it, attempt Router-backed discovery via `client.discover_model_groups()`
+    (duck-typed - only `LiteLLMCompletionClient` implements it; test doubles such
+    as `ScriptedClient`/`UsageScriptedClient`/`SlowScriptedClient` have no such
+    method, so `groups` stays `None` and behavior is unchanged for them).
+
+    Never invents/hardcodes a vendor model list. Falls through to today's
+    required-field `ValidationError` (raised later by `DeliberationConfig`) when
+    there is nothing safe to discover - i.e. no router (direct
+    `litellm.acompletion`/bare-SDK mode).
+    """
+    if explicit_models:
+        return explicit_models
+
+    discover = getattr(client, "discover_model_groups", None)
+    groups = discover() if callable(discover) else None
+    if not groups:
+        return []
+
+    filtered = [
+        name for name in groups if not _is_mmd_alias(name) and name != public_model
+    ]
+    if not filtered:
+        raise ValueError(
+            "MMD could not discover a default panel from the LiteLLM Router's "
+            "configured models (none remained after excluding this MMD "
+            "deployment's own alias); provide analysis_models explicitly."
+        )
+    return filtered
+
+
 def _build_config(
     *,
     public_model: str,
     messages: list[dict[str, Any]],
     optional_params: dict[str, Any],
+    client: CompletionClient | None = None,
 ) -> DeliberationConfig:
     try:
         depth = optional_params.get("mmd_deliberation_depth", 0)
@@ -285,14 +328,30 @@ def _build_config(
                 "request."
             )
 
+        if optional_params.get("response_format") is not None:
+            raise ValueError(
+                "MMD does not support response_format; this request includes "
+                "response_format, which MMD does not forward to panel/coordinator "
+                "models or interpret itself. Unlike tools/tool_choice, there is no "
+                "passthrough option for response_format. Remove response_format "
+                "from the request."
+            )
+
         conversation = extract_conversation(messages or [])
         return DeliberationConfig(
             question=conversation.question,
             conversation_context=conversation.rendered_context_block(),
-            analysis_models=optional_params.get("analysis_models") or [],
+            analysis_models=_resolve_analysis_models(
+                explicit_models=optional_params.get("analysis_models") or [],
+                client=client,
+                public_model=public_model,
+            ),
             coordinator_model=optional_params.get("coordinator_model"),
             preset=optional_params.get("preset"),
             mmd_mode=optional_params.get("mmd_mode", "quick"),
+            deliberation_policy=optional_params.get(
+                "deliberation_policy", "required"
+            ),
             quorum_ratio=optional_params.get("quorum_ratio", 0.66),
             per_model_timeout=optional_params.get("per_model_timeout"),
             max_run_timeout=optional_params.get("max_run_timeout"),
@@ -312,6 +371,7 @@ def _build_config(
             tools=optional_params.get("tools") or [],
             tool_choice=optional_params.get("tool_choice"),
             max_tool_calls=optional_params.get("max_tool_calls"),
+            parallel_tool_calls=optional_params.get("parallel_tool_calls"),
             coordinator_tools_enabled=optional_params.get(
                 "coordinator_tools_enabled", False
             ),

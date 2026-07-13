@@ -6,6 +6,7 @@ from .consensus import (
     ConsensusThresholds,
     classify_candidate,
 )
+from .cost import CostEstimate, estimate_call_cost
 from .errors import (
     MMDProviderAPIError,
     MMDProviderBadRequestError,
@@ -21,20 +22,32 @@ from .orchestrator import (
     DeliberationResult,
     CallBudgetExceededError,
     DeliberationTimeoutError,
+    PerformanceSummary,
     QuorumNotMetError,
+    RolePerformance,
     run_deliberation,
     run_planning_deliberation,
     run_quick_deliberation,
     run_standard_deliberation,
 )
+from .policy import (
+    AutoPolicyDecision,
+    DeliberationPolicy,
+    PolicyTraceInfo,
+    decide_auto_deliberation,
+    resolve_deliberation_policy,
+)
 from .quorum import QuorumCheck, check_quorum, compute_quorum, meets_quorum
 
 __all__ = [
+    "AutoPolicyDecision",
     "ClassifyCandidateResult",
     "CallBudgetExceededError",
     "ConsensusThresholds",
+    "CostEstimate",
     "DEFAULT_CONSENSUS_THRESHOLDS",
     "DeliberationConfig",
+    "DeliberationPolicy",
     "DeliberationResult",
     "DeliberationTimeoutError",
     "MMDProviderAPIError",
@@ -44,15 +57,21 @@ __all__ = [
     "MMDProviderQuorumError",
     "MMDProviderTimeoutError",
     "MMDLiteLLMProvider",
+    "PerformanceSummary",
+    "PolicyTraceInfo",
     "QuorumCheck",
     "QuorumNotMetError",
+    "RolePerformance",
     "check_quorum",
     "classify_candidate",
     "compute_quorum",
+    "decide_auto_deliberation",
+    "estimate_call_cost",
     "make_run_id",
     "meets_quorum",
     "mmd_custom_llm",
     "parse_scoped_id",
+    "resolve_deliberation_policy",
     "run_deliberation",
     "run_planning_deliberation",
     "run_quick_deliberation",

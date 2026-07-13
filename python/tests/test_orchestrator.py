@@ -9,10 +9,14 @@ from mmd_litellm.orchestrator import (
     DeliberationConfig,
     DeliberationTimeoutError,
     QuorumNotMetError,
+    UsageCollectingClient,
+    UsageTracker,
+    _is_mmd_alias,
     run_deliberation,
     run_quick_deliberation,
     run_standard_deliberation,
 )
+from mmd_litellm.prompts import CompletionRequest
 
 
 class ScriptedClient:
@@ -176,6 +180,8 @@ class ScriptedClient:
                     },
                 }
             )
+        if phase == "direct_answer":
+            return f"{model} direct answer: {request.meta['question']}"
         raise AssertionError(f"unexpected phase: {phase}")
 
 
@@ -466,6 +472,30 @@ def test_config_forwards_tools_to_panel_by_default():
     }
 
 
+def test_config_forwards_parallel_tool_calls_to_panel_when_set():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search provider-managed context.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        tools=[tool],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    )
+
+    panel_params = config.call_params_for_phase("propose")
+    coordinator_params = config.call_params_for_phase("compose")
+    assert panel_params["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in coordinator_params
+    assert config.tool_trace_info().parallel_tool_calls is False
+
+
 def test_tool_trace_info_defaults_to_reject_mode_metadata():
     config = DeliberationConfig(
         question="What should we build next?",
@@ -700,3 +730,326 @@ def test_planning_mode_keeps_partial_plan_when_one_topic_fails_quorum():
     assert [failed.topic.topic_id for failed in result.failed_topics] == ["backend"]
     assert len(result.topics) == 1
     assert result.plan_document is not None
+
+
+def test_deliberation_policy_defaults_to_required():
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+    )
+    assert config.deliberation_policy == "required"
+
+
+def test_run_deliberation_off_policy_skips_fanout_and_returns_single_model_answer():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="off",
+            ),
+            ScriptedClient(),
+        )
+    )
+
+    assert result.policy is not None
+    assert result.policy.policy == "off"
+    assert result.policy.deliberated is False
+    assert result.final.final_answer == "model_a direct answer: What should we build next?"
+    assert result.proposals == []
+    assert result.quorum == {}
+    assert len(result.usage.events) == 1
+    assert result.usage.events[0].phase == "direct_answer"
+
+
+def test_run_deliberation_off_policy_uses_coordinator_model_when_set_else_first_analysis_model():
+    result_no_coordinator = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="off",
+            ),
+            ScriptedClient(),
+        )
+    )
+    assert result_no_coordinator.final.final_answer.startswith("model_a ")
+
+    result_with_coordinator = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                coordinator_model="model_c",
+                deliberation_policy="off",
+            ),
+            ScriptedClient(),
+        )
+    )
+    assert result_with_coordinator.final.final_answer.startswith("model_c ")
+
+
+def test_run_deliberation_off_policy_counts_against_max_total_calls_budget():
+    # The single off-path call is counted by CallLimitedClient (succeeds at
+    # exactly its 1-call budget), proving off is inside the shared budget
+    # accounting rather than exempt from it.
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="off",
+                max_total_calls=1,
+            ),
+            ScriptedClient(),
+        )
+    )
+    assert result.policy.deliberated is False
+    assert len(result.usage.events) == 1
+
+
+def test_run_deliberation_off_policy_respects_max_run_timeout():
+    with pytest.raises(DeliberationTimeoutError):
+        asyncio.run(
+            run_deliberation(
+                DeliberationConfig(
+                    question="What should we build next?",
+                    analysis_models=["model_a", "model_b"],
+                    deliberation_policy="off",
+                    max_run_timeout=0.01,
+                ),
+                SlowScriptedClient(),
+            )
+        )
+
+
+def test_run_deliberation_off_policy_does_not_forward_tools_to_single_call_unless_coordinator_tools_enabled():
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        deliberation_policy="off",
+        tools=[{"type": "function", "function": {"name": "search"}}],
+    )
+    assert "tools" not in config.call_params_for_phase("direct_answer")
+
+    config_enabled = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        deliberation_policy="off",
+        tools=[{"type": "function", "function": {"name": "search"}}],
+        coordinator_tools_enabled=True,
+    )
+    assert "tools" in config_enabled.call_params_for_phase("direct_answer")
+
+
+def test_run_deliberation_required_policy_matches_default_behavior():
+    default_result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+            ),
+            ScriptedClient(),
+        )
+    )
+    explicit_result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="required",
+            ),
+            ScriptedClient(),
+        )
+    )
+
+    assert default_result.policy.deliberated is True
+    assert explicit_result.policy.deliberated is True
+    assert default_result.final.final_answer == explicit_result.final.final_answer
+    assert len(default_result.proposals) == len(explicit_result.proposals) == 2
+
+
+def test_run_deliberation_auto_policy_skips_for_short_factual_question():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What is the capital of France?",
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="auto",
+            ),
+            ScriptedClient(),
+        )
+    )
+
+    assert result.policy.policy == "auto"
+    assert result.policy.deliberated is False
+    assert result.proposals == []
+
+
+def test_run_deliberation_auto_policy_deliberates_for_long_decision_question():
+    long_question = (
+        "Should we adopt microservices for our ten person team maintaining three "
+        "separate internal services written in different languages over the next "
+        "two years of growth?"
+    )
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question=long_question,
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="auto",
+            ),
+            ScriptedClient(),
+        )
+    )
+
+    assert result.policy.policy == "auto"
+    assert result.policy.deliberated is True
+    assert len(result.proposals) == 2
+
+
+def test_usage_collecting_client_records_role_and_duration_directly():
+    tracker = UsageTracker()
+    client = UsageCollectingClient(SlowScriptedClient(), tracker)
+
+    asyncio.run(
+        client.acomplete(
+            "model_a",
+            CompletionRequest(
+                system_prompt="s",
+                user_prompt="u",
+                meta={"phase": "propose", "question": "q", "model_id": "model_a"},
+            ),
+        )
+    )
+    asyncio.run(
+        client.acomplete(
+            "model_a",
+            CompletionRequest(
+                system_prompt="s",
+                user_prompt="u",
+                meta={"phase": "direct_answer", "question": "q"},
+            ),
+        )
+    )
+
+    propose_event, direct_answer_event = tracker.events
+    assert propose_event.role == "panel"
+    assert direct_answer_event.role == "coordinator"
+    assert propose_event.duration_seconds >= 0.04
+    assert direct_answer_event.duration_seconds >= 0.04
+
+
+def test_run_deliberation_performance_summary_role_attribution_quick_mode():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+            ),
+            UsageScriptedClient(),
+        )
+    )
+
+    performance = result.performance
+    assert performance is not None
+    assert performance.panel.call_count == 2
+    assert performance.panel.success_count == 2
+    assert performance.panel.failure_count == 0
+    assert performance.panel.success_rate == 1.0
+    assert performance.coordinator.call_count == 2
+    assert performance.coordinator.success_rate == 1.0
+    assert performance.overall.total_tokens == result.usage.total_tokens
+    # Fake model ids: litellm (if installed) can't price them, so cost is
+    # always unavailable regardless of whether litellm is installed in the
+    # running test environment.
+    assert performance.panel.cost_unavailable is True
+    assert performance.coordinator.cost_unavailable is True
+
+
+def test_run_deliberation_performance_marks_partial_and_failure_count_on_partial_quorum():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b", "model_c"],
+            ),
+            ScriptedClient(fail_models={"model_c"}),
+        )
+    )
+
+    panel = result.performance.panel
+    assert panel.partial is True
+    assert panel.failure_count == 1
+    assert panel.call_count == 3
+    assert panel.success_rate == pytest.approx(2 / 3)
+
+
+def test_run_deliberation_off_policy_performance_is_coordinator_only():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                deliberation_policy="off",
+            ),
+            ScriptedClient(),
+        )
+    )
+
+    assert result.performance.panel.call_count == 0
+    assert result.performance.panel.success_rate is None
+    assert result.performance.coordinator.call_count == 1
+    assert result.performance.coordinator.success_rate == 1.0
+
+
+def test_coordinator_phase_failure_aborts_run_instead_of_appearing_as_partial_failure():
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            run_deliberation(
+                DeliberationConfig(
+                    question="What should we build next?",
+                    analysis_models=["model_a", "model_b"],
+                    coordinator_model="model_a",
+                ),
+                ScriptedClient(fail_by_phase={"normalize": {"model_a"}}),
+            )
+        )
+    # There is no representable "coordinator partially failed" DeliberationResult
+    # for this case - the whole run aborts instead. See _compute_performance_summary's
+    # docstring for why this asymmetry is by design, not a bug.
+
+
+def test_planning_mode_performance_sums_across_topics():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="Plan the next milestone.",
+                analysis_models=["model_a", "model_b"],
+                mmd_mode="planning",
+            ),
+            UsageScriptedClient(),
+        )
+    )
+
+    performance = result.performance
+    assert performance is not None
+    # 2 topics x (propose 2 + critique 2 + revise 2 + vote 2) = 16 panel calls
+    assert performance.panel.call_count == 16
+    assert performance.panel.success_rate == 1.0
+    # outline (1) + normalize x2 topics + section_compose x2 topics = 5 coordinator calls
+    assert performance.coordinator.call_count == 5
+    assert performance.coordinator.success_rate == 1.0
+    assert performance.overall.call_count == 21
+    assert performance.overall.total_tokens == result.usage.total_tokens
+
+
+def test_is_mmd_alias_matches_exact_and_prefixed_forms():
+    assert _is_mmd_alias("mmd-fusion") is True
+    assert _is_mmd_alias("mmd/fusion") is True
+    assert _is_mmd_alias("mmd/anything") is True
+
+
+def test_is_mmd_alias_does_not_match_real_model_names():
+    assert _is_mmd_alias("openai/gpt-4o-mini") is False
+    assert _is_mmd_alias("router/model-a") is False
