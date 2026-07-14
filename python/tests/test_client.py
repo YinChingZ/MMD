@@ -1,8 +1,15 @@
+import asyncio
 import importlib.util
 
 import pytest
 
-from mmd_litellm.client import LiteLLMCompletionClient, _extract_cost
+from mmd_litellm.client import (
+    LiteLLMCompletionClient,
+    _extract_content,
+    _extract_cost,
+    _extract_tool_calls,
+)
+from mmd_litellm.prompts import CompletionRequest
 
 
 class _HiddenParams:
@@ -93,3 +100,152 @@ def test_discover_model_groups_dedupes_real_router_multi_deployment_group():
         "gpt-4o-mini-group",
         "claude-haiku-group",
     ]
+
+
+class _ToolCallFunction:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class _ToolCall:
+    def __init__(self, id, function, type="function"):
+        self.id = id
+        self.type = type
+        self.function = function
+
+
+class _Message:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _Choice:
+    def __init__(self, message=None, text=None):
+        self.message = message
+        self.text = text
+
+
+class _AttrResponse:
+    def __init__(self, choices):
+        self.choices = choices
+
+
+def test_extract_content_returns_none_when_no_text_or_tool_calls():
+    response = _AttrResponse(choices=[_Choice(message=_Message(content=None))])
+    assert _extract_content(response) is None
+
+
+def test_extract_content_reads_dict_style_message_content():
+    response = {"choices": [{"message": {"content": "hello"}}]}
+    assert _extract_content(response) == "hello"
+
+
+def test_extract_content_raises_when_no_choices():
+    with pytest.raises(ValueError):
+        _extract_content({"choices": []})
+
+
+def test_extract_tool_calls_returns_none_when_absent():
+    response = _AttrResponse(choices=[_Choice(message=_Message(content="hi"))])
+    assert _extract_tool_calls(response) is None
+
+
+def test_extract_tool_calls_returns_none_when_no_choices():
+    assert _extract_tool_calls({"choices": []}) is None
+
+
+def test_extract_tool_calls_reads_dict_style_tool_calls():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "web_fetch", "arguments": "{}"},
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    assert _extract_tool_calls(response) == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "web_fetch", "arguments": "{}"},
+        }
+    ]
+
+
+def test_extract_tool_calls_normalizes_attribute_style_tool_calls():
+    tool_call = _ToolCall(
+        "call_1", _ToolCallFunction("web_fetch", '{"url": "https://example.com"}')
+    )
+    response = _AttrResponse(
+        choices=[_Choice(message=_Message(content=None, tool_calls=[tool_call]))]
+    )
+    assert _extract_tool_calls(response) == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "arguments": '{"url": "https://example.com"}',
+            },
+        }
+    ]
+
+
+class _FakeRouter:
+    def __init__(self, response):
+        self._response = response
+
+    async def acompletion(self, **kwargs):
+        return self._response
+
+
+def test_acomplete_returns_tool_calls_without_raising_when_content_absent():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "web_fetch", "arguments": "{}"},
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    client = LiteLLMCompletionClient(router=_FakeRouter(response))
+    request = CompletionRequest(
+        system_prompt="s", user_prompt="u", meta={"phase": "propose"}
+    )
+    output = asyncio.run(client.acomplete("model_a", request))
+    assert output.text == ""
+    assert output.tool_calls == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "web_fetch", "arguments": "{}"},
+        }
+    ]
+
+
+def test_acomplete_still_raises_when_content_and_tool_calls_both_absent():
+    response = {"choices": [{"message": {"content": None}}]}
+    client = LiteLLMCompletionClient(router=_FakeRouter(response))
+    request = CompletionRequest(
+        system_prompt="s", user_prompt="u", meta={"phase": "propose"}
+    )
+    with pytest.raises(ValueError):
+        asyncio.run(client.acomplete("model_a", request))

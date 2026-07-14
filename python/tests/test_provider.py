@@ -3,6 +3,7 @@ import importlib.util
 
 import pytest
 
+from mmd_litellm import tools as tools_module
 from mmd_litellm.client import TokenUsage
 from mmd_litellm.errors import (
     MMDProviderAPIError,
@@ -10,12 +11,14 @@ from mmd_litellm.errors import (
     MMDProviderBudgetError,
     MMDProviderQuorumError,
     MMDProviderTimeoutError,
+    MMDProviderToolBudgetError,
 )
 from mmd_litellm.litellm_provider import MMDLiteLLMProvider
 from mmd_litellm.prompts import CompletionRequest
 from tests.test_orchestrator import (
     ScriptedClient,
     SlowScriptedClient,
+    ToolLoopScriptedClient,
     UsageScriptedClient,
 )
 
@@ -515,6 +518,9 @@ def test_provider_forwards_tools_to_panel_and_trace_only_marks_availability():
         "max_tool_calls": 2,
         "tool_mode": "experimental_passthrough",
         "experimental": True,
+        "tool_calls_executed": 0,
+        "tool_calls_failed": 0,
+        "tool_call_events": [],
     }
 
 
@@ -1226,3 +1232,114 @@ def test_provider_performance_duration_reflects_slow_calls():
 
     # 4 calls total (2 propose + normalize + compose), each sleeps ~0.05s.
     assert response["mmd"]["performance"]["overall"]["total_duration_seconds"] >= 0.05 * 4 * 0.8
+
+
+def test_provider_rejects_native_web_mode_combined_with_caller_tools():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Should be rejected alongside mmd_native_web.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    with pytest.raises(MMDProviderBadRequestError) as excinfo:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                tools=[tool],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                    "tool_mode": "mmd_native_web",
+                },
+            )
+        )
+    assert excinfo.value.status_code == 400
+    assert "mmd_native_web" in str(excinfo.value)
+
+
+def test_provider_accepts_native_web_mode_without_caller_tools():
+    provider = MMDLiteLLMProvider(client=ScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "tool_mode": "mmd_native_web",
+                "max_tool_calls": 2,
+                "return_trace": True,
+            },
+        )
+    )
+    tooling = response["mmd"]["tooling"]
+    assert tooling["tool_mode"] == "mmd_native_web"
+    assert tooling["enabled_for_panel"] is True
+    assert tooling["tool_count"] == 1
+    assert tooling["tool_calls_executed"] == 0
+    assert tooling["tool_call_events"] == []
+
+
+def test_provider_end_to_end_executes_native_web_tool_and_surfaces_trace(monkeypatch):
+    async def fake_executor(call):
+        return tools_module.ToolExecutionResult(
+            tool_name="web_fetch",
+            arguments=call["function"]["arguments"],
+            status="ok",
+            content="fetched content",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
+
+    provider = MMDLiteLLMProvider(client=ToolLoopScriptedClient())
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "tool_mode": "mmd_native_web",
+                "max_tool_calls": 4,
+                "return_trace": True,
+            },
+        )
+    )
+    tooling = response["mmd"]["tooling"]
+    assert tooling["tool_calls_executed"] == 2
+    assert tooling["tool_calls_failed"] == 0
+    assert all(event["status"] == "ok" for event in tooling["tool_call_events"])
+    assert all(
+        event["tool_name"] == "web_fetch" for event in tooling["tool_call_events"]
+    )
+
+
+def test_provider_surfaces_tool_call_budget_exceeded_as_429(monkeypatch):
+    async def fake_executor(call):
+        return tools_module.ToolExecutionResult(
+            tool_name="web_fetch",
+            arguments="{}",
+            status="ok",
+            content="fetched content",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
+
+    provider = MMDLiteLLMProvider(client=ToolLoopScriptedClient())
+    with pytest.raises(MMDProviderToolBudgetError) as excinfo:
+        asyncio.run(
+            provider.acompletion(
+                model="mmd/fusion",
+                messages=[{"role": "user", "content": "What should we build next?"}],
+                optional_params={
+                    "analysis_models": ["model_a", "model_b"],
+                    "tool_mode": "mmd_native_web",
+                    "max_tool_calls": 0,
+                },
+            )
+        )
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.code == "mmd_tool_call_budget_exceeded"

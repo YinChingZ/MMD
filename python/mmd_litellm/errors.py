@@ -128,3 +128,8 @@ class MMDProviderTimeoutError(MMDProviderAPIError):
 class MMDProviderBudgetError(MMDProviderAPIError):
     status_code = 429
     code = "mmd_call_budget_exceeded"
+
+
+class MMDProviderToolBudgetError(MMDProviderAPIError):
+    status_code = 429
+    code = "mmd_tool_call_budget_exceeded"

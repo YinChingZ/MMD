@@ -15,6 +15,7 @@ class TokenUsage(BaseModel):
 
 class CompletionOutput(BaseModel):
     text: str
+    tool_calls: list[dict[str, Any]] | None = None
     usage: TokenUsage | None = None
     cost_usd: float | None = None
 
@@ -55,8 +56,13 @@ class LiteLLMCompletionClient:
             metadata=metadata,
             **call_kwargs,
         )
+        content = _extract_content(response)
+        tool_calls = _extract_tool_calls(response)
+        if content is None and not tool_calls:
+            raise ValueError("LiteLLM response contained no text content")
         return CompletionOutput(
-            text=_extract_content(response),
+            text=content or "",
+            tool_calls=tool_calls,
             usage=_extract_usage(response),
             cost_usd=_extract_cost(response),
         )
@@ -100,7 +106,7 @@ def coerce_completion_output(value: str | CompletionOutput) -> CompletionOutput:
     raise TypeError(f"completion client returned unsupported value: {type(value)!r}")
 
 
-def _extract_content(response: Any) -> str:
+def _extract_content(response: Any) -> str | None:
     choices = _get(response, "choices")
     if not choices:
         raise ValueError("LiteLLM response contained no choices")
@@ -112,7 +118,36 @@ def _extract_content(response: Any) -> str:
     text = _get(first_choice, "text")
     if isinstance(text, str):
         return text
-    raise ValueError("LiteLLM response contained no text content")
+    return None
+
+
+def _extract_tool_calls(response: Any) -> list[dict[str, Any]] | None:
+    choices = _get(response, "choices")
+    if not choices:
+        return None
+    message = _get(choices[0], "message")
+    if message is None:
+        return None
+    tool_calls = _get(message, "tool_calls")
+    if not tool_calls:
+        return None
+    normalized = []
+    for call in tool_calls:
+        if isinstance(call, dict):
+            normalized.append(call)
+            continue
+        function = getattr(call, "function", None)
+        normalized.append(
+            {
+                "id": getattr(call, "id", ""),
+                "type": getattr(call, "type", "function"),
+                "function": {
+                    "name": getattr(function, "name", ""),
+                    "arguments": getattr(function, "arguments", ""),
+                },
+            }
+        )
+    return normalized or None
 
 
 def _extract_usage(response: Any) -> TokenUsage | None:

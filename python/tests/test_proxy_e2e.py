@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
@@ -276,3 +278,136 @@ def test_proxy_run_timeout_returns_504(start_proxy, write_scenario):
     assert status == 504
     payload = json.loads(body)
     assert "max_run_timeout" in payload["error"]["message"]
+
+
+MARKER_CONTENT = "MMD_TOOL_LOOP_E2E_MARKER_CONTENT"
+
+
+class _MarkerHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 - required BaseHTTPRequestHandler name
+        body = MARKER_CONTENT.encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # silence test output
+        pass
+
+
+class _MarkerServer:
+    """A real local HTTP server the Proxy subprocess's `web_fetch` tool call
+    actually fetches over the network - proves the whole tool-execution loop
+    end to end, not just against a scripted/mocked HTTP layer."""
+
+    def __enter__(self) -> str:
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _MarkerHandler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True
+        )
+        self._thread.start()
+        port = self._server.server_address[1]
+        return f"http://127.0.0.1:{port}/marker"
+
+    def __exit__(self, *exc_info) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+
+
+TOOL_LOOP_HANDLER_TEMPLATE = (
+    "from mmd_litellm.litellm_provider import MMDLiteLLMProvider\n"
+    "from tests.test_orchestrator import ToolLoopScriptedClient\n\n"
+    "mmd_custom_llm = MMDLiteLLMProvider(\n"
+    "    client=ToolLoopScriptedClient(fetch_url={fetch_url!r})\n"
+    ")\n"
+)
+
+
+def test_proxy_tool_loop_executes_real_web_fetch_and_records_trace(
+    start_proxy, write_scenario
+):
+    """The end-to-end P1 "tool/web path" scenario: a real litellm Proxy subprocess,
+    a real local HTTP server fetched over real sockets by MMD's own web_fetch tool
+    execution loop, and a real audit trace produced from that real fetch."""
+    with _MarkerServer() as fetch_url:
+        config_dir = write_scenario(
+            {
+                "handler.py": TOOL_LOOP_HANDLER_TEMPLATE.format(fetch_url=fetch_url),
+                "config.yaml": _config(
+                    extra_litellm_params=(
+                        "      tool_mode: mmd_native_web\n"
+                        "      max_tool_calls: 2\n"
+                    )
+                ),
+            }
+        )
+        proxy = start_proxy(
+            config_dir, env={"MMD_WEB_FETCH_ALLOW_PRIVATE_HOSTS": "127.0.0.1"}
+        )
+
+        status, body = proxy.request(
+            "/chat/completions",
+            {"model": "mmd-fusion-mock", "messages": NORMAL_MESSAGES},
+        )
+
+    assert status == 200
+    payload = json.loads(body)
+    assert (
+        payload["choices"][0]["message"]["content"]
+        == "Use a small TypeScript monorepo for this project."
+    )
+    tooling = payload["mmd"]["tooling"]
+    assert tooling["tool_mode"] == "mmd_native_web"
+    assert tooling["tool_calls_executed"] >= 1
+    assert tooling["tool_calls_failed"] == 0
+    events = tooling["tool_call_events"]
+    assert events, "expected at least one recorded tool call event"
+    assert all(event["status"] == "ok" for event in events)
+    assert all(event["tool_name"] == "web_fetch" for event in events)
+    assert any(MARKER_CONTENT in (event["result_preview"] or "") for event in events)
+
+
+def test_proxy_tool_loop_blocks_ssrf_target_and_still_degrades_gracefully(
+    start_proxy, write_scenario
+):
+    """Negative companion: without the private-hosts allowlist env var, MMD's
+    SSRF protection must block a loopback fetch target server-side - and the
+    run must still complete (degrade, not crash), recording the block in the
+    trace rather than failing the whole request."""
+    with _MarkerServer() as fetch_url:
+        config_dir = write_scenario(
+            {
+                "handler.py": TOOL_LOOP_HANDLER_TEMPLATE.format(fetch_url=fetch_url),
+                "config.yaml": _config(
+                    extra_litellm_params=(
+                        "      tool_mode: mmd_native_web\n"
+                        "      max_tool_calls: 2\n"
+                    )
+                ),
+            }
+        )
+        # Explicitly override to empty: the Proxy subprocess env is a copy of
+        # this test-runner's environment, which must not accidentally inherit
+        # an allowlist set by another test in the same session.
+        proxy = start_proxy(
+            config_dir, env={"MMD_WEB_FETCH_ALLOW_PRIVATE_HOSTS": ""}
+        )
+
+        status, body = proxy.request(
+            "/chat/completions",
+            {"model": "mmd-fusion-mock", "messages": NORMAL_MESSAGES},
+        )
+
+    assert status == 200
+    payload = json.loads(body)
+    assert (
+        payload["choices"][0]["message"]["content"]
+        == "Use a small TypeScript monorepo for this project."
+    )
+    events = payload["mmd"]["tooling"]["tool_call_events"]
+    assert events, "expected at least one recorded tool call event"
+    assert all(event["status"] == "blocked" for event in events)
+    assert all(event["error"] for event in events)
+    assert all(
+        MARKER_CONTENT not in (event["result_preview"] or "") for event in events
+    )

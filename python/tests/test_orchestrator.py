@@ -3,12 +3,14 @@ import json
 
 import pytest
 
+from mmd_litellm import tools as tools_module
 from mmd_litellm.client import CompletionOutput, TokenUsage
 from mmd_litellm.orchestrator import (
     CallBudgetExceededError,
     DeliberationConfig,
     DeliberationTimeoutError,
     QuorumNotMetError,
+    ToolCallBudgetExceededError,
     UsageCollectingClient,
     UsageTracker,
     _is_mmd_alias,
@@ -219,6 +221,49 @@ class UsageScriptedClient(ScriptedClient):
 class SlowScriptedClient(ScriptedClient):
     async def acomplete(self, model, request, *, timeout=None):
         await asyncio.sleep(0.05)
+        return await super().acomplete(model, request, timeout=timeout)
+
+
+class ToolLoopScriptedClient(ScriptedClient):
+    """Returns a `web_fetch` tool call the first time a model is asked in one
+    of `tool_loop_phases`, then delegates to the normal scripted phase answer
+    once `request.extra_turns` shows the tool result was fed back. Models in
+    `never_resolve_models` always re-request the tool, simulating a model that
+    never stops calling tools (to exercise step-exhaustion)."""
+
+    def __init__(
+        self,
+        *,
+        tool_loop_phases: set[str] | None = None,
+        never_resolve_models: set[str] | None = None,
+        tool_call_id: str = "call_1",
+        fetch_url: str = "https://example.com",
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.tool_loop_phases = tool_loop_phases or {"propose"}
+        self.never_resolve_models = never_resolve_models or set()
+        self.tool_call_id = tool_call_id
+        self.fetch_url = fetch_url
+
+    async def acomplete(self, model, request, *, timeout=None):
+        phase = request.meta["phase"]
+        if phase in self.tool_loop_phases and (
+            model in self.never_resolve_models or not request.extra_turns
+        ):
+            return CompletionOutput(
+                text="",
+                tool_calls=[
+                    {
+                        "id": self.tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "web_fetch",
+                            "arguments": json.dumps({"url": self.fetch_url}),
+                        },
+                    }
+                ],
+            )
         return await super().acomplete(model, request, timeout=timeout)
 
 
@@ -469,6 +514,9 @@ def test_config_forwards_tools_to_panel_by_default():
         "max_tool_calls": 2,
         "tool_mode": "reject",
         "experimental": False,
+        "tool_calls_executed": 0,
+        "tool_calls_failed": 0,
+        "tool_call_events": [],
     }
 
 
@@ -1053,3 +1101,165 @@ def test_is_mmd_alias_matches_exact_and_prefixed_forms():
 def test_is_mmd_alias_does_not_match_real_model_names():
     assert _is_mmd_alias("openai/gpt-4o-mini") is False
     assert _is_mmd_alias("router/model-a") is False
+
+
+def test_config_forwards_native_web_tool_and_ignores_caller_tools():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Ignored under mmd_native_web.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    config = DeliberationConfig(
+        question="What should we build next?",
+        analysis_models=["model_a", "model_b"],
+        tool_mode="mmd_native_web",
+        tools=[tool],  # caller-supplied tools are ignored, not merged, in this mode
+        max_tool_calls=2,
+    )
+
+    panel_params = config.call_params_for_phase("propose")
+    coordinator_params = config.call_params_for_phase("compose")
+    assert panel_params["tools"] == [tools_module.WEB_FETCH_TOOL_SCHEMA]
+    assert panel_params["tool_choice"] == "auto"
+    assert "tools" not in coordinator_params
+
+    info = config.tool_trace_info()
+    assert info.enabled_for_panel is True
+    assert info.enabled_for_coordinator is False
+    assert info.tool_count == 1
+    assert info.tool_mode == "mmd_native_web"
+
+
+def test_tool_loop_happy_path_executes_web_fetch_and_updates_trace(monkeypatch):
+    calls = []
+
+    async def fake_executor(call):
+        calls.append(call)
+        return tools_module.ToolExecutionResult(
+            tool_name="web_fetch",
+            arguments=call["function"]["arguments"],
+            status="ok",
+            content="fetched content",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
+
+    result = asyncio.run(
+        run_quick_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                tool_mode="mmd_native_web",
+                max_tool_calls=4,
+            ),
+            ToolLoopScriptedClient(),
+        )
+    )
+
+    assert result.quorum["propose"].met is True
+    assert len(calls) == 2
+    assert result.tooling.tool_calls_executed == 2
+    assert result.tooling.tool_calls_failed == 0
+    assert {event.status for event in result.tooling.tool_call_events} == {"ok"}
+    assert {event.tool_name for event in result.tooling.tool_call_events} == {
+        "web_fetch"
+    }
+    assert all(event.phase == "propose" for event in result.tooling.tool_call_events)
+    assert all(event.role == "panel" for event in result.tooling.tool_call_events)
+
+
+def test_tool_loop_budget_exceeded_aborts_whole_run(monkeypatch):
+    async def fake_executor(call):
+        return tools_module.ToolExecutionResult(
+            tool_name="web_fetch",
+            arguments="{}",
+            status="ok",
+            content="fetched content",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
+
+    with pytest.raises(ToolCallBudgetExceededError) as error:
+        asyncio.run(
+            run_quick_deliberation(
+                DeliberationConfig(
+                    question="What should we build next?",
+                    analysis_models=["model_a", "model_b"],
+                    tool_mode="mmd_native_web",
+                    max_tool_calls=0,
+                ),
+                ToolLoopScriptedClient(),
+            )
+        )
+
+    assert error.value.max_tool_calls == 0
+
+
+def test_tool_loop_execution_error_degrades_gracefully_and_records_trace(monkeypatch):
+    async def fake_executor(call):
+        return tools_module.ToolExecutionResult(
+            tool_name="web_fetch",
+            arguments=call["function"]["arguments"],
+            status="blocked",
+            content="Error: address is not a public host",
+            error="address is not a public host",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
+
+    result = asyncio.run(
+        run_quick_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                tool_mode="mmd_native_web",
+                max_tool_calls=4,
+            ),
+            ToolLoopScriptedClient(),
+        )
+    )
+
+    assert result.quorum["propose"].met is True
+    assert result.tooling.tool_calls_executed == 2
+    assert result.tooling.tool_calls_failed == 2
+    assert all(event.status == "blocked" for event in result.tooling.tool_call_events)
+    assert all(
+        event.error == "address is not a public host"
+        for event in result.tooling.tool_call_events
+    )
+
+
+def test_tool_loop_step_exhaustion_becomes_phase_failure_for_panel(monkeypatch):
+    async def fake_executor(call):
+        return tools_module.ToolExecutionResult(
+            tool_name="web_fetch",
+            arguments="{}",
+            status="ok",
+            content="fetched content",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
+
+    result = asyncio.run(
+        run_quick_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b", "model_c"],
+                tool_mode="mmd_native_web",
+                max_tool_calls=20,
+            ),
+            ToolLoopScriptedClient(never_resolve_models={"model_c"}),
+        )
+    )
+
+    assert result.quorum["propose"].met is True
+    assert result.quorum["propose"].partial is True
+    assert result.failures["propose"][0].model_id == "model_c"
+    assert "did not resolve within" in result.failures["propose"][0].message

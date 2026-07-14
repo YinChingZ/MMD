@@ -16,6 +16,7 @@ from .errors import (
     MMDProviderError,
     MMDProviderQuorumError,
     MMDProviderTimeoutError,
+    MMDProviderToolBudgetError,
 )
 from .orchestrator import (
     CompletionClient,
@@ -23,6 +24,7 @@ from .orchestrator import (
     DeliberationTimeoutError,
     DeliberationConfig,
     QuorumNotMetError,
+    ToolCallBudgetExceededError,
     _is_mmd_alias,
     run_deliberation,
 )
@@ -229,6 +231,8 @@ class MMDLiteLLMProvider(CustomLLM):
             result = await run_deliberation(config, self.client)
         except CallBudgetExceededError as error:
             raise _provider_budget_error(public_model, error) from error
+        except ToolCallBudgetExceededError as error:
+            raise _provider_tool_budget_error(public_model, error) from error
         except DeliberationTimeoutError as error:
             raise _provider_timeout_error(public_model, error) from error
         except QuorumNotMetError as error:
@@ -326,6 +330,14 @@ def _build_config(
                 "into raw (unexecuted) passthrough of tools/tool_choice to "
                 "panel/coordinator models, or remove tools/tool_choice from the "
                 "request."
+            )
+
+        if tool_mode == "mmd_native_web" and has_tool_intent:
+            raise ValueError(
+                "tool_mode='mmd_native_web' offers MMD's own built-in web_fetch "
+                "tool to panel/coordinator models and does not accept "
+                "caller-supplied tools/tool_choice; remove tools/tool_choice from "
+                "the request, or use tool_mode='experimental_passthrough' instead."
             )
 
         if optional_params.get("response_format") is not None:
@@ -427,6 +439,16 @@ def _provider_budget_error(
         str(error),
         model=public_model,
         details={"max_total_calls": error.max_total_calls},
+    )
+
+
+def _provider_tool_budget_error(
+    public_model: str, error: ToolCallBudgetExceededError
+) -> MMDProviderToolBudgetError:
+    return MMDProviderToolBudgetError(
+        str(error),
+        model=public_model,
+        details={"max_tool_calls": error.max_tool_calls},
     )
 
 

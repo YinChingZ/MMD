@@ -23,11 +23,13 @@ class CompletionRequest(BaseModel):
     user_prompt: str
     meta: dict[str, Any]
     litellm_params: dict[str, Any] = Field(default_factory=dict)
+    extra_turns: list[dict[str, Any]] = Field(default_factory=list)
 
-    def to_messages(self) -> list[dict[str, str]]:
+    def to_messages(self) -> list[dict[str, Any]]:
         return [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": self.user_prompt},
+            *self.extra_turns,
         ]
 
     def with_litellm_params(self, params: dict[str, Any]) -> CompletionRequest:
@@ -36,6 +38,9 @@ class CompletionRequest(BaseModel):
         return self.model_copy(
             update={"litellm_params": {**self.litellm_params, **params}}
         )
+
+    def with_extra_turns(self, turns: list[dict[str, Any]]) -> CompletionRequest:
+        return self.model_copy(update={"extra_turns": [*self.extra_turns, *turns]})
 
 
 def describe_schema(schema: type[BaseModel], name: str) -> str:

@@ -6,6 +6,7 @@ from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, Field, model_validator
 
+from . import tools
 from .client import CompletionOutput, TokenUsage, coerce_completion_output
 from .consensus import ClassifyCandidateResult, classify_candidate
 from .cost import estimate_call_cost
@@ -45,6 +46,9 @@ T = TypeVar("T", bound=BaseModel)
 MMDMode = Literal["quick", "standard", "planning"]
 PresetName = Literal["cheap", "balanced", "strong"]
 PANEL_PHASES = {"propose", "critique", "revise", "vote"}
+DEFAULT_MAX_TOOL_CALLS = 4
+MAX_TOOL_STEPS_PER_CALL = 4
+TOOL_TRACE_PREVIEW_CHARS = 500
 MODE_TIMEOUT_DEFAULTS: dict[str, float] = {
     "quick": 40.0,
     "standard": 90.0,
@@ -108,7 +112,7 @@ class DeliberationConfig(BaseModel):
     max_tool_calls: int | None = Field(default=None, ge=0)
     parallel_tool_calls: bool | None = None
     coordinator_tools_enabled: bool = False
-    tool_mode: Literal["reject", "experimental_passthrough"] = "reject"
+    tool_mode: Literal["reject", "experimental_passthrough", "mmd_native_web"] = "reject"
     model_params: dict[str, Any] = Field(default_factory=dict)
     analysis_model_params: dict[str, Any] = Field(default_factory=dict)
     coordinator_model_params: dict[str, Any] = Field(default_factory=dict)
@@ -167,9 +171,11 @@ class DeliberationConfig(BaseModel):
                 params["temperature"] = self.coordinator_temperature
             params.update(self.coordinator_model_params)
 
-        if self.tools and (
-            phase in PANEL_PHASES or self.coordinator_tools_enabled
-        ):
+        eligible_phase = phase in PANEL_PHASES or self.coordinator_tools_enabled
+        if self.tool_mode == "mmd_native_web" and eligible_phase:
+            params["tools"] = [tools.WEB_FETCH_TOOL_SCHEMA]
+            params["tool_choice"] = "auto"
+        elif self.tools and eligible_phase:
             params["tools"] = self.tools
             if self.tool_choice is not None:
                 params["tool_choice"] = self.tool_choice
@@ -180,24 +186,45 @@ class DeliberationConfig(BaseModel):
 
         return {key: value for key, value in params.items() if value is not None}
 
-    def tool_trace_info(self) -> ToolTraceInfo:
+    def tool_trace_info(self, tracker: ToolCallTracker | None = None) -> ToolTraceInfo:
+        native_web = self.tool_mode == "mmd_native_web"
+        enabled_for_panel = bool(self.tools) or native_web
+        enabled_for_coordinator = bool(
+            (self.tools or native_web) and self.coordinator_tools_enabled
+        )
+        tool_count = len(self.tools) if self.tools else (1 if native_web else 0)
         return ToolTraceInfo(
-            enabled_for_panel=bool(self.tools),
-            enabled_for_coordinator=bool(
-                self.tools and self.coordinator_tools_enabled
-            ),
-            tool_count=len(self.tools),
+            enabled_for_panel=enabled_for_panel,
+            enabled_for_coordinator=enabled_for_coordinator,
+            tool_count=tool_count,
             tool_choice=self.tool_choice,
             max_tool_calls=self.max_tool_calls,
             parallel_tool_calls=self.parallel_tool_calls,
             tool_mode=self.tool_mode,
             experimental=bool(self.tools) and self.tool_mode == "experimental_passthrough",
+            tool_calls_executed=tracker.executed if tracker is not None else 0,
+            tool_calls_failed=tracker.failed if tracker is not None else 0,
+            tool_call_events=list(tracker.events) if tracker is not None else [],
         )
 
 
 class PhaseFailure(BaseModel):
     model_id: str
     message: str
+
+
+class ToolCallEvent(BaseModel):
+    call_index: int
+    phase: str
+    model_id: str
+    role: Literal["panel", "coordinator"]
+    topic_id: str | None = None
+    tool_name: str
+    arguments: str
+    status: Literal["ok", "error", "blocked"]
+    result_preview: str | None = None
+    error: str | None = None
+    duration_seconds: float | None = None
 
 
 class ToolTraceInfo(BaseModel):
@@ -207,8 +234,11 @@ class ToolTraceInfo(BaseModel):
     tool_choice: Any | None = None
     max_tool_calls: int | None = None
     parallel_tool_calls: bool | None = None
-    tool_mode: Literal["reject", "experimental_passthrough"] = "reject"
+    tool_mode: Literal["reject", "experimental_passthrough", "mmd_native_web"] = "reject"
     experimental: bool = False
+    tool_calls_executed: int = 0
+    tool_calls_failed: int = 0
+    tool_call_events: list[ToolCallEvent] = Field(default_factory=list)
 
 
 class UsageEvent(BaseModel):
@@ -319,6 +349,49 @@ class UsageTracker:
         )
 
 
+class ToolCallTracker:
+    def __init__(self) -> None:
+        self.events: list[ToolCallEvent] = []
+
+    def record(
+        self,
+        *,
+        phase: str,
+        model_id: str,
+        role: Literal["panel", "coordinator"],
+        topic_id: str | None,
+        tool_name: str,
+        arguments: str,
+        status: Literal["ok", "error", "blocked"],
+        result_preview: str | None,
+        error: str | None,
+        duration_seconds: float | None,
+    ) -> None:
+        self.events.append(
+            ToolCallEvent(
+                call_index=len(self.events),
+                phase=phase,
+                model_id=model_id,
+                role=role,
+                topic_id=topic_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                status=status,
+                result_preview=result_preview,
+                error=error,
+                duration_seconds=duration_seconds,
+            )
+        )
+
+    @property
+    def executed(self) -> int:
+        return len(self.events)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for event in self.events if event.status != "ok")
+
+
 class UsageCollectingClient:
     def __init__(self, client: CompletionClient, tracker: UsageTracker) -> None:
         self.client = client
@@ -356,6 +429,103 @@ class CallLimitedClient:
             raise CallBudgetExceededError(self.max_total_calls)
         self.calls_started += 1
         return await self.client.acomplete(model, request, timeout=timeout)
+
+
+class ToolExecutingClient:
+    """Resolves `tool_calls`-only responses by executing MMD's built-in
+    `web_fetch` tool and re-calling the model with the result.
+
+    Only constructed when `tool_mode == "mmd_native_web"`; `reject` and
+    `experimental_passthrough` callers never see this class, so their
+    behavior is unaffected. Wraps the already `UsageCollectingClient`/
+    `CallLimitedClient`-wrapped client, so tool-loop continuation calls still
+    count against `max_total_calls` and get usage/cost tracked - those are
+    real model calls, distinct from `max_tool_calls`, the tool-execution budget
+    enforced here.
+    """
+
+    def __init__(
+        self,
+        client: CompletionClient,
+        *,
+        tracker: ToolCallTracker,
+        max_tool_calls: int,
+        executor: Any = None,
+    ) -> None:
+        self.client = client
+        self.tracker = tracker
+        self.max_tool_calls = max_tool_calls
+        # Looked up at construction time, not bound as a frozen default, so
+        # tests can `monkeypatch.setattr(tools, "execute_tool_call", fake)`
+        # and have it take effect for instances created afterward.
+        self.executor = executor or tools.execute_tool_call
+        self.calls_made = 0
+
+    async def acomplete(
+        self, model: str, request: CompletionRequest, *, timeout: float | None = None
+    ) -> str | CompletionOutput:
+        current = request
+        for _ in range(MAX_TOOL_STEPS_PER_CALL):
+            raw_output = await self.client.acomplete(model, current, timeout=timeout)
+            output = coerce_completion_output(raw_output)
+            if not output.tool_calls:
+                return raw_output
+
+            phase = str(current.meta.get("phase", "unknown"))
+            role: Literal["panel", "coordinator"] = (
+                "panel" if phase in PANEL_PHASES else "coordinator"
+            )
+            topic_id = current.meta.get("topic_id")
+            assistant_turn: dict[str, Any] = {
+                "role": "assistant",
+                "content": output.text or None,
+                "tool_calls": output.tool_calls,
+            }
+            tool_turns: list[dict[str, Any]] = []
+            for call in output.tool_calls:
+                if self.calls_made >= self.max_tool_calls:
+                    raise ToolCallBudgetExceededError(self.max_tool_calls)
+                self.calls_made += 1
+                result = await self.executor(call)
+                self.tracker.record(
+                    phase=phase,
+                    model_id=model,
+                    role=role,
+                    topic_id=topic_id,
+                    tool_name=result.tool_name,
+                    arguments=result.arguments,
+                    status=result.status,
+                    result_preview=(result.content[:TOOL_TRACE_PREVIEW_CHARS] or None),
+                    error=result.error,
+                    duration_seconds=result.duration_seconds,
+                )
+                tool_turns.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id", ""),
+                        "content": result.content,
+                    }
+                )
+            current = current.with_extra_turns([assistant_turn, *tool_turns])
+
+        raise ValueError(
+            f"tool-call loop did not resolve within {MAX_TOOL_STEPS_PER_CALL} steps"
+        )
+
+
+def _apply_native_web_tools(
+    client: CompletionClient, config: DeliberationConfig, tracker: ToolCallTracker
+) -> CompletionClient:
+    if config.tool_mode != "mmd_native_web":
+        return client
+    effective_max_tool_calls = (
+        config.max_tool_calls
+        if config.max_tool_calls is not None
+        else DEFAULT_MAX_TOOL_CALLS
+    )
+    return ToolExecutingClient(
+        client, tracker=tracker, max_tool_calls=effective_max_tool_calls
+    )
 
 
 class FanoutOutcome(BaseModel):
@@ -655,6 +825,14 @@ class CallBudgetExceededError(RuntimeError):
         self.max_total_calls = max_total_calls
 
 
+class ToolCallBudgetExceededError(RuntimeError):
+    def __init__(self, max_tool_calls: int) -> None:
+        super().__init__(
+            f"MMD deliberation exceeded max_tool_calls of {max_tool_calls}"
+        )
+        self.max_tool_calls = max_tool_calls
+
+
 async def _call_model_structured(
     *,
     client: CompletionClient,
@@ -758,6 +936,8 @@ async def _fanout_propose(
             )
         except CallBudgetExceededError:
             raise
+        except ToolCallBudgetExceededError:
+            raise
         except Exception as error:  # fan-out records per-model failures
             return model, error
 
@@ -802,6 +982,8 @@ async def _fanout_structured(
             )
             return model, stamp(model, value)
         except CallBudgetExceededError:
+            raise
+        except ToolCallBudgetExceededError:
             raise
         except Exception as error:  # fan-out records per-model failures
             return model, error
@@ -1187,6 +1369,8 @@ async def _run_single_model_completion(
     """`deliberation_policy` off/auto-skip path: one direct call, no fan-out."""
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
+    tool_tracker = ToolCallTracker()
+    client = _apply_native_web_tools(client, config, tool_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
 
@@ -1219,7 +1403,7 @@ async def _run_single_model_completion(
         quorum={},
         failures={},
         usage=usage_tracker.summary(),
-        tooling=config.tool_trace_info(),
+        tooling=config.tool_trace_info(tool_tracker),
     )
 
 
@@ -1231,6 +1415,8 @@ async def run_quick_deliberation(
 
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
+    tool_tracker = ToolCallTracker()
+    client = _apply_native_web_tools(client, config, tool_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
 
@@ -1299,7 +1485,7 @@ async def run_quick_deliberation(
         quorum={"propose": propose_outcome.quorum},
         failures={"propose": propose_outcome.failures},
         usage=usage_tracker.summary(),
-        tooling=config.tool_trace_info(),
+        tooling=config.tool_trace_info(tool_tracker),
     )
 
 
@@ -1311,6 +1497,8 @@ async def run_standard_deliberation(
 
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
+    tool_tracker = ToolCallTracker()
+    client = _apply_native_web_tools(client, config, tool_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
     quorum: dict[str, QuorumCheck] = {}
@@ -1450,7 +1638,7 @@ async def run_standard_deliberation(
         quorum=quorum,
         failures=failures,
         usage=usage_tracker.summary(),
-        tooling=config.tool_trace_info(),
+        tooling=config.tool_trace_info(tool_tracker),
     )
 
 
@@ -1589,6 +1777,8 @@ async def run_planning_deliberation(
 
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
+    tool_tracker = ToolCallTracker()
+    client = _apply_native_web_tools(client, config, tool_tracker)
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
 
@@ -1694,7 +1884,7 @@ async def run_planning_deliberation(
         failed_topics=failed_topics,
         plan_document=plan_document,
         usage=usage_tracker.summary(),
-        tooling=config.tool_trace_info(),
+        tooling=config.tool_trace_info(tool_tracker),
     )
 
 
