@@ -1,14 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Copy } from "lucide-react";
+import { toast } from "sonner";
 import type { PlanDocument, SectionAnswer } from "@mmd/protocol";
 import type { TopicResult } from "@mmd/orchestrator";
 import { cn } from "@/lib/cn";
 import { messages } from "@/lib/messages";
+import { buildPlanReportText } from "@/lib/transcript";
 import { ConsensusSection } from "./results/ConsensusSection";
 import { DeliberationRecord } from "./results/DeliberationRecord";
 import { Markdown } from "./Markdown";
+import { IconButton } from "./ui/icon-button";
 
 function sectionAnchor(topicId: string) {
   return `section-${topicId}`;
@@ -78,6 +81,12 @@ export function PlanDocumentView({
   topics: TopicResult[];
 }) {
   const topicById = new Map(topics.map((t) => [t.topic.topic_id, t]));
+
+  const copyReport = async () => {
+    await navigator.clipboard.writeText(buildPlanReportText(planDocument));
+    toast.success(messages.results.planCopied);
+  };
+
   return (
     <div className="flex flex-col gap-4">
       {/* 目录 */}
@@ -106,9 +115,14 @@ export function PlanDocumentView({
 
       {/* 执行摘要 */}
       <section className="rounded-lg border border-border bg-surface p-6 shadow-card">
-        <h2 className="text-lg font-semibold text-ink">
-          {messages.results.executiveSummary}
-        </h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-lg font-semibold text-ink">
+            {messages.results.executiveSummary}
+          </h2>
+          <IconButton size="sm" label={messages.results.copyPlan} onClick={copyReport}>
+            <Copy className="h-4 w-4" />
+          </IconButton>
+        </div>
         <div className="mt-3 leading-relaxed">
           <Markdown text={planDocument.executive_summary} />
         </div>

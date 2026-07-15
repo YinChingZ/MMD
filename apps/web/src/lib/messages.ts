@@ -188,6 +188,8 @@ export const messages = {
     copyQuestion: "复制提问",
     copyTranscript: "复制协商过程",
     transcriptCopied: "协商过程已复制",
+    copyPlan: "复制报告",
+    planCopied: "报告已复制",
   },
 
   images: {

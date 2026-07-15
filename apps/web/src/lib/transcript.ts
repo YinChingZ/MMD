@@ -1,4 +1,10 @@
-import type { Critique, Proposal, RevisionSet, VoteSet } from "@mmd/protocol";
+import type {
+  Critique,
+  PlanDocument,
+  Proposal,
+  RevisionSet,
+  VoteSet,
+} from "@mmd/protocol";
 import type { RunResult } from "./api";
 import { messages } from "./messages";
 
@@ -100,4 +106,13 @@ export function buildTranscript(result: RunResult): string {
   }
 
   return lines.join("\n");
+}
+
+/** 规划模式的干净报告正文（执行摘要 + 分节结论，不含审议记录），供"复制报告"使用。 */
+export function buildPlanReportText(planDocument: PlanDocument): string {
+  const lines: string[] = [planDocument.executive_summary, ""];
+  for (const section of planDocument.sections) {
+    lines.push(`## ${section.title}`, "", section.section_answer, "");
+  }
+  return lines.join("\n").trim();
 }
