@@ -1,55 +1,87 @@
-# Prior Art and Competitive Analysis
+# Related Work and Competitive Analysis (2026-07 Snapshot)
 
 *[中文](prior-art.md)*
 
-This document records related projects investigated while discussing/promoting MMD in various communities, so the research doesn't need to be redone later, and to ground MMD's differentiation claims in specifics rather than assertion. Researched: 2026-07.
+This is a dated market and research snapshot derived from the full comparison in [`research/mmd-comparative-landscape-2026-07/`](../research/mmd-comparative-landscape-2026-07/). Stars, releases, and public features change; mechanism classifications and MMD's design risks should be revisited as evidence changes.
 
-## OpenRouter Fusion Router
+## Positioning conclusion
 
-- **Mechanism**: a panel of up to 8 models answers in parallel, each with web search/tool access → a judge model reads all panel responses and produces a structured comparative analysis (consensus points, disagreements, coverage gaps, per-model unique insights, blind spots — the judge "doesn't merge them," it doesn't do text merging) → the outer model that received the original request writes the final answer text based on that analysis.
-- **Config**: `analysis_models` (the panel, 1-8 models), `model` (the judge's identity), `max_tool_calls`, `temperature` (fixed at 0 for the judge), etc.
-- **Cost**: a default 3-model panel costs roughly 4-5x a single completion (N panel calls + 1 judge call + 1 outer synthesis call).
-- **Traceability**: only a top-level `model` field and a `router` field in generation metadata — no per-point attribution back to a specific model's claim.
-- **Recursion guard**: an `x-openrouter-fusion-depth` header prevents panel/judge models from triggering Fusion recursively.
-- **Key differences from MMD**:
-  1. Consensus comes from a single judge model's subjective read, not a deterministic function computed over each model's own explicit votes.
-  2. No claim-level traceability requirement.
-  3. Single round — the panel answers once, with no critique/revise loop where models actually update their positions.
-  4. Panel models have built-in web search/tool access, which MMD currently lacks.
+MMD should not claim to be the first multi-model system, to eliminate all single-model power, or to occupy an empty LiteLLM ecosystem. A more accurate position is:
 
-## EricThomson/litesquad
+> MMD is an audit-first, claim-level multi-model deliberation workbench. It preserves claim lineage, revisions, and objections, and computes support labels deterministically instead of asking one judge model to declare consensus.
 
-- **Mechanism**: worker models (Gemini/Sonnet/DeepSeek/Mistral/Llama) answer independently → a single fixed critic model (Grok) critiques every worker → workers revise based on the critique → a clustering pass (GPT-5) extracts common suggestions → a final judge (Opus) turns the clustered suggestions into "a coherent final answer."
-- **Pitch**: "sometimes two or five heads really are better than one."
-- **Providers**: Gemini/OpenAI/Anthropic direct; DeepSeek/Mistral/Llama/Grok/Qwen etc. via OpenRouter.
-- **Usage**: `litesquad "query"` (deep mode, takes minutes) / `--quick` (bypasses the team) / `--web`.
-- **Explicitly stated limitation**: "no agentic tool use, e.g. web calls. Reasoning only"; **no result attribution mechanism — it does not track where a suggestion came from**.
-- **Maturity**: 0 stars, 20 commits, Apache-2.0 license — a similarly early-stage prototype, not a mature competitor.
-- **Key differences from MMD**:
-  1. Roles are bound to specific models (worker/critic/clusterer/judge are each a fixed model), not a symmetric set of arbitrary N models classified by ratio — changing the model count means redesigning the pipeline, unlike MMD's `classifyCandidate`, which is a pure function that naturally supports any model count.
-  2. Critique is one fixed critic reviewing every worker one-directionally, not models critiquing each other.
-  3. The final answer comes from a single judge model's subjective synthesis, not a deterministic classification over explicit votes.
-  4. The docs explicitly acknowledge no traceability mechanism — exactly the problem MMD's schema-enforced, required, non-empty `source_claim_ids` was built to solve.
+Its differentiation is a claim-level audit data model, deterministic support labels, and real-run failure/cost/trace discipline—not a metaphor of democracy.
 
-## Current state of the LiteLLM ecosystem
+## Three comparison layers
 
-Searching `BerriAI/litellm`'s open, `enhancement`-labeled issues for keywords (orchestrator / ensemble / consensus / judge / multiple models / best of) turned up **no feature or proposal for "multiple models answer in parallel, then get synthesized/deliberated into one answer."** The two closest hits:
+### 1. Direct competitors
 
-- `#27550`, "Add LLM as orchestrator to choose which LLM to call" — fundamentally single-model routing/fallback: pick one model out of several candidates to call, not synthesizing multiple models' outputs.
-- The `llm_as_a_judge` guardrail (related issues: `#30731`, `#27888`, `#27767`) — scores **a single model's single output** for safety/quality to decide whether to allow it through. Not a multi-model consensus mechanism, despite the name inviting confusion.
+- **Amiable Dev LLM Council**: independent answers, anonymous review, Borda ranking, a Chairman, dissent, cost controls, failure degradation, and adaptive compute. It is stronger on answer-level ranking, entry points, and bias control; MMD is finer-grained on claim lineage, revision, and objection severity.
+- **MALLM**: composable personas, response generators, topologies, and decision protocols with dataset/evaluation support. It is a research-platform benchmark and substantially more ablatable than current MMD.
+- **RECONCILE**: heterogeneous models repeatedly inspect and revise answers before confidence-weighted voting. It fits closed-ended reasoning but lacks MMD's general claim lineage.
+- **Karpathy LLM Council**: independent answers, anonymous ranking, and a Chairman. The mechanism is short and well known, though the project explicitly disclaims ongoing maintenance.
+- **Council Engine**: proposals, constrained critique, and lead resolution that can return recommendation, alternatives, question, or investigate—better than a forced answer when information is insufficient.
+- **Star Chamber**: structured sources, clustering, and deterministic consensus/majority/individual buckets for code review, showing that deterministic buckets and provenance are not unique to MMD.
+- **OpenRouter Fusion**: panel, structured judge analysis, and an outer-model answer with native search integration. It is a low-friction product path but exposes no MMD-style per-candidate lineage.
+- **litesquad**: workers, one critic, revision, a clusterer, and a judge. It is runnable but role-bound and lacks claim-level provenance.
+- **rachittshah/llmcouncil**: vote, debate, synthesize, critique, red-team, and MAV protocols, useful as a multi-protocol tool comparison.
 
-Conclusion: litellm currently has two layers — "route to which model" and "score a single output" — and nothing resembling "have several models answer, then deliberate them into one conclusion." The capability layer MMD occupies is currently absent from the litellm ecosystem; there's no overlap or duplication of effort.
+### 2. Mechanism baselines
 
-## Positioning comparison
+- **LLM-Blender**: PairRanker plus GenFuser.
+- **Mixture-of-Agents (MoA)**: layered parallel generation and aggregation.
+- **Classic Multi-Agent Debate / Multi-LLM Debate**: tests interaction and conformity/error propagation.
+- **ChatEval / Language Model Council**: clarifies the boundary between multi-model evaluation and answer generation.
+- **Same-model sampling, majority/approval vote, and simple judge synthesis**: control for the benefit of extra calls or tokens alone.
 
-| Dimension | Fusion Router | litesquad | LiteLLM (current state) | MMD |
-|---|---|---|---|---|
-| How the final answer is decided | Single judge model's subjective analysis + outer-model synthesis | Single judge model (Opus), subjective synthesis | N/A (single-model routing/scoring) | Deterministic function over explicit votes (ratio thresholds); no model has unilateral authority |
-| Per-point traceability | Only a top-level `model` field | Explicitly none | N/A | Schema-required, non-empty `source_claim_ids` |
-| Do models critique each other | No (judge reviews the panel one-directionally) | No (one fixed critic reviews workers one-directionally) | N/A | Yes — all models critique each other during Critique, and can revise their own position afterward |
-| Is the model count hardcoded | Panel of 1-8; classification logic undisclosed | Roles bound to specific models | N/A | Ratio-based thresholds, works for any N (tested at 3/5/7) |
-| Tools/web search | Yes | Explicitly none | Provider-level capability, not this layer | Not currently |
-| Single-round vs. multi-round | Single round | Single round (with one revision pass) | N/A | Multi-round (critique→revise→vote), with a single-round `quick` mode available |
-| Maturity | Production infrastructure feature | Early prototype (0 stars) | This capability layer doesn't exist yet | Early prototype (M0-v0.2, CLI) |
+These are not necessarily product substitutes, but they directly challenge causal claims. If simple sampling plus ranking/fusion matches MMD under the same models and token/dollar budget, a better final score alone cannot establish the necessity of six-stage interaction.
 
-**Takeaway**: MMD's real difference from Fusion and litesquad isn't "having multiple models involved" — both of those already do. It's two specific things: **whether any single model is granted authority over the consensus outcome** (MMD hands that to a deterministic function over explicit votes; both Fusion and litesquad hand it to one judge model's subjective read), and **whether traceability is a protocol-level, enforced constraint** (MMD, yes; neither of the others, as far as documented). In the litellm ecosystem, this entire capability layer doesn't currently exist.
+### 3. Adjacent ecosystems
+
+AutoGen, CAMEL, CrewAI, MetaGPT, and AgentVerse are general multi-agent runtimes/frameworks. They support tools, memory, handoffs, workflows, and external side effects. MMD is better understood as a deliberation team pattern that could be embedded in them, not a replacement.
+
+LiteLLM core primarily provides gateway, routing, fallback, cost, and reliability functions. It does not define a complete deliberation protocol natively, but it can host Council/MAD applications; the claim that MMD's ecosystem niche is empty is therefore false.
+
+## Mechanism comparison
+
+| System | Core mechanism | Authoritative decision/output | Claim lineage | Dissent | Primary strength |
+|---|---|---|---:|---:|---|
+| MMD Standard-C | critique→revision→normalize→claim vote | host classification ledger; coordinator prose | ● | ● | auditability, retained failures, product trace |
+| MMD Standard-D | peer Align→host clustering→vote | host ledger; current coordinator prose | ● | ● | tests centralized versus distributed candidate governance |
+| Amiable Council | anonymous answer ranking→Chairman | Borda + Chairman | — | ◐ | bias control, CI/API, adaptive compute |
+| MALLM | composable topology and decision protocol | configuration-dependent | — | ◐ | academic experimental freedom |
+| RECONCILE | repeated revision→confidence-weighted vote | weighted vote | — | — | heterogeneous closed-ended reasoning |
+| Fusion | panel→judge analysis→outer answer | judge + outer model | — | ● | hosted search and low friction |
+| Star Chamber | finding clustering→deterministic buckets | deterministic buckets | ◐ | ● | actionable domain schema |
+| LLM-Blender/MoA | ranking/fusion or layered aggregation | ranker/fuser/aggregator | — | — | strong quality/compute baseline |
+
+## Capabilities that still differentiate MMD
+
+- Candidate `source_claim_ids` are a schema constraint, not merely a transcript.
+- Ballots, objection severity, and classifier inputs are auditable.
+- Critical/major objections enter deterministic rules instead of being freely interpreted by a composer.
+- Trace and product UI share one data model; failed runs retain completed artifacts.
+- Planning preserves topic ledgers and uses one GlobalCompose with output-span lineage.
+
+## Shortcomings and counterarguments that must remain visible
+
+- **Normalize is an information bottleneck**: a centralized coordinator can false-merge, false-split, or omit a correct minority claim. Lineage audits only what survived.
+- **Compose can still soften a decision**: deterministic labels do not prevent prose from laundering disputed/rejected content. Current Standard-D still has a coordinator presentation call, and its fidelity checker is incomplete.
+- **Standard-D is not proven superior**: peer alignment may increase false splits, cost, and abstention. Without MMD's own dual-architecture evidence, distributed governance cannot be claimed generally better.
+- **No systematic anonymization or self-vote control**: model/provider identity may bias critique and voting.
+- **Limited protocol plugability**: research flexibility is weaker than MALLM.
+- **No adaptive depth or consensus calibration evidence**: a support label must not be marketed as factual reliability.
+- **No unified public compute-matched benchmark**: quality, cost, latency, and run-to-run variance remain under-evidenced.
+- **Unclear license**: the repository currently has no root `LICENSE`; source visibility does not grant rights to use, modify, or redistribute it.
+
+Adding Standard-D does not erase these centralized-coordinator risks. Historical research documents should retain them because they motivate the governance comparison.
+
+## Recommended comparison discipline
+
+1. Compare single, same-model multi-sample, majority, ranking/fusion, anonymous council, and MMD Quick/Standard on the same models, questions, and budget.
+2. Report semantic quality, presentation quality, lineage coverage, false merge/split, dissent survival, cost, latency, and partial failure separately.
+3. Do not use call count as a proxy for token cost; Align repeats claims and GlobalCompose has a large context.
+4. Do not equate consensus labels with correctness; calibrate them using closed-set truth and human evaluation.
+5. Report only preregistered conditional pipeline contrasts for Standard-C/D; do not present Normalize and Compose as naturally additive mechanism constants.
+
+External links, access dates, and unverified items are recorded in the research directory's [`sources.md`](../research/mmd-comparative-landscape-2026-07/sources.md).

@@ -4,6 +4,18 @@
 
 本文档是 M5.4 的产出，描述如何把 `apps/api`（Fastify + Postgres）和 `apps/web`（Next.js）容器化并部署。此前唯一验证过的运行方式是本地 `npm run dev`/`npm run start` + Homebrew Postgres；这是第一条可复现的部署路径。
 
+## Protocol v3 数据迁移与兼容
+
+当前镜像的新运行使用 `mmd.v3`。部署时必须执行全部数据库 migration；
+`0010_protocol_v3.sql` 会新增 run governance、`run_results.trace`、
+`run_results.planning_final`、`run_traces` 和 `run_artifacts`，并把新 run 的
+`protocol_version` 默认值改为 `mmd.v3`。现有旧 run 不会被重写或补造 v3 lineage。
+
+API 启动命令已经在服务启动前运行幂等 migration。滚动发布时应先确认数据库
+迁移成功，再让新进程接收请求。`GET /api/runs/:id/trace` 可读取运行中、完成或
+失败 run 已保存的 snapshot；后续 phase 失败不会删除先前持久化的 artifacts。
+版本和 legacy-read 规则见 [versioning.md](versioning.md)。
+
 ## 为什么两个 Dockerfile 都要从仓库根目录构建
 
 `apps/api`/`apps/web` 都通过包名 import `packages/protocol`、`packages/orchestrator` 等——这是 npm workspaces 通过根目录 `node_modules` 里的符号链接（如 `node_modules/@mmd/protocol -> ../packages/protocol`）解析的。因此构建命令必须是：

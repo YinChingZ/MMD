@@ -4,6 +4,21 @@
 
 This document is M5.4's output: how to containerize and deploy `apps/api` (Fastify + Postgres) and `apps/web` (Next.js). The only previously-validated way to run this project was local `npm run dev`/`npm run start` + Homebrew Postgres; this is the first reproducible deployment path.
 
+## Protocol v3 data migration and compatibility
+
+New runs on the current images use `mmd.v3`. A deployment must execute every
+database migration. `0010_protocol_v3.sql` adds run governance,
+`run_results.trace`, `run_results.planning_final`, `run_traces`, and
+`run_artifacts`, and changes the default `protocol_version` for new runs to
+`mmd.v3`. Existing legacy runs are not rewritten and receive no fabricated v3
+lineage.
+
+The API startup command already runs idempotent migrations before serving. For
+a rolling release, verify that migration completes before the new process takes
+traffic. `GET /api/runs/:id/trace` can read the persisted snapshot of running,
+completed, or failed runs; a later phase failure does not delete earlier
+artifacts. See [versioning.en.md](versioning.en.md) for legacy-read rules.
+
 ## Why both Dockerfiles build from the repo root
 
 `apps/api`/`apps/web` import `packages/protocol`, `packages/orchestrator`, etc. by package name — resolved through npm workspaces' hoisted root `node_modules` symlinks (e.g. `node_modules/@mmd/protocol -> ../packages/protocol`). So the build commands must be:

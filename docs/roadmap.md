@@ -2,9 +2,11 @@
 
 > 历史路线图：本文保留 pre-v3 里程碑和当时的 `section-compose` 实施记录。
 > 当前权威架构见 [protocol.md](protocol.md)；新 Planning 运行只执行一次
-> GlobalCompose，旧 `PlanDocument` 仅为读取/UI 兼容投影。
+> GlobalCompose，旧 `PlanDocument` 仅为读取/UI 兼容投影。本文中的 M0–M6、
+> `v0.2` 和各子里程碑是开发历史编号，不是 `mmd.v3`/`mmd.trace.v3` 兼容版本；
+> 版本规则见 [versioning.md](versioning.md)。
 
-日期：2026-07-03（最后更新 2026-07-05，M5 全部完成）
+日期：2026-07-03（历史记录延续至 2026-07-09，M6.1–M6.6 全部完成）
 配套文档：原始技术设计文档 `multi-model-deliberation-tech-design.md`（仓库外，未纳入版本库）、[protocol.md](protocol.md)
 
 ## 当前进度

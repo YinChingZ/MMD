@@ -2,7 +2,8 @@
 
 > 历史设计说明：本文记录的是 pre-v3 实施过程，其中的 `section-compose`
 > 仅用于解释旧运行。新执行以 [protocol.md](protocol.md) 为准，Planning 只执行
-> 一次 GlobalCompose。
+> 一次 GlobalCompose。下文“尚未实现”“当前接口”等措辞保留设计当时的状态；
+> M6.1–M6.6 后来已全部完成，最终实施事实和偏离见 [roadmap.md](roadmap.md)。
 
 本文档分析在现有架构基础上支持以下四项能力的可行性、改动范围和实施顺序：
 
@@ -11,7 +12,7 @@
 3. 多模态 input
 4. JSON output（按用户指定格式输出）
 
-这四项里，现有系统已经有**内部固定 JSON 协议输出**（各阶段 zod schema + repair 重试）；本文档里的 "JSON output" 特指**用户在发起 run 时指定最终输出 JSON 格式**，这一能力尚未实现。本文档是设计分析，不是已落地功能的说明（不同于 [protocol.md](protocol.md)/[deployment.md](deployment.md) 这类描述现状的文档）。**这四项能力已正式列入开发路径，作为 [roadmap.md](roadmap.md) 的 M6 里程碑，按本文档第 5 节的推荐顺序拆成 M6.1–M6.6；roadmap 的"M6"一节只列范围、顺序和验收方向，详细可行性与取舍以本文档为准（分工同 protocol.md/roadmap.md：那边讲"做什么、按什么顺序"，这里讲"为什么这么设计"）。**
+这四项里，设计当时的系统已经有**内部固定 JSON 协议输出**（各阶段 zod schema + repair 重试）；本文档里的 "JSON output" 特指**用户在发起 run 时指定最终输出 JSON 格式**。本段以下主要保留实施前分析，不作为当前能力清单；M6.1–M6.6 的最终完成状态、测试和设计偏离以 [roadmap.md](roadmap.md) 为准。
 
 ## 结论摘要
 

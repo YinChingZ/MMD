@@ -1,55 +1,87 @@
-# 相关工作与竞品分析（Prior Art）
+# 相关工作与竞品分析（2026-07 快照）
 
 *[English](prior-art.en.md)*
 
-本文档记录在推广/社区讨论过程中调研过的相关项目，避免以后重复调研，也作为 MMD 差异化定位的依据。调研时间：2026-07。
+本文是带日期的市场与研究快照，来源于 [`research/mmd-comparative-landscape-2026-07/`](../research/mmd-comparative-landscape-2026-07/) 的全面对比。stars、release 和公开功能会变化；机制分类与 MMD 的设计风险应随新证据复核。
 
-## OpenRouter Fusion Router
+## 定位结论
 
-- **机制**：panel（最多 8 个模型并行回答，每个模型带网页搜索/工具调用）→ judge 模型读取所有 panel 回答，产出结构化对比分析（共识点、分歧点、覆盖差异、各模型独有见解、盲点——judge "doesn't merge them"，不做文本合并）→ 发起请求的外层模型基于这份分析生成最终答案文字。
-- **配置**：`analysis_models`（面板模型，1-8 个）、`model`（judge 身份）、`max_tool_calls`、`temperature`（judge 固定为 0）等。
-- **成本**：默认 3 模型面板约为单次调用的 4-5 倍（N 次 panel + 1 次 judge + 1 次外层合成）。
-- **溯源**：响应里只有顶层 `model` 字段和生成元数据里的 `router` 字段，没有逐条结论级别的来源追溯。
-- **防递归**：内层调用带 `x-openrouter-fusion-depth` 头，防止 panel/judge 再次触发 Fusion。
-- **与 MMD 的关键差异**：
-  1. 共识判断来自单个 judge 模型的主观解读，而不是对各模型自身显式投票结果做确定性函数计算。
-  2. 没有逐条 claim 级别的强制溯源。
-  3. 单轮——panel 各答一次，没有 critique/revise 迭代修订立场的过程。
-  4. panel 模型自带网页搜索/工具调用，这是 MMD 目前没有的能力。
+MMD 不应定位为“第一个多模型系统”，也不应声称“没有任何单模型权力”或“LiteLLM 生态没有竞品”。更准确的定位是：
 
-## EricThomson/litesquad
+> MMD 是 audit-first、claim-level 的多模型审议工作台。它保存 claim lineage、修订和异议，并用确定性规则计算支持标签，而不是让单个 judge 模型直接宣布共识。
 
-- **机制**：worker 模型（Gemini/Sonnet/DeepSeek/Mistral/Llama）分发作答 → 单一固定 critic 模型（Grok）批评所有 worker → worker 基于批评修订 → 聚类阶段（GPT-5）提取共同建议 → 最终 judge（Opus）把聚类结果整合成"连贯的最终答案"。
-- **定位**："有时两个或五个头脑确实胜过一个。"
-- **模型接入**：Gemini/OpenAI/Anthropic 直连，DeepSeek/Mistral/Llama/Grok/Qwen 等经 OpenRouter。
-- **用法**：`litesquad "query"`（深度模式，耗时数分钟）/ `--quick`（绕过团队）/ `--web`。
-- **明确声明的限制**："无 agentic 工具调用（如网络请求），仅推理"；**无结果溯源机制，不追踪建议来源**。
-- **开发阶段**：0 star，20 次提交，Apache-2.0 许可，和 MMD 处于相近的早期原型阶段（不是成熟竞品）。
-- **与 MMD 的关键差异**：
-  1. 角色和具体模型是绑定死的（worker/critic/clusterer/judge 各自固定某个模型），不是任意 N 个模型对称参与、按比例判定共识——模型数一变就要重新设计管线，不像 MMD 的 `classifyCandidate` 是纯函数、天然支持任意模型数。
-  2. 批评是单一固定 critic 单向点评所有 worker，不是模型之间互相批评。
-  3. 最终答案由单一 judge 模型主观整合而成，不是对显式投票的确定性分类。
-  4. 文档明确承认无溯源机制——这正是 MMD 用 schema 强制要求 `source_claim_ids`（非空必填）专门解决的问题。
+MMD 的差异化是命题级审计数据模型、确定性支持标签和真实运行下的 failure/cost/trace 纪律，不是“民主”隐喻。
 
-## LiteLLM 生态现状
+## 三层比较框架
 
-在 `BerriAI/litellm` 的 open + `enhancement` 标签 issue 中按关键词（orchestrator / ensemble / consensus / judge / multiple models / best of）搜索，**没有发现任何"多个模型并行回答，再综合/协商出一个答案"的功能或提案**。最接近的两类：
+### 1. 直接竞品
 
-- `#27550`「Add LLM as orchestrator to choose which LLM to call」——本质是单模型路由/fallback：从多个候选模型里选一个来调用，不涉及多模型输出的综合。
-- `llm_as_a_judge` guardrail（相关 issue：`#30731`、`#27888`、`#27767`）——对**单个模型的单次输出**做安全/质量打分来决定是否放行，不是多模型共识机制，命名容易让人误以为相关，实际是另一回事。
+- **Amiable Dev LLM Council**：独立回答、匿名互评、Borda 排名、Chairman、dissent、成本、失败降级和 adaptive compute。它偏回答级排名，工程入口和 bias control 强于 MMD；MMD 的 claim lineage、revision 和 objection severity 更细。
+- **MALLM**：可组合 persona、response、topology 和 decision protocol，并带 dataset/eval。它是研究平台基准，协议可消融性明显强于当前 MMD。
+- **RECONCILE**：异构模型多轮互看、修订和置信度加权投票。适合闭集推理；没有 MMD 的通用 claim lineage。
+- **Karpathy LLM Council**：独立回答、匿名排名、Chairman，机制简短且用户认知度高，但项目明确不长期维护。
+- **Council Engine**：proposal、受限批评和 lead resolution，能输出 recommendation、alternatives、question 或 investigate，比“强制一个答案”更善于表达信息不足。
+- **Star Chamber**：代码审查场景的结构化来源、聚类和 deterministic consensus/majority/individual 分桶，证明确定性分桶和来源追踪并非 MMD 独占。
+- **OpenRouter Fusion**：panel、structured judge analysis、outer-model answer，并原生结合搜索。低摩擦产品能力强，但公开接口没有 MMD 的逐 candidate lineage。
+- **litesquad**：workers、单一 critic、revision、clusterer 和 judge。可运行但角色绑定、缺少 claim-level provenance。
+- **rachittshah/llmcouncil**：支持 vote/debate/synthesize/critique/red-team/MAV 等协议，适合作为多协议工具对照。
 
-结论：litellm 目前只有"路由到哪个模型"和"给单次输出打分"这两层能力，完全没有"多个模型都答一遍、再协商出一个结论"这一层。MMD 所在的能力层在 litellm 生态里目前是空白，不构成重复建设或竞争关系。
+### 2. 机制 baseline
 
-## 定位对照表
+- **LLM-Blender**：PairRanker + GenFuser。
+- **Mixture-of-Agents (MoA)**：分层并行生成与 aggregator。
+- **经典 Multi-Agent Debate / Multi-LLM Debate**：检验互动与从众/错误传播。
+- **ChatEval / Language Model Council**：多模型评委与回答生成系统的边界。
+- **same-model sampling、majority/approval vote、简单 judge synthesis**：控制“更多调用或更多 tokens”本身的收益。
 
-| 维度 | Fusion Router | litesquad | LiteLLM（现状） | MMD |
-|---|---|---|---|---|
-| 最终结论产生方式 | 单一 judge 模型主观分析 + 外层模型合成 | 单一 judge 模型（Opus）主观整合 | 不适用（单模型路由/打分） | 对显式投票的确定性函数（比例阈值），无模型拥有裁决权 |
-| 逐条溯源 | 仅顶层 `model` 字段 | 明确声明无 | 不适用 | schema 强制 `source_claim_ids`，非空必填 |
-| 模型间是否互评 | 否（judge 单向点评 panel） | 单一 critic 单向点评 worker | 不适用 | 是——critique 阶段所有模型互评，revise 阶段可修订立场 |
-| 模型数量是否硬编码 | 面板 1-8，判定逻辑未公开 | 角色与具体模型绑定 | 不适用 | 比例阈值，任意 N（3/5/7 均有测试覆盖） |
-| 工具/网页搜索 | 有 | 明确声明无 | 提供商能力对接，非本层功能 | 目前没有 |
-| 单轮/多轮 | 单轮 | 单轮（含一次修订） | 不适用 | 多轮（critique→revise→vote），也提供 quick 单轮模式 |
-| 成熟度 | 生产级基础设施功能 | 早期原型（0 star） | 该能力层生态位空白 | 早期原型（M0-v0.2，CLI） |
+这些不是产品替代品，但直接挑战 MMD 的因果主张：若同模型、同 token/美元预算下的简单 sampling + ranking/fusion 已达到相同质量，六阶段互动不能仅凭最终分数证明必要。
 
-**结论**：MMD 与 Fusion、litesquad 的核心差异不在"有没有多个模型参与"，而在于两点：**共识判定权是否被交给某一个模型**（MMD 交给对显式投票的确定性函数，两者都交给一个 judge 模型的主观解读），以及**溯源是否是协议层面的强制约束**（MMD 是，两者都不是/未公开）。在 litellm 生态里，这一整层能力目前不存在。
+### 3. 邻近生态
+
+AutoGen、CAMEL、CrewAI、MetaGPT 和 AgentVerse 是通用 multi-agent runtime/框架。它们能做 tools、memory、handoff、workflow 和外部副作用；MMD 更像可以嵌入这些系统的审议 team pattern，而不是替代它们。
+
+LiteLLM core 主要提供 gateway、routing、fallback、cost 和 reliability。它不原生定义完整审议协议，但完全可以承载 Council/MAD 应用，因此“MMD 所在生态位为空白”是不成立的。
+
+## 机制对照
+
+| 系统 | 核心机制 | 决策/输出权威 | Claim lineage | 分歧保留 | 主要优势 |
+|---|---|---|---:|---:|---|
+| MMD Standard-C | 互评→修订→归一→逐 claim 投票 | host classification ledger；coordinator prose | ● | ● | 审计、失败保留、产品化 trace |
+| MMD Standard-D | peer Align→host 聚类→投票 | host ledger；当前仍有 coordinator prose | ● | ● | 研究候选治理权的集中/分布差异 |
+| Amiable Council | 匿名回答级排名→Chairman | Borda + Chairman | — | ◐ | bias control、CI/API、adaptive compute |
+| MALLM | 可组合拓扑和 decision protocol | 依配置 | — | ◐ | 学术实验自由度 |
+| RECONCILE | 多轮修订→置信度加权票 | weighted vote | — | — | 异构闭集推理 |
+| Fusion | panel→judge analysis→outer answer | judge + outer model | — | ● | 托管、搜索、低摩擦 |
+| Star Chamber | finding 聚类→确定性分桶 | deterministic buckets | ◐ | ● | 领域 schema 可直接行动 |
+| LLM-Blender/MoA | ranking/fusion 或分层 aggregation | ranker/fuser/aggregator | — | — | 强质量/compute baseline |
+
+## MMD 仍有区分度的能力
+
+- candidate 的 `source_claim_ids` 是 schema 约束，不只是 transcript。
+- ballots、objection severity 和 classification inputs 可审计。
+- critical/major 异议进入确定性规则，而不是由 composer 自由解释。
+- trace 与产品 UI 共用同一数据模型；运行中失败仍保存已完成 artifacts。
+- Planning 保留 topic ledgers，并用一次 GlobalCompose 形成跨主题答案与 span lineage。
+
+## 必须保留的短板与反方判断
+
+- **Normalize 是信息瓶颈**：集中 coordinator 可能 false merge、false split 或漏掉少数正确 claim；lineage 只能审计已经保留的内容。
+- **Compose 仍可能软性改判**：标签虽确定，prose 可能淡化 disputed/rejected。Standard-D 当前也仍有 coordinator presentation call，fidelity checker 尚未完成。
+- **Standard-D 不是已验证优越方案**：peer alignment 可能提高 false split、成本和 abstention。没有 MMD 自身双架构实测时，不应宣称分布式普遍更好。
+- **缺少系统匿名化和自投偏差控制**：模型/provider identity 可能影响 critique/vote。
+- **协议可插拔性有限**：研究自由度弱于 MALLM。
+- **无自适应深度和共识校准证据**：support label 不能宣传成事实可信度。
+- **公开 benchmark 和 compute-matched 证据不足**：真实质量、成本、延迟和方差尚未形成统一公开结果。
+- **许可证不明确**：仓库根目录当前没有明确 `LICENSE`；代码可见不等于获得使用、修改和再分发授权。
+
+新增 Standard-D 不会抹除这些集中式 coordinator 风险。历史研究文档中的瓶颈判断应保留，因为它们正是引入治理对照的研究动机。
+
+## 建议的比较纪律
+
+1. 同模型、同题、同预算比较 single、same-model multi-sample、majority、ranking/fusion、anonymous council、MMD Quick/Standard。
+2. 分开报告 semantic quality、presentation quality、lineage coverage、false merge/split、dissent survival、cost、latency 和 partial failure。
+3. 不把调用数当作 token 成本；Align 会重复发送 claims，GlobalCompose 有大上下文。
+4. 不把 consensus label 当作 correctness；用闭集真值和人评做校准。
+5. 对 Standard-C/D 只报告预注册的条件性 pipeline contrasts，不声称 Normalize/Compose 是天然可加的纯机制常数。
+
+外部链接、访问日期和无法验证项见研究目录的 [`sources.md`](../research/mmd-comparative-landscape-2026-07/sources.md)。

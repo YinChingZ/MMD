@@ -55,7 +55,8 @@ cp apps/cli/.env.example apps/cli/.env
 
 编辑 `apps/cli/models.config.json`，填入每个参与模型的 OpenAI-compatible
 `baseUrl` 和真实 `modelId`；编辑 `apps/cli/.env`，填入配置里引用的 API key
-环境变量。不要把真实 key 写进 README 或提交到 git。
+环境变量。不要把真实 key 写进 README 或提交到 git。若第 4 步使用 Quick，
+该配置必须恰好包含两个不同模型；普通 `mmd.v3` Quick 不接受 N=3。
 
 4. 先跑 3 题 smoke test：
 
@@ -95,8 +96,8 @@ npx tsx benchmarks/hle/src/run-mmd-predictions.ts \
 这个命令会自动断点续跑：如果 `benchmarks/hle/out/mmd_hle_predictions.json`
 已经存在，已完成的题目会被跳过。只有想从头重跑时才加 `--fresh`。
 `--cost-limit-usd` 是单道题的一次 MMD run 成本上限，不是整轮 HLE 的全局预算。
-如果看到 `timeout after 40000ms`，通常是 `quick` 模式默认单次模型调用超时
-只有 40 秒；HLE 题目和 OpenRouter 排队都可能超过这个时间。把
+如果看到 provider timeout，HLE 题目和 OpenRouter 排队都可能超过默认单次
+调用期限。把
 `--timeout-ms` 提高到 `180000` 或 `300000` 后直接重跑同一个输出文件即可，
 不要加 `--fresh`，适配器会跳过已经完成的题目。
 
@@ -120,10 +121,11 @@ python run_judge_results.py \
 `Calibration Error`。如果 judge 中途因为限流失败，直接重跑同一条命令；
 官方脚本会复用已经写出的 judged cache。
 
-MMD 当前是 text-only provider 接口。默认
+MMD 产品主路径已经支持 propose 阶段图片输入，但当前 HLE adapter 仍只构造
+文本 prompt，没有把 HLE 图片转换成 MMD 的 image content parts。默认
 `--image-policy mark-unsupported` 会把 HLE 图片题写成 `Answer: unsupported`、
-`Confidence: 0%`，从而明确记录当前系统没有参与视觉题。等 MMD 支持多模态后，
-再把这个 policy 换成真正的 image-aware 路径。
+`Confidence: 0%`，从而明确记录该 adapter 没有参与视觉题。启用视觉 benchmark
+前必须在本目录实现并验证 image-aware adapter path，不能把产品能力等同于 benchmark 覆盖。
 
 ## 1. Export the HLE dataset
 
@@ -165,10 +167,11 @@ npx tsx benchmarks/hle/src/run-mmd-predictions.ts \
 Useful flags:
 
 - `--max-samples 3` runs a small smoke test.
-- `--mode quick` lowers cost by skipping critique/revise/vote.
+- `--mode quick` lowers cost by skipping critique/revise/vote, but the resolved
+  model configuration must contain exactly two distinct models under `mmd.v3`.
 - `--fresh` ignores an existing output file instead of resuming it.
-- `--image-policy mark-unsupported` is the default because MMD is currently
-  text-only; image questions are recorded with confidence `0%`.
+- `--image-policy mark-unsupported` is the default because this HLE adapter is
+  still text-only; image questions are recorded with confidence `0%`.
 - `--image-policy skip` leaves image questions out of the predictions file.
 - `--image-policy append-url` includes the image URL in the text prompt, but
   still does not provide true vision input.
@@ -193,8 +196,8 @@ script writes a JSON object keyed by question id. The judge script reads the
 
 ## Limitations
 
-MMD's current model provider interface sends text-only chat completions. HLE
-contains multimodal items, so this adapter explicitly marks image questions as
-unsupported by default instead of pretending to evaluate vision capability.
-When MMD gains native multimodal input, this folder is the right place to add
-an image-aware provider path.
+MMD's product path can send images in Propose, but this HLE adapter currently
+builds text-only questions and never converts HLE images into MMD image content
+parts. It therefore marks image questions unsupported by default instead of
+pretending to evaluate vision capability. This folder needs a separately tested
+image-aware adapter path before any visual HLE result is reported.

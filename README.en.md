@@ -4,48 +4,59 @@
 
 *[中文](README.md)*
 
-Multiple LLMs deliberate through a six-phase protocol — Propose → Critique → Revise → Normalize → Vote → Compose — producing a final answer annotated with consensus strength and traceable back to every model's original claims.
+MMD is an audit-first, claim-level multi-model deliberation workbench. It preserves claim lineage, revisions, objections, classifier inputs, and call audits, then computes support labels deterministically instead of asking one judge model to declare consensus.
 
-## Status
+## Current protocol
 
-**M0 (protocol hardening) + M1 (CLI prototype) + M1.5 (convergence check, go decision) + v0.2 (planning mode for long-form output) + M2 (Backend API) + M3 (Web MVP) + M4 (BYOK platform) + M5.1 (cost circuit breaker) + M5.2 (CI) + M5.3 (rate limiting & data cleanup) + M5.4 (deployment docs/Dockerfile) + M5.5 (share links) are all complete — M5 in full**, and all of them have been validated end-to-end with real models (not just mocks). `apps/cli` supports three modes: `standard` (all six phases, default), `quick` (skips critique/revise/vote), and `planning` (splits the question into topics, for long-form/comprehensive planning output). `apps/api` moves the same orchestrator logic (now extracted into `packages/orchestrator`, shared by both CLI and API) onto a Fastify + Postgres server: a Conversation/Run API, an SSE event stream (replayable on reconnect via `Last-Event-ID`), and persisted run results. `apps/web` is the Next.js frontend that consumes that API: ask a question, pick models, watch the run progress live, expand the original claims behind each consensus point, copy the final answer. M4 is BYOK (bring your own key): no login/account system — users pick a provider from a small whitelist and supply their own API key, which is used transiently by default and can optionally be saved encrypted under an anonymous, cookie-scoped workspace (no registration required). M5.1 is the cost circuit breaker: every run has a USD cost cap (default $5, overridable per run), accumulated across phases from each call's real usage, that stops the run before the next phase starts if exceeded — so a BYOK user's key can't get run up unknowingly. M5.2 is CI: `.github/workflows/ci.yml` runs the full-workspace build/migrate/test against a real Postgres service container; along the way it surfaced and fixed a real, previously-unhit bug — the root `build` script ran workspaces in npm's default alphabetical order, which conflicts with the dependency order required by TypeScript project references, guaranteed to fail on any genuinely fresh checkout (like CI) even though it had never once failed locally, since the local `dist/` directories had never been wiped clean in this project's history. M5.3 is rate limiting & data cleanup: `POST /api/conversations/:id/runs` is now rate-limited per workspace (10/minute), a new `DELETE /api/conversations/:id` cascades to every dependent row for that conversation, and a standalone cleanup script deletes anonymous workspaces inactive for over 30 days — which required a migration adding `ON DELETE CASCADE` to foreign keys that previously had none, since deletes would otherwise fail on the first dependent row. M5.4 is deployment docs/Dockerfile: `apps/api/Dockerfile`, `apps/web/Dockerfile`, `docker-compose.yml`, and [docs/deployment.en.md](docs/deployment.en.md). Fully verified against real Docker — `docker build` plus `docker compose up --build` bringing up both containers and walking the complete "create conversation → add BYOK key → submit run → see result" flow — and along the way surfaced and fixed two real issues: apps/api's workspace packages have `package.json` `"main"` fields pointing straight at `.ts` source, so running the compiled output via plain `node dist/main.js` fails immediately with a module-not-found error, fixed by running the container via `tsx` at runtime instead (the same path `npm run dev` already takes); and apps/web's `API_BASE_URL` only takes effect once, at build time (baked into Next.js's rewrite manifest) — changing it at runtime has no effect. M5.5 is share links: a completed run can generate a public, read-only `/share/[token]` link (no workspace cookie needed to view it, revocable anytime) — implementing this meant moving the sidebar chrome out of the root layout into its own route group, so the share page stays clean for an anonymous visitor: no workspace cookie gets issued just from viewing it, and no "+ New conversation"-style action appears anywhere on the page. See [docs/roadmap.md](docs/roadmap.md) (in Chinese; includes real-run findings and data) for the full milestone plan.
+New runs use `mmd.v3` and write `mmd.trace.v3`:
 
-## The six-phase protocol
+| Mode | Governance | Current status | Core path |
+|---|---|---|---|
+| Quick | centralized | Product path, exactly N=2 | Propose → Normalize → Classify → Compose |
+| Standard-C | centralized | Default/compatible path | Propose → Critique → Revise → Normalize → Vote → Classify → Compose |
+| Standard-D | distributed/peer-governed | Experimental, manifest-gated | Propose → Critique → Revise → Align → complete-link → Vote → Classify → Compose |
+| Planning | centralized | Product path | Outline → per-topic ledgers → one GlobalCompose |
 
-| Phase | Description |
-|------|------|
-| Propose | Each model only sees the user's question, answers independently, and breaks its answer into claims |
-| Critique | Each model reviews the other models' claims |
-| Revise | Each model updates its own position based on the critiques it received |
-| Normalize | Semantically similar claims are merged into candidate claims (must keep `source_claim_ids` for traceability) |
-| Vote | Each model votes on the candidate claims |
-| Compose | The final answer is generated from a ratio-based consensus classification (strong / qualified / disputed / rejected) |
+The host orchestrator always owns scheduling, IDs, quorum, deterministic classification, persistence, and failure semantics. The LLM coordinator is only a model role used in specified phases such as Normalize, Compose, Outline, or GlobalCompose. Standard-D does not mean “no orchestrator.”
 
-`standard`/`quick` modes run these six phases directly. `planning` mode adds an **Outline** phase up front (a single coordinator call splits the question into up to 8 topics), then runs the six-phase protocol once per topic in parallel, and finally emits output sectioned by topic.
+Planning v3 no longer runs per-topic SectionCompose. Its authoritative result is one `PlanningFinalAnswer`; the old `PlanDocument` remains only as a compatibility projection for existing CLI/UI/readers.
 
-The protocol's hard constraints — ratio-based consensus, run-scoped ids, quorum-based degradation, latency/cost budgets, quick/planning mode, and why the outline phase uses a single coordinator instead of multi-model deliberation — are documented in [docs/protocol.en.md](docs/protocol.en.md).
+See [docs/protocol.en.md](docs/protocol.en.md) for protocol details and [docs/versioning.en.md](docs/versioning.en.md) for version boundaries.
 
-## Why this is different from a plain "ask N models and merge"
+## Project status
 
-- **No final judge model.** There is no single model (or human-picked "best" model) that reads everyone's answers and decides what's true. Consensus is computed by a pure, auditable function (`classifyCandidate`) over the votes themselves — a critical objection from *any* model can never be silently outvoted by a majority, and the classification logic doesn't hardcode the number of models.
-- **Traceability is a protocol-level constraint, not a UI nice-to-have.** Every candidate claim produced by the Normalize phase carries `source_claim_ids`, a required, non-empty field. Any surface that renders the final answer must be able to trace every merged point back to the original, pre-merge claims from each model — because merging claims is itself an implicit judgment call, and transparency is the only real safeguard against it.
-- **Degradation, not all-or-nothing failure.** Each phase has an explicit quorum. One model timing out or erroring marks that phase (and the affected content) as `partial` instead of failing the whole run.
+- **M0–M5**: protocol hardening, CLI, Backend API, Web MVP, BYOK, cost breaker, CI, cleanup, deployment, and share links are complete.
+- **M6.1–M6.6**: custom JSON, per-model and claim-level streaming progress, Compose streaming, multimodal input, and the optional web-search/tool path are complete. Historical design and verification notes live in [docs/roadmap.md](docs/roadmap.md).
+- **Protocol v3**: Quick N=2, Standard-C/D, Planning GlobalCompose, trace v3, and independent artifact persistence are implemented.
+- **Still research targets**: a CN/DN 2×2 runner sharing one post-revision root, Standard-D deterministic-render/fidelity gates, an explicit classification-basis kind, complete prompt/provider version ledgers, and the formal main/LiteLLM parity gate.
 
-## Monorepo layout
+## Why this is more than “ask N models and merge”
 
-```
+- **Claim-level deliberation**: long answers become claims, then normalized candidates that are voted and classified individually.
+- **Lineage is a data constraint**: candidates require `source_claim_ids`; Planning spans carry candidate lineage.
+- **Classification is separate from prose**: the classification ledger is authoritative, and Compose failure returns a deterministic fallback.
+- **Objections cannot disappear silently**: objection severity participates in deterministic classification.
+- **Failures retain intermediate artifacts**: trace/artifact persistence is separate from final run status.
+
+This does not eliminate coordinator risk. Normalize false merges/splits, Compose dispute laundering, model-identity bias, and consensus calibration remain explicit research questions; see [docs/prior-art.en.md](docs/prior-art.en.md).
+
+## Monorepo
+
+```text
 apps/
-  cli/                 # M1: the CLI entry point that runs the whole pipeline
-  api/                  # M2: Fastify + Postgres backend (Conversation/Run API, SSE event stream)
-  web/                  # M3: Next.js frontend (question input, model selection, run progress, consensus panel)
+  cli/                 # Command-line entry point
+  api/                 # Fastify + Postgres, Conversation/Run API, SSE, trace API
+  web/                 # Next.js workbench
 packages/
-  protocol/             # zod schemas + pure functions for consensus classification / quorum / ids / budget
-  model-adapters/       # provider adapters: mock, OpenAI-compatible, quorum-aware fan-out
-  prompts/              # prompt construction for the six phases
-  orchestrator/         # propose->critique->revise->normalize->vote->compose orchestration, shared by CLI and API
-docs/
-  protocol.md           # protocol rules (Chinese)
-  protocol.en.md         # protocol rules (English)
+  protocol/            # Schemas, classification, quorum, governance, trace v3
+  model-adapters/      # Mock/OpenAI-compatible/provider routing
+  prompts/             # Phase prompts
+  orchestrator/        # Shared host orchestration for every mode/governance
+contract/
+  mmd-protocol-v3/     # Language-neutral schema, errors, and parity fixtures
+benchmarks/
+  hle/                 # HLE adapter
+docs/                  # Protocol, versioning, history, deployment, and prior art
 ```
 
 ## Quickstart
@@ -54,94 +65,101 @@ docs/
 npm install
 ```
 
-### Run once with the mock provider (no API key needed)
+### Standard mock run
 
 ```bash
 cd apps/cli
 npm run start -- --question "Should a small team adopt a monorepo?" --mode standard
 ```
 
-If `models.config.json` doesn't exist (or you pass `--provider mock`), the CLI falls back to `MockProvider`, simulating three models (`model_a,model_b,model_c` by default) with no real network calls. Results are written to `apps/cli/out/<runId>.json` and `.md`, and printed to the terminal.
+Without `models.config.json`, or with `--provider mock`, the CLI defaults to `model_a,model_b,model_c`.
 
-### Planning mode: long-form output / comprehensive planning
+### Quick mock run
+
+Quick v3 requires exactly two distinct models:
 
 ```bash
-npm run start -- --question "Plan the tech stack for a 3-person e-commerce project" --mode planning
+npm run start -- --question "Should a small team adopt a monorepo?" \
+  --mode quick --models model_a,model_b
 ```
 
-This runs an outline pass first (splitting the question into up to 8 topics), then runs the full six-phase protocol per topic in parallel, and emits a planning document sectioned by topic (`## Executive Summary` plus one section per topic). With real models, the six-phase cost of a single topic is comparable to one `standard`-mode run (see the real-run latency baseline in [docs/protocol.en.md](docs/protocol.en.md)); since topics run in parallel, total wall-clock time is roughly bounded by the slowest topic, not the sum of all topics.
+A real-model configuration used for Quick must likewise select exactly two models. `Traceable-Quick-C@N3` is available only to a research manifest/runner; it is not a CLI product default.
 
-### Wiring up real models
+### Planning run
+
+```bash
+npm run start -- --question "Plan the tech stack for a three-person e-commerce project" --mode planning
+```
+
+Planning creates an outline, adds the stable `cross_cutting_risks_and_omissions` topic, builds topic ledgers in parallel, and makes one GlobalCompose call with output-span lineage.
+
+### Real models
 
 ```bash
 cp apps/cli/models.config.example.json apps/cli/models.config.json
 cp apps/cli/.env.example apps/cli/.env
 ```
 
-Edit `models.config.json` and fill in a real `modelId` / `baseUrl` for each model (any OpenAI-compatible `/chat/completions` endpoint works), then set the environment variable named by each `apiKeyEnvVar` in `.env`. Both files are already gitignored and won't be committed.
+Fill in OpenAI-compatible `baseUrl`/`modelId` values and the corresponding keys in `.env`. Both files are gitignored.
 
 ### CLI flags
 
-| flag | description |
-|------|------|
-| `--question`, `-q` | The question to deliberate on |
-| `--mode` | `standard` (default, all six phases), `quick` (skips critique/revise/vote), or `planning` (splits by topic, for long-form/comprehensive output) |
-| `--models`, `-m` | Comma-separated model ids to use with the mock provider |
-| `--fail-models` | Model ids to simulate as failing, when using the mock provider — for testing quorum degradation |
-| `--config`, `-c` | Path to the models config, default `./models.config.json` |
-| `--provider mock` | Force the mock provider even if a config file exists |
+| Flag | Description |
+|---|---|
+| `--question`, `-q` | Question to deliberate |
+| `--mode` | `standard` (default), `quick`, or `planning` |
+| `--models`, `-m` | Mock-provider model IDs; Quick requires exactly two |
+| `--fail-models` | Mock-provider models to fail deliberately |
+| `--config`, `-c` | Models config path, default `./models.config.json` |
+| `--provider mock` | Force the mock provider |
 | `--out`, `-o` | Output directory, default `./out` |
 
-## Backend API (M2)
+## Backend API
 
 ```bash
 docker compose up -d postgres
-cp apps/api/.env.example apps/api/.env      # adjust DATABASE_URL/PORT if needed
+cp apps/api/.env.example apps/api/.env
 cd apps/api
 npm run db:migrate
 npm run start
 ```
 
-Falls back to `MockProvider` when `apps/api/models.config.json` doesn't exist, same as the CLI. `ENCRYPTION_KEY` is a required env var (generate with `openssl rand -base64 32`), used to encrypt any BYOK keys a user opts into saving — see `.env.example`. Core endpoints:
+Core endpoints:
 
 | Endpoint | Description |
-|------|------|
-| `GET /api/models` | List selectable server-registry models (`id`/`providerLabel`/`isCoordinator`) |
-| `GET /api/providers` | List the BYOK provider whitelist (`providerId`/`displayName`, no baseUrl exposed; includes an optional `suggestedRate` the frontend uses to pre-fill the custom pricing inputs) |
-| `POST /api/conversations` | Create a conversation, tagged with the visitor's anonymous workspace cookie |
-| `GET /api/conversations` | List the current workspace's conversations (most recently active first — other workspaces' conversations are never visible) |
-| `GET /api/conversations/:id` | View a conversation and its runs (404 if it belongs to a different workspace) |
-| `POST /api/conversations/:id/runs` | Start a deliberation run (`question`/`mode`/optional `modelIds` from the server registry, and/or optional `byokModels` — either a fresh `{providerId, modelId, apiKey}` or a `savedKeyId` reference to a previously-saved key — plus optional `costLimitUsd`, defaulting to $5 when omitted, see "cost circuit breaker" below) |
-| `GET /api/runs/:id` | Check run status |
-| `GET /api/runs/:id/result` | Get the final result (409 while still running), including `cost: {totalUsd, limitUsd, hasUnknownPricing}` |
-| `GET /api/runs/:id/events` | SSE event stream, replayable on reconnect via `Last-Event-ID` |
-| `GET /api/workspace/keys` | List the current workspace's saved BYOK keys (provider/model/label metadata only, never the plaintext) |
+|---|---|
+| `POST /api/conversations/:id/runs` | Create a run with `mode`, optional `governance`, experimental `experimentManifest`, model/BYOK selection, cost limit, and M6 inputs |
+| `GET /api/runs/:id` | Run status, mode, and `governance` |
+| `GET /api/runs/:id/result` | Final result; Planning includes authoritative `planningFinal` and compatible `planDocument` |
+| `GET /api/runs/:id/trace` | Read the persisted `mmd.trace.v3` snapshot for running, completed, or failed runs |
+| `GET /api/runs/:id/events` | SSE event stream replayable through `Last-Event-ID` |
 
-## Web MVP (M3)
+Public API requests retain camelCase; the language-neutral contract and trace use snake_case.
+
+## Web MVP
 
 ```bash
 cd apps/web
-cp .env.example .env      # API_BASE_URL defaults to http://localhost:3000
-npm run dev                # port 3001, proxies /api/* to apps/api via same-origin rewrites
+cp .env.example .env
+npm run dev
 ```
 
-Open `http://localhost:3001`: create a conversation, ask a question, pick a mode (`standard`/`quick`/`planning`) and models, then watch phase-by-phase progress live over SSE. Once complete, it shows the final answer, a consensus panel (each candidate expandable to show the original pre-merge claims), and a collapsed-by-default discussion process. `planning` mode additionally shows the outline step and one independent progress row per topic. In dev, `next.config.ts` explicitly disables Next's built-in gzip compression (`compress: false`) — leaving it on buffers the proxied SSE response and silently breaks live progress updates, a real bug caught while testing against real models.
+Open `http://localhost:3001`. The current Web app supports conversations, model/BYOK selection, all three modes, live phase/claim/Compose progress, cost, consensus and lineage views, share links, and Planning results. Standard-D does not yet have an ordinary product governance selector; it remains an experimental API path enabled by an experiment manifest. Governance selection, Standard-D ledger presentation, and the Planning trace redesign belong to a separate WebUI workstream.
 
-Below the model list is "Add your own API key" (M4 BYOK): pick a provider from the whitelist (OpenAI/DeepSeek/OpenRouter/Volcengine), enter your own API key and model id, and add it to the run. Optionally check "remember this key" to save it, encrypted, under this device's anonymous workspace — next time, it shows up under "Saved keys on this device" for one-click reuse without the browser holding the plaintext again. Next to it is an optional custom pricing input ($/1M tokens, input and output), pre-filled with a server-computed suggestion (updates when you switch providers) that you can accept as-is, replace with a rate you actually know, or clear — the built-in rate table is inevitably a stale snapshot, and the person actually paying the bill can keep it current better than we can. Checking "remember" persists it alongside the key.
-
-Above the submit button is the cost limit (M5.1, default $5, editable): the run accumulates each model call's real cost across phases (a model with a custom rate uses that; everything else uses the built-in approximate table or OpenRouter's real reported cost) and stops before the next phase starts if it crosses this limit (rather than running to completion and failing at the very end). The completed result also shows the actual cost incurred.
-
-## Development
+## Development and validation
 
 ```bash
-npm run test    # unit tests across all workspaces (apps/api's integration tests need DATABASE_URL, and are skipped without it)
-npm run build   # TypeScript build across all workspaces
+npm run test
+npm run build
 ```
 
-## Related docs
+The cross-implementation Protocol v3 contract lives in [contract/mmd-protocol-v3](contract/mmd-protocol-v3/README.md). Before formal research, main and LiteLLM must pass the same deterministic fixtures for phase, IDs, candidates, ballots, classifications, lineage, failures, quorum, and usage.
 
-- [docs/protocol.en.md](docs/protocol.en.md) — how the protocol constraints are implemented
-- [docs/protocol.md](docs/protocol.md) — the same, in Chinese
-- [docs/prior-art.en.md](docs/prior-art.en.md) — how MMD compares to OpenRouter Fusion Router, litesquad, and the LiteLLM ecosystem
-- [docs/streaming-tools-multimodal-json.md](docs/streaming-tools-multimodal-json.md) — feasibility and implementation paths for streaming output, tool calling, multimodal input, and JSON output (not yet implemented; design analysis, Chinese only)
-- [docs/roadmap.md](docs/roadmap.md) — milestone plan and risk register (Chinese)
+## Documentation
+
+- [Protocol](docs/protocol.en.md) / [中文](docs/protocol.md) — current implementation semantics
+- [Versioning](docs/versioning.en.md) / [中文](docs/versioning.md) — version and compatibility rules
+- [Prior art](docs/prior-art.en.md) / [中文](docs/prior-art.md) — competitors, mechanism baselines, and adjacent ecosystems
+- [Roadmap](docs/roadmap.md) — historical milestones and real-run findings
+- [M6 historical design](docs/streaming-tools-multimodal-json.md) — M6 design and historical SectionCompose record
+- [Deployment](docs/deployment.en.md) / [中文](docs/deployment.md) — deployment, migrations, and secret management
