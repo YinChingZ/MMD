@@ -3,10 +3,13 @@ import type {
   ClassifyCandidateResult,
   Critique,
   FinalAnswer,
+  Governance,
+  MmdTraceV3,
   NormalizeResult,
   OutlineResult,
   Phase,
   PlanDocument,
+  PlanningFinalAnswer,
   Proposal,
   QuorumCheck,
   RevisionSet,
@@ -28,6 +31,7 @@ export interface RunRow {
   conversationId: string;
   question: string;
   mode: RunMode;
+  governance: Governance;
   status: RunStatus;
   error: string | null;
   createdAt: string;
@@ -115,6 +119,8 @@ export interface RunResult {
   outline?: OutlineResult;
   topics?: TopicResult[];
   planDocument?: PlanDocument;
+  planningFinal?: PlanningFinalAnswer;
+  trace?: MmdTraceV3;
   timings: Partial<Record<Phase, number>>;
   quorum: Partial<Record<Phase, QuorumCheck>>;
   cost?: RunCostSummary;
@@ -210,6 +216,7 @@ export async function createRun(
   params: {
     question: string;
     mode: RunMode;
+    governance?: Governance;
     modelIds?: string[];
     byokModels?: ByokModelInput[];
     costLimitUsd?: number;

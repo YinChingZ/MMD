@@ -6,6 +6,7 @@ export * from "./schemas/normalize.js";
 export * from "./schemas/vote.js";
 export * from "./schemas/compose.js";
 export * from "./schemas/outline.js";
+export * from "./schemas/v3.js";
 
 export * from "./ids.js";
 export * from "./quorum.js";
@@ -14,3 +15,6 @@ export * from "./consensus.js";
 export * from "./provider-whitelist.js";
 export * from "./pricing.js";
 export * from "./pricing-rates.js";
+export * from "./governance.js";
+export * from "./alignment.js";
+export * from "./trace-v3.js";

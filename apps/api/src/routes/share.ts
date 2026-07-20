@@ -31,6 +31,7 @@ export async function shareRoutes(
         runId: run.id,
         question: run.question,
         mode: run.mode,
+        governance: run.governance,
         status: run.status,
         ...result,
       });

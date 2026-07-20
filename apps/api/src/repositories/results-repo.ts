@@ -59,22 +59,9 @@ interface VoteRow {
  * Appends flattened rows for one "bucket" (either the whole standard/quick
  * mode result, or a single planning-mode topic) into the accumulators.
  *
- * `candidate_id` is LLM-self-assigned during Normalize/Vote and is NOT
- * guaranteed unique across topics — unlike `claim_id`, which the
- * orchestrator itself scopes per-topic via stampProposal (`${topicId}::
- * ${modelId}::c${i}`), candidate ids are never stamped and real models
- * (and MockProvider — every topic's mockNormalize deterministically emits
- * "cc_1", "cc_2", ...) reuse the same short ids like "cc_1" in every topic.
- * Flattening planning mode's topics into the shared `candidates`/`votes`
- * tables without scoping by topic here caused real, reproducible primary-key
- * collisions (`duplicate key value violates unique constraint
- * "candidates_pkey"`) the first time a real cross-topic planning run was
- * persisted — this file's `db.transaction()` means the whole run's data was
- * lost when that happened, not just the candidates rows. Scoping the DB-only
- * candidate_id as `${topicId}::${candidateId}` (topic_id here is always the
- * ground-truth Topic.topic_id, never LLM-invented) fixes it; the JSON blob
- * in `run_results` is unaffected and still stores the orchestrator's
- * original, unscoped ids exactly as produced.
+ * Protocol v3 candidate IDs are host-generated and already contain run/topic
+ * scope. Persist them unchanged so the relational projection and trace use the
+ * same authoritative ID; model-supplied IDs never reach this boundary.
  */
 function addBucket(
   accum: {
@@ -93,9 +80,6 @@ function addBucket(
   },
   topicId: string | null
 ): void {
-  const scopeCandidateId = (id: string) =>
-    topicId ? `${topicId}::${id}` : id;
-
   for (const p of bucket.proposals) {
     for (const c of p.claims) {
       accum.claims.push({
@@ -131,7 +115,7 @@ function addBucket(
   for (const cand of bucket.normalize.candidate_claims) {
     accum.candidates.push({
       run_id: runId,
-      candidate_id: scopeCandidateId(cand.candidate_id),
+      candidate_id: cand.candidate_id,
       topic_id: topicId ?? cand.topic_id ?? null,
       text: cand.text,
       source_claim_ids: cand.source_claim_ids,
@@ -147,7 +131,7 @@ function addBucket(
     for (const ballot of v.votes) {
       accum.votes.push({
         run_id: runId,
-        candidate_id: scopeCandidateId(ballot.candidate_id),
+        candidate_id: ballot.candidate_id,
         model_id: v.model_id,
         vote: ballot.vote,
         confidence: ballot.confidence,
@@ -235,6 +219,10 @@ export async function saveResult(
             ? JSON.stringify(result.userOutput)
             : null,
         user_output_error: result.userOutputError ?? null,
+        trace: JSON.stringify(result.trace),
+        planning_final: result.planningFinal
+          ? JSON.stringify(result.planningFinal)
+          : null,
       })
       .execute();
 
@@ -280,5 +268,7 @@ export async function getResult(
     outputFormat: row.output_format ?? undefined,
     userOutput: row.user_output ?? undefined,
     userOutputError: row.user_output_error ?? undefined,
+    trace: row.trace ?? undefined,
+    planningFinal: row.planning_final ?? undefined,
   };
 }

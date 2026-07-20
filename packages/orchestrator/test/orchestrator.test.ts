@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { FinalAnswerSchema, SectionAnswerSchema } from "@mmd/protocol";
+import {
+  FinalAnswerSchema,
+  MmdTraceV3Schema,
+  SectionAnswerSchema,
+} from "@mmd/protocol";
 import {
   MockProvider,
   type CompletionRequest,
@@ -96,6 +100,26 @@ class ImageRejectingMockProvider implements ModelProvider {
   }
 }
 
+class PhaseFailingMockProvider implements ModelProvider {
+  readonly name = "phase-failing-mock";
+  private readonly inner = new MockProvider();
+
+  constructor(
+    private readonly phase: string,
+    private readonly modelId: string
+  ) {}
+
+  async complete(
+    config: ModelConfig,
+    request: CompletionRequest
+  ): Promise<CompletionResult> {
+    if (request.meta.phase === this.phase && config.id === this.modelId) {
+      throw new Error(`persistent ${this.phase} failure`);
+    }
+    return this.inner.complete(config, request);
+  }
+}
+
 describe("runDeliberation — M1 acceptance criteria", () => {
   it("runs the full standard pipeline end-to-end and produces a schema-valid final answer", async () => {
     const result = await runDeliberation({
@@ -105,6 +129,7 @@ describe("runDeliberation — M1 acceptance criteria", () => {
     });
 
     expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+    expect(MmdTraceV3Schema.safeParse(result.trace).success).toBe(true);
     expect(result.proposals).toHaveLength(3);
     expect(result.critiques).toHaveLength(3);
     expect(result.revisions).toHaveLength(3);
@@ -117,6 +142,80 @@ describe("runDeliberation — M1 acceptance criteria", () => {
       "vote",
       "compose",
     ]);
+  });
+
+  it("runs experimental Standard-D only with a versioned alignment policy", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider(),
+      mode: "standard",
+      governance: "distributed",
+      experimentManifest: {
+        experiment_id: "standard-d-test",
+        protocol_version: "mmd.v3",
+        alignment_policy: {
+          version: "align-policy.test.v1",
+          minimum_pair_support: 2,
+        },
+      },
+    });
+
+    expect(result.governance).toBe("distributed");
+    expect(result.trace.candidate_sets[0]?.alignment).toBeDefined();
+    expect(result.trace.calls.filter((call) => call.phase === "align")).toHaveLength(3);
+    expect(result.trace.calls.filter((call) => call.phase === "normalize")).toHaveLength(0);
+  });
+
+  it("keeps Standard-D alive when Align meets only partial quorum", async () => {
+    const result = await runDeliberation({
+      question,
+      models,
+      provider: new MockProvider({ failModelIds: new Set(["model_c"]) }),
+      mode: "standard",
+      governance: "distributed",
+      experimentManifest: {
+        experiment_id: "standard-d-partial-align",
+        protocol_version: "mmd.v3",
+        alignment_policy: {
+          version: "align-policy.test.v1",
+          minimum_pair_support: 2,
+        },
+      },
+    });
+
+    expect(result.trace.status).toBe("partial");
+    expect(result.trace.quorum).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phase: "align",
+        required: 2,
+        respondent_count: 2,
+        partial: true,
+        met: true,
+      }),
+    ]));
+  });
+
+  it("retries coordinator normalize once and preserves claims in a partial fallback", async () => {
+    const result = await runDeliberation({
+      question,
+      models: models.slice(0, 2),
+      coordinatorModelId: "model_a",
+      provider: new PhaseFailingMockProvider("normalize", "model_a"),
+      mode: "quick",
+    });
+
+    expect(result.trace.status).toBe("partial");
+    expect(result.trace.calls.filter((call) => call.phase === "normalize")).toMatchObject([
+      { attempt: 0, status: "failed" },
+      { attempt: 1, status: "failed" },
+    ]);
+    expect(result.normalize.candidate_claims).toHaveLength(4);
+    expect(
+      result.normalize.candidate_claims.every(
+        (candidate) => candidate.source_claim_ids.length === 1
+      )
+    ).toBe(true);
   });
 
   it("uses a caller-supplied runId instead of generating one, so API callers can know the id before the run settles", async () => {
@@ -234,6 +333,11 @@ describe("runDeliberation — M1 acceptance criteria", () => {
     expect(result.quorum.propose?.met).toBe(true);
     expect(result.quorum.propose?.partial).toBe(true);
     expect(FinalAnswerSchema.safeParse(result.final).success).toBe(true);
+    expect(result.trace.failures.some((failure) => failure.model_id === "model_c"))
+      .toBe(true);
+    expect(result.trace.calls.some((call) =>
+      call.model_id === "model_c" && call.status === "failed"
+    )).toBe(true);
   });
 
   it("fails fast with a typed error when quorum is not met (2 of 3 models down), naming which models failed and why", async () => {
@@ -316,14 +420,14 @@ describe("runDeliberation — M6.2 per-model progress events", () => {
     const events: RunEvent[] = [];
     await runDeliberation({
       question,
-      models,
+      models: models.slice(0, 2),
       provider: new MockProvider(),
       mode: "quick",
       onEvent: (e) => events.push(e),
     });
 
     const responded = events.filter((e) => e.type === "model_responded");
-    expect(responded).toHaveLength(3);
+    expect(responded).toHaveLength(2);
     expect(responded.every((e) => e.phase === "propose")).toBe(true);
   });
 
@@ -509,15 +613,24 @@ describe("runDeliberation — M6.3 claim/item-level progressive parsing", () => 
       expect(voteByModel.get(voteSet.model_id)).toEqual(voteSet.votes);
     }
 
-    const normalizeItems = itemProgressEvents(events, "normalize").map((ip) => ip.item);
-    expect(normalizeItems).toEqual(result.normalize.candidate_claims);
+    const normalizeItems = itemProgressEvents(events, "normalize").map((ip) => ip.item) as Array<{
+      text: string;
+      source_claim_ids: string[];
+    }>;
+    expect(normalizeItems.map((item) => ({
+      text: item.text,
+      source_claim_ids: item.source_claim_ids,
+    }))).toEqual(result.normalize.candidate_claims.map((item) => ({
+      text: item.text,
+      source_claim_ids: item.source_claim_ids,
+    })));
   });
 
   it("quick mode: item_progress fires only for propose and normalize (critique/revise/vote skipped)", async () => {
     const events: RunEvent[] = [];
     await runDeliberation({
       question,
-      models,
+      models: models.slice(0, 2),
       provider: new MockProvider({ streaming: true }),
       mode: "quick",
       onEvent: (e) => events.push(e),
@@ -627,7 +740,7 @@ describe("runDeliberation — M6.4 compose-stage token streaming", () => {
     expect(events.some((e) => e.type === "token")).toBe(false);
   });
 
-  it("planning mode: section-compose token events carry the correct topicId and reconstruct each topic's section_answer exactly", async () => {
+  it("planning mode: one GlobalCompose stream reconstructs the authoritative planning final answer", async () => {
     const events: RunEvent[] = [];
     const result = await runDeliberation({
       question: "Plan a project",
@@ -641,12 +754,9 @@ describe("runDeliberation — M6.4 compose-stage token streaming", () => {
     expect(tokens.length).toBeGreaterThan(0);
     expect(tokens.every((t) => t.phase === "compose")).toBe(true);
 
-    for (const section of result.planDocument?.sections ?? []) {
-      const topicTokens = tokens.filter((t) => t.data.topicId === section.topic_id);
-      expect(topicTokens.length).toBeGreaterThan(0);
-      const reconstructed = topicTokens.map((t) => t.data.delta).join("");
-      expect(reconstructed).toBe(section.section_answer);
-    }
+    expect(tokens.every((token) => token.data.topicId === undefined)).toBe(true);
+    const reconstructed = tokens.map((token) => token.data.delta).join("");
+    expect(reconstructed).toBe(result.planningFinal?.final_answer);
   });
 });
 
@@ -662,20 +772,21 @@ describe("runDeliberation — v0.2 planning mode", () => {
     // MockProvider's mockOutline deterministically produces 2 topics (capped
     // by PLANNING_BUDGET.maxTopics=8, but MockProvider keeps it small so
     // tests stay fast and assertions can be exact).
-    expect(result.outline?.topics).toHaveLength(2);
-    expect(result.topics).toHaveLength(2);
-    expect(result.planDocument?.sections).toHaveLength(2);
+    expect(result.outline?.topics).toHaveLength(3);
+    expect(result.outline?.topics.at(-1)?.topic_id).toBe(
+      "cross_cutting_risks_and_omissions"
+    );
+    expect(result.topics).toHaveLength(3);
+    expect(result.planDocument?.sections).toHaveLength(3);
 
     for (const section of result.planDocument?.sections ?? []) {
       expect(SectionAnswerSchema.safeParse(section).success).toBe(true);
     }
 
-    // executive_summary is a deterministic join of each section's tldr, never
-    // a fresh model call — assert it round-trips exactly, not just "exists".
-    const expectedSummary = (result.planDocument?.sections ?? [])
-      .map((s) => s.tldr)
-      .join("\n");
-    expect(result.planDocument?.executive_summary).toBe(expectedSummary);
+    expect(result.planDocument?.executive_summary).toBe(
+      result.planningFinal?.final_answer
+    );
+    expect(result.planningFinal?.spans.length).toBeGreaterThan(0);
   });
 
   it("emits the outline's topic_id/title list on its phase_completed event, not just a count", async () => {
@@ -703,7 +814,7 @@ describe("runDeliberation — v0.2 planning mode", () => {
     );
   });
 
-  it("overrides a section-compose call's self-reported topic_id with ground truth (found via real-model testing: real models invent their own topic_id instead of echoing the one given)", async () => {
+  it("derives the legacy section projection from ground-truth topic ids", async () => {
     const result = await runDeliberation({
       question: "Plan a project",
       models,
@@ -711,11 +822,6 @@ describe("runDeliberation — v0.2 planning mode", () => {
       mode: "planning",
     });
 
-    // MockProvider deliberately mangles topic_id in its section_compose
-    // response (prefixes with "mock-renamed-") to mimic what real models do.
-    // If the orchestrator didn't stamp it back, every section's topic_id
-    // would fail to match any TopicResult and format.ts's per-section
-    // timings/quorum lookup would silently render nothing.
     const topicIds = (result.topics ?? []).map((t) => t.topic.topic_id);
     const sectionTopicIds = (result.planDocument?.sections ?? []).map(
       (s) => s.topic_id
@@ -754,7 +860,7 @@ describe("runDeliberation — v0.2 planning mode", () => {
     expect(new Set(allClaimIds).size).toBe(allClaimIds.length);
   });
 
-  it("runs each topic's full six-phase deliberation (critique/revise/vote all present)", async () => {
+  it("runs five ledger phases per topic and composes once globally", async () => {
     const result = await runDeliberation({
       question: "Plan a project",
       models,
@@ -772,9 +878,38 @@ describe("runDeliberation — v0.2 planning mode", () => {
         "revise",
         "normalize",
         "vote",
-        "compose",
       ]);
     }
+    expect(result.trace.calls.filter((call) => call.phase === "global_compose")).toHaveLength(1);
+  });
+
+  it("returns topic ledgers and an auditable deterministic fallback when GlobalCompose fails", async () => {
+    const result = await runDeliberation({
+      question: "Plan a project",
+      models,
+      provider: new PhaseFailingMockProvider("global_compose", "model_a"),
+      coordinatorModelId: "model_a",
+      mode: "planning",
+    });
+
+    expect(result.topics).toHaveLength(3);
+    expect(result.planningFinal?.spans.length).toBeGreaterThan(0);
+    expect(result.trace.status).toBe("partial");
+    expect(result.trace.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phase: "global_compose",
+        code: "global_compose_failed",
+        recoverable: true,
+      }),
+    ]));
+    expect(
+      result.trace.artifacts.filter((artifact) => artifact.kind === "topic_ledger")
+    ).toHaveLength(3);
+    expect(
+      result.trace.artifacts.find(
+        (artifact) => artifact.kind === "planning_final_answer"
+      )?.status
+    ).toBe("partial");
   });
 
   it("fails fast with a clear error when every topic fails quorum", async () => {

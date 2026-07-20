@@ -1,145 +1,74 @@
-# Deliberation Protocol v0.1
+# MMD Protocol v3
 
 *[中文](protocol.md)*
 
-This document describes the protocol implemented in `packages/protocol`. It's the as-built version of chapter 5 of the original tech-design doc `multi-model-deliberation-tech-design.md` (kept outside the repo, not version-controlled) and the M0-stage revisions in [roadmap.md](roadmap.md). Delivery-layer milestones (M2 Backend API, M4 BYOK, M5 cost breaker/CI/cleanup/deploy/share) are documented in [roadmap.md](roadmap.md), not repeated here. CLI/backend code should import `@mmd/protocol` rather than redefining these schemas.
+New executions on `main` use `mmd.v3`. The language-neutral wire contract,
+error codes, and golden vectors live in `contract/mmd-protocol-v3/`. Legacy
+results remain readable, but readers must not invent v3 lineage; new runs write
+only `mmd.trace.v3`.
 
-## The six phases
+## Request and governance
 
-| Phase | Schema file | Description |
-|------|-------------|------|
-| Propose | `src/schemas/propose.ts` | Each model only sees the user's question, answers independently, and breaks its answer into claims |
-| Critique | `src/schemas/critique.ts` | Each model reviews the other models' claims |
-| Revise | `src/schemas/revise.ts` | Each model updates its own position based on the critiques it received |
-| Normalize | `src/schemas/normalize.ts` | Semantically similar claims are merged into candidate claims |
-| Vote | `src/schemas/vote.ts` | Each model votes on the candidate claims |
-| Compose | `src/schemas/compose.ts` | The final answer is generated from the consensus classification |
+- `mode`: `quick | standard | planning`
+- `governance`: `centralized | distributed`
+- Quick is centralized and requires exactly two distinct models.
+- Planning v3 is centralized in its first version.
+- Standard-D requires a versioned `alignment_policy` in an experiment manifest.
+- The coordinator must belong to the explicitly allowed model set.
 
-Every phase's input/output is a zod schema. When validation fails, the caller (CLI/backend) should retry or ask the model to fix its JSON — not fail the whole run outright (this addresses the "structured output is unreliable" risk from chapter 12 of the tech design doc).
+Invalid combinations return structured errors. Research thresholds belong in
+the experiment manifest, not ordinary product options.
 
-## Protocol-level constraints (M0 hardening — these are hard rules, not implementation suggestions)
+## Phase graphs
 
-### 1. The Normalize phase must stay traceable (addresses risk #2)
+- Quick: Propose → Normalize → Classify → Compose.
+- Standard-C: Propose → Critique → Revise → immutable post-revision claims →
+  coordinator Normalize → Vote → Classify → Render.
+- Standard-D: peer Align replaces coordinator Normalize. The host performs
+  stable complete-link clustering and enforces cannot-link.
+- Planning: Outline → per-topic Standard-C ledgers → one GlobalCompose. A stable
+  `cross_cutting_risks_and_omissions` topic is always present.
 
-`CandidateClaimSchema.source_claim_ids` is required and non-empty (`src/schemas/normalize.ts`). Any surface that renders the final result must be able to trace a candidate claim back to the original, pre-merge claims — because the merging decisions made during Normalize already carry implicit judgment power, and transparent traceability is the only real safeguard. This cannot be simplified away.
+Planning no longer executes per-topic SectionCompose. The old `PlanDocument` is
+only a compatibility projection; GlobalCompose is authoritative. Every output
+span cites `source_candidate_ids`. Cross-topic derivations use
+`coordinator_synthesis`, and omitting a strong candidate requires a reason.
 
-### 2. Consensus classification is ratio-based, not a hardcoded model count (addresses risk #3)
+The classification ledger is authoritative in every mode. Model rendering may
+improve prose but may not mutate ballots or classifications. A failed renderer
+returns a deterministic canonical fallback.
 
-`classifyCandidate` in `src/consensus.ts` accepts an arbitrary `expectedVoterCount` and classifies by ratio thresholds:
+## IDs, quorum, failure, and capacity
 
-- `approveRatio >= strongApproveRatio` (default `1.0`) → `strong_consensus`
-- any `critical` objection → straight to `disputed`, it cannot be outvoted by a majority
-- any `major` objection → routed to `disputed` or `rejected` depending on whether `approveRatio` clears the qualified threshold
-- `approveRatio >= qualifiedApproveRatio` (default `0.66`) → `qualified_consensus`
-- `approveRatio <= rejectApproveRatio` (default `0.34`) → `rejected`
-- everything else → `disputed`
+The host assigns artifact, candidate-set, candidate, call, and output-span IDs.
+Wire JSON is snake_case. Quorum is `ceil(N × 2/3)`.
 
-Thresholds can be overridden via `ConsensusThresholds`; defaults live in `DEFAULT_CONSENSUS_THRESHOLDS`. Going from 3 models to 5 or 7 requires no changes to this function (`test/consensus.test.ts` covers multiple model-count scenarios).
+Coordinator phases run one initial generation plus exactly one retry. Exhausted
+retries preserve completed artifacts and return a structured partial fallback.
+An Align quorum failure affects only its distributed candidate set.
 
-**One revision to the vote schema**: the original design had compose rules depend on "critical/major objections," but the vote phase's `BallotSchema` didn't carry severity. We added a required `objection_severity` field for any ballot where `vote === "object"` (`src/schemas/vote.ts`) — without it, `classifyCandidate` can't distinguish `disputed` from `rejected`.
+Before GlobalCompose, the implementation uses model token/context metadata.
+When input is too large, it performs one traceable topic-brief compression. A
+second failure returns topic ledgers plus a structured fallback.
 
-### 3. Claim/candidate ids must be scoped per run (addresses risk #5)
+## `mmd.trace.v3`
 
-`src/ids.ts` provides `makeRunId()` / `scopedId(runId, localId)` / `parseScopedId(id)`. Any claim/review/vote id persisted to a database should be the result of `scopedId` (`${runId}:${localId}`), not a bare model-generated short id like `a_c1` — otherwise you get primary-key collisions across runs.
+The trace contains immutable proposals/revised claims, artifact parents,
+candidate sets, Align and clustering logs, ballots, classification basis,
+rendering sources, GlobalCompose lineage, call attempts, quorum, partial
+failures, usage, cost, latency, and all protocol/algorithm versions.
 
-### 4. Every phase has a quorum; one model failing shouldn't sink the whole run (addresses risk #4)
+Non-contract diagnostics belong only in `extensions` and cannot define protocol
+semantics.
 
-`checkQuorum(respondentCount, modelCount, ratio = 2/3)` in `src/quorum.ts` returns:
+## Persistence and acceptance
 
-- `required`: the quorum count needed (default: 2/3 rounded up, at least 1)
-- `met`: whether quorum was reached
-- `partial`: whether any model failed to respond (flagged even when quorum was met)
+Run status is stored separately from artifacts. Each completed phase is saved
+through the trace callback into `run_traces`/`run_artifacts`; later failures do
+not erase completed work. Final envelopes and authoritative Planning output are
+also stored on `run_results`.
 
-Orchestrator rule: if a phase doesn't reach quorum, mark that phase `partial` and explicitly note in the final output that it's "based on only some models' responses." If quorum is met but a model is missing, skip that model's subsequent phases without blocking the rest of the run. A single model timing out or erroring must never fail the entire run.
-
-### 5. Latency/cost budgets and quick mode are concrete protocol paths (addresses risk #1)
-
-`src/budget.ts` defines two paths:
-
-- `STANDARD_BUDGET`: 3 models, 1 round of critique, all six phases, target p50 ≤ 60s / p95 ≤ 120s (baseline numbers pending calibration against real M1 data).
-- `QUICK_MODE_BUDGET`: 2 models, `phases` set to `["propose", "normalize", "compose"]` — skips critique/revise/vote; this is a specific path, not a vague "run fewer rounds." Normalize is kept because, without explicit votes, we still need `source_claim_ids` (how many models a candidate covers) to infer consensus strength (each contributing model counts as one implicit approve) — otherwise Compose would have no consensus signal at all.
-
-`getBudget(mode)` returns the matching config; the orchestrator should defer to it for which phases to run, rather than re-deriving that decision itself.
-
-## v0.2: Planning mode (for long-form / comprehensive planning output)
-
-The v0.1 six-phase protocol assumes all claims form one flat, mutually comparable/mergeable set — that works well for narrow, single-question Q&A, but has a structural gap for long-form output like "produce a comprehensive technical plan for a project": claim counts explode (making critique's O(n²) cost unmanageable), claims from unrelated topics get forced into the same merge/vote pool, and Compose's flat output doesn't suit a structured document. v0.2 adds `mode: "planning"`, which splits work by topic and reuses the existing six-phase protocol per topic, rather than redesigning the consensus mechanism itself.
-
-### The Outline phase: why a single coordinator instead of multi-model deliberation
-
-Planning mode adds an **Outline** phase before Propose: a single coordinator call (`buildOutlinePrompt` / `OutlineResultSchema`) splits the question into up to 8 topics (`RunBudget.maxTopics`, also hard-capped at the schema level via `.max(8)` in `OutlineResultSchema`, not just described in the prompt).
-
-Not requiring multi-model participation here — unlike Normalize — is a deliberate choice. Constraint #1 above ("Normalize must stay traceable") targets the risk that dissent gets erased when **already-produced claims carrying truth judgments** are merged. The outline phase produces no claims yet; it only decides how many topics to discuss. A suboptimal topic split is a coverage problem, not a truth/dissent-erasure problem, and it's fully recoverable: every model still proposes independently within each topic during the Propose phase, so if the outline missed something, a model can flag the gap with a `risk`-type claim under the relevant topic. A multi-model outline would cost at least two extra real network round-trips, and real reasoning models typically take 90-250 seconds per phase (see the real-run latency baseline below) — paying that latency for a recoverable, low-risk decision isn't worth it.
-
-### Reusing the six-phase protocol per topic
-
-Each outline topic runs a complete propose→critique→revise→normalize→vote→classify cycle independently (`runTopicDeliberation` in `packages/orchestrator/src/index.ts` — extracted from `apps/cli` into a shared package during M2 so both the CLI and `apps/api` import the same implementation; the logic itself is unchanged), and all topics run **in parallel** (`Promise.all`/`Promise.allSettled`, not sequentially — to keep latency from scaling linearly with topic count). This means:
-
-- Core functions like `classifyCandidate`, `checkQuorum`, and `fanOutWithQuorum` don't need to know topics exist at all; they're just called once per topic, unchanged.
-- Claim/candidate ids are extended in `stampProposal` to `${topicId}::${modelId}::c${i}` (previously `${modelId}::c${i}`), guaranteeing no collisions across topics, without touching `src/ids.ts` (which solves a different problem — storage-key isolation across runs).
-- A quorum failure in a single topic causes that topic's `runTopicDeliberation` to throw `DeliberationQuorumError`, but `runPlanningDeliberation` collects results with `Promise.allSettled` — one failed topic doesn't sink the whole planning document (the same "one failed model shouldn't block the run" principle, applied one level up). The whole run only fails if **every** topic fails.
-
-### Section compose: why the executive summary is deterministic concatenation, not a model call
-
-Each topic independently runs a section-compose pass (`buildSectionComposePrompt` / `SectionAnswerSchema`, whose fields are equivalent to `FinalAnswerSchema` plus `topic_id`/`title`/`tldr`). The final document's `executive_summary` is **built in code by concatenating each section's `tldr`** — there's no extra model call to produce a "cross-topic summary." Adding one would turn Compose back into a judge that reasons across topics, exactly the failure mode constraints #1 and #3 above are meant to prevent. `FinalAnswerSchema` itself is unchanged; `SectionAnswerSchema` is a new, independent schema, not a union type that turns `FinalAnswerSchema` into "maybe has a topic, maybe doesn't."
-
-### Budget and CLI
-
-`getBudget("planning")` returns `PLANNING_BUDGET`: full six phases per topic (`phases` matches `STANDARD_BUDGET`), plus `maxTopics: 8`. The CLI triggers this with `--mode planning`.
-
-### Real-run latency baseline (as of this document's last update)
-
-Narrow questions run in `standard` mode with real models (Volcengine/DeepSeek-family reasoning models) took 96-250 seconds end to end — well above the p50 60s / p95 120s targets in `STANDARD_BUDGET`, which were only ever mock-based guesses and haven't been calibrated against real data yet (a known follow-up, out of scope for this v0.2 change). Since planning mode runs the full six phases per topic, a single topic's expected latency is similar to one `standard`-mode run; because topics run in parallel, total latency is roughly bounded by the slowest topic rather than the sum of all topics.
-
-Switching to a genuinely cross-vendor combination (OpenAI GPT-5.5 / DeepSeek v4 Pro / Google Gemini 3.1 Pro, all via OpenRouter) put a single `standard`-mode run at 164-301 seconds — a similar order of magnitude to the same-vendor combination, with no clear slowdown or speedup.
-
-### An observed classification edge case: unanimous critical objections land in `disputed`, not `rejected`
-
-`classifyCandidate`'s rule is "any critical objection routes straight to `disputed`, and can't be outvoted by a majority" (see "consensus classification is ratio-based" above). During real testing, this happened once: Normalize produced a blank/substance-free candidate claim, and all three models voted `object` during Vote (severities: major/critical/critical). Under the current rule, that gets classified as `disputed` rather than the more intuitive `rejected` — because the "critical objection exists" check only looks at presence, not unanimity. This isn't a bug (the rule exists specifically to stop a majority from overriding a lone critical dissent; here it just happened that all three votes were objections), but it's worth recording: if "unanimous rejection displaying as disputed" turns out to confuse users, a special-cased rule could be added later — if every vote is `object` (regardless of severity), classify directly as `rejected`, treated as an explicit unanimous exclusion independent of the ratio thresholds.
-
-### A real disputed case (planning mode, cross-vendor combination)
-
-Running "plan the tech stack for a 3-person e-commerce project" (planning mode) with the cross-vendor combination produced a real disagreement under the "backend stack and API design" topic: the candidate "Java 21 + Spring Boot 3" reached `strong_consensus`, while "TypeScript + Node.js + NestJS" was classified `disputed` — two models voted approve, but the model that had originally proposed that option itself voted `object` (major) during Vote, arguing that presenting the two options as equivalent alternatives was misleading, since an e-commerce project's state machines, transactions, and inventory concurrency are markedly more expensive to handle well in the Node ecosystem. This validated that ratio-based consensus plus the major-objection rule works correctly on a real, substantive technical disagreement (2/3 approve with a major objection wasn't overridden by the majority, and correctly routed to `disputed` instead of `strong_consensus`).
-
-The same re-test also surfaced and fixed a bug: during section-compose, models would invent a more "semantic" new string for `topic_id` (e.g. rewriting the outline's `"4"` into `"backend-tech-stack-api-design"`) instead of echoing back the value they were given — the same class of problem as models inventing their own `model_id`/`claim_id` during propose/critique/revise/vote. `stampSectionAnswer` in `packages/orchestrator/src/index.ts` now overwrites the model-reported value with the caller-known `topic.topic_id`/`topic.title`, and `MockProvider` in `packages/model-adapters` was updated to deliberately simulate this "id rewriting" behavior so the regression test actually exercises the fix (otherwise the mock would keep dutifully echoing the value back and this class of bug would stay permanently invisible to tests — the second time this project has been bitten by "the mock was too well-behaved to catch a real blind spot").
-
-## M2: Backend API
-
-M2 moves the orchestrator logic already validated in `apps/cli` (now extracted into `packages/orchestrator`, shared by both the CLI and `apps/api`) onto a Fastify + Postgres server. The protocol itself — the six-phase schemas, ratio-based consensus, quorum, budgets — is completely unchanged; M2 is pure delivery-layer work, not a protocol revision.
-
-- **Conversation/Run API**: `POST /api/conversations`, `POST /api/conversations/:id/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/result`.
-- **SSE event stream** (`GET /api/runs/:id/events`): `packages/orchestrator`'s `onEvent` callback already fires at every phase boundary (`run_started`/`phase_started`/`phase_completed`/`run_failed`/`run_completed`, including per-topic events in planning mode) — M2 just persists those events to a `run_events` table (ordered by a per-run monotonic `seq`) and fans them out to currently-connected SSE clients through an in-process in-memory broadcaster. On reconnect, the client sends back `Last-Event-ID`; the server replays everything with a larger `seq` from Postgres first, then continues streaming live events.
-- **One deviation from the original tech design doc: model selection is a server-side registry, not a client-supplied provider.** The original API draft has the run-creation request body carry a client-supplied `{id, provider}` model object directly. M2 instead has the server load a `models.config.json` (same shape as `apps/cli`'s: `id`/`modelId`/`baseUrl`/`apiKeyEnvVar`), and a run-creation request can only pick a `modelIds` subset from that server-side registry. Rationale: avoids SSRF via an arbitrary client-supplied `baseUrl`, and avoids needing the client to supply its own API keys. Falls back to `MockProvider` when no `models.config.json` exists, same as the CLI.
-- **No Redis.** The original tech design doc mentions Redis for task state/short-term event queueing, but M2's acceptance criteria (start a run, subscribe to it live, see the result after a refresh) don't need cross-process event fan-out — a single-process in-memory broadcaster plus Postgres persistence (for reconnect replay) is enough. Redis can be introduced later if/when true horizontal scaling is actually needed; not worth over-engineering for now.
-- **Persistence**: beyond `conversations`/`runs`/`run_events`, the `claims`/`reviews`/`candidates`/`votes` tables flatten each run's detailed data into queryable rows (`candidates.source_claim_ids` preserves M0's traceability constraint), while `run_results` stores a full `DeliberationResult`/`PlanDocument` snapshot as the direct data source for `GET /result`. See `apps/api/src/db/migrations/0001_init.sql` for the schema and migration script.
-
-## M4 phase 1: BYOK reopens "client-supplied provider" — but keeps the whitelist
-
-The section above describes how M2 collapsed model selection into a server-side `models.config.json` registry to avoid SSRF and avoid needing client-supplied API keys. M4 phase 1 (no account system, a BYOK platform — see roadmap.md) reopens client-supplied API keys, but does *not* reopen "client-supplied arbitrary baseUrl":
-
-- `packages/protocol/src/provider-whitelist.ts` defines a fixed list of providers (`providerId` → a fixed `baseUrl`) — currently only OpenAI-compatible-shaped ones: OpenAI, DeepSeek, OpenRouter, Volcengine. A client can only pick a `providerId` + its own `apiKey` + a free-text `modelId`, never a `baseUrl` — which is exactly why reopening client-supplied keys didn't reopen the SSRF surface: `baseUrl` is still resolved entirely server-side from `providerId`.
-- `apps/api/src/config/provider-factory.ts`'s `buildRunProvider()` constructs a provider per `POST /runs` request (merging the selected server-registry models with any client-supplied BYOK models into one `RoutingProvider`), kept entirely separate from `buildProvider()` (built once at startup, still serving the server registry) so neither path affects the other.
-- Fully custom/arbitrary baseUrl (for self-hosted or niche providers) would need a full SSRF-hardening pass — private-IP filtering, DNS-rebinding protection, redirect revalidation, IP-encoding bypass handling — assessed as meaningfully more work and left as an explicit follow-up, not done in this pass.
-
-## Usage
-
-```ts
-import {
-  ProposalSchema,
-  CritiqueSchema,
-  RevisionSetSchema,
-  NormalizeResultSchema,
-  VoteSetSchema,
-  FinalAnswerSchema,
-  OutlineResultSchema,
-  SectionAnswerSchema,
-  PlanDocumentSchema,
-  classifyCandidate,
-  checkQuorum,
-  makeRunId,
-  scopedId,
-  getBudget,
-} from "@mmd/protocol";
-```
-
-`apps/cli` is this protocol's first consumer (milestone M1). Every model call result in the CLI should pass its corresponding zod schema validation before moving on to the next phase.
+TypeScript and Python execute the shared fixtures and compare phase, IDs,
+ballots, classifications, basis, lineage, failures, quorum, and usage—not only
+the final text. Complete-link property tests cover order independence,
+cannot-link safety, and exactly-one-cluster assignment.

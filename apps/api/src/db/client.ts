@@ -36,6 +36,7 @@ export interface RunsTable {
   question: string;
   input_images: unknown;
   mode: string;
+  governance: Generated<string>;
   protocol_version: Generated<string>;
   status: string;
   model_config: unknown;
@@ -127,7 +128,30 @@ export interface RunResultsTable {
   output_format: unknown;
   user_output: unknown;
   user_output_error: string | null;
+  trace: unknown;
+  planning_final: unknown;
   created_at: Generated<Date>;
+}
+
+export interface RunTracesTable {
+  run_id: string;
+  status: string;
+  trace: unknown;
+  updated_at: Generated<Date>;
+}
+
+export interface RunArtifactsTable {
+  run_id: string;
+  artifact_id: string;
+  kind: string;
+  phase: string;
+  status: string;
+  topic_id: string | null;
+  candidate_set_id: string | null;
+  parent_ids: unknown;
+  payload: unknown;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
 }
 
 export interface Database {
@@ -141,6 +165,8 @@ export interface Database {
   candidates: CandidatesTable;
   votes: VotesTable;
   run_results: RunResultsTable;
+  run_traces: RunTracesTable;
+  run_artifacts: RunArtifactsTable;
 }
 
 export function createDb(databaseUrl: string): Kysely<Database> {

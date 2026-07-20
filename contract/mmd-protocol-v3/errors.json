@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "protocol_version": "mmd.v3",
+  "errors": {
+    "invalid_governance": "The requested governance is not supported for the selected mode.",
+    "quick_requires_two_models": "Quick requires exactly two distinct models.",
+    "coordinator_not_in_panel": "The coordinator must be one of the explicitly selected models.",
+    "distributed_requires_manifest": "Distributed Standard requires a versioned experiment manifest and alignment policy.",
+    "phase_quorum_not_met": "A panel phase did not meet quorum.",
+    "coordinator_failed": "A coordinator phase failed after one retry.",
+    "global_compose_failed": "GlobalCompose failed; topic ledgers are returned as the canonical fallback.",
+    "context_budget_exceeded": "GlobalCompose input remains over budget after one traceable topic-brief pass."
+  }
+}

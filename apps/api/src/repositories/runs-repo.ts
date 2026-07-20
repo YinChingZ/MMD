@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import type { ModelConfig } from "@mmd/model-adapters";
-import type { RunBudget, RunMode } from "@mmd/protocol";
+import type { Governance, RunBudget, RunMode } from "@mmd/protocol";
 import type { Database, RunsTable } from "../db/client.js";
 
 export interface InputImage {
@@ -16,6 +16,7 @@ export interface RunRow {
   workspaceId: string | null;
   question: string;
   mode: RunMode;
+  governance: Governance;
   status: RunStatus;
   error: string | null;
   createdAt: string;
@@ -31,6 +32,7 @@ export async function createRun(
     question: string;
     images?: InputImage[];
     mode: RunMode;
+    governance?: Governance;
     modelConfig: ModelConfig[];
     budget: RunBudget;
   }
@@ -44,6 +46,7 @@ export async function createRun(
       question: params.question,
       input_images: JSON.stringify(params.images ?? []),
       mode: params.mode,
+      governance: params.governance ?? "centralized",
       status: "running",
       model_config: JSON.stringify(params.modelConfig),
       budget: JSON.stringify(params.budget),
@@ -213,6 +216,7 @@ function toRunRow(row: Selectable<RunsTable>): RunRow {
     workspaceId: row.workspace_id,
     question: row.question,
     mode: row.mode as RunMode,
+    governance: row.governance as Governance,
     status: row.status as RunStatus,
     error: row.error,
     createdAt: row.created_at.toISOString(),

@@ -1,0 +1,52 @@
+{
+  "protocol_version": "mmd.v3",
+  "quorum": [
+    { "model_count": 2, "respondent_count": 2, "required": 2, "met": true, "partial": false },
+    { "model_count": 3, "respondent_count": 2, "required": 2, "met": true, "partial": true },
+    { "model_count": 4, "respondent_count": 2, "required": 3, "met": false, "partial": true }
+  ],
+  "classification": [
+    {
+      "name": "unanimous",
+      "expected_voter_count": 2,
+      "ballots": [
+        { "candidate_id": "candidate_000", "vote": "approve", "confidence": 1, "reason": "a" },
+        { "candidate_id": "candidate_000", "vote": "approve", "confidence": 1, "reason": "b" }
+      ],
+      "expected_label": "strong_consensus",
+      "expected_approve_ratio": 1.0
+    },
+    {
+      "name": "critical_objection",
+      "expected_voter_count": 3,
+      "ballots": [
+        { "candidate_id": "candidate_000", "vote": "approve", "confidence": 1, "reason": "a" },
+        { "candidate_id": "candidate_000", "vote": "approve", "confidence": 1, "reason": "b" },
+        { "candidate_id": "candidate_000", "vote": "object", "confidence": 1, "reason": "c", "objection_severity": "critical" }
+      ],
+      "expected_label": "disputed",
+      "expected_approve_ratio": 0.6666666666666666
+    }
+  ],
+  "alignment": {
+    "claims": [
+      { "claim_id": "claim_a", "text": "Use a staged rollout", "model_id": "model_a" },
+      { "claim_id": "claim_b", "text": "Roll out in stages", "model_id": "model_b" },
+      { "claim_id": "claim_c", "text": "Ship to everyone immediately", "model_id": "model_c" }
+    ],
+    "pair_support": [
+      { "left_claim_id": "claim_a", "right_claim_id": "claim_b", "support": 2, "cannot_link": false },
+      { "left_claim_id": "claim_a", "right_claim_id": "claim_c", "support": 0, "cannot_link": true },
+      { "left_claim_id": "claim_b", "right_claim_id": "claim_c", "support": 0, "cannot_link": true }
+    ],
+    "minimum_support": 2,
+    "expected_clusters": [["claim_a", "claim_b"], ["claim_c"]]
+  },
+  "stable_ids": {
+    "run_id": "run_fixture",
+    "topic_id": "topic_000",
+    "expected_candidate_set_id": "run_fixture::topic_000::candidate_set::centralized",
+    "expected_candidate_ids": ["run_fixture::topic_000::candidate::000", "run_fixture::topic_000::candidate::001"],
+    "expected_call_id": "run_fixture::topic_000::call::vote::model_a::000"
+  }
+}

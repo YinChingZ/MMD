@@ -1,5 +1,9 @@
 # 多模型协商式对话产品：改进版开发流程
 
+> 历史路线图：本文保留 pre-v3 里程碑和当时的 `section-compose` 实施记录。
+> 当前权威架构见 [protocol.md](protocol.md)；新 Planning 运行只执行一次
+> GlobalCompose，旧 `PlanDocument` 仅为读取/UI 兼容投影。
+
 日期：2026-07-03（最后更新 2026-07-05，M5 全部完成）
 配套文档：原始技术设计文档 `multi-model-deliberation-tech-design.md`（仓库外，未纳入版本库）、[protocol.md](protocol.md)
 

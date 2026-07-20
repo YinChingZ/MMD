@@ -1,6 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { getProviderBaseUrl, getProviderDisplayName } from "@mmd/protocol";
+import {
+  ExperimentManifestSchema,
+  getProviderBaseUrl,
+  getProviderDisplayName,
+  resolveGovernance,
+  type Governance,
+} from "@mmd/protocol";
 import { validateOutputFormatSchema } from "@mmd/model-adapters";
 import type { AppDeps } from "../app.js";
 import { buildRunProvider } from "../config/provider-factory.js";
@@ -13,6 +19,7 @@ import {
   revokeShareToken,
 } from "../repositories/runs-repo.js";
 import { getResult } from "../repositories/results-repo.js";
+import { getTraceSnapshot } from "../repositories/traces-repo.js";
 import {
   getDecryptedApiKey,
   saveApiKey,
@@ -126,6 +133,8 @@ export function validateInputImages(
 const CreateRunBody = z.object({
   question: z.string().min(1),
   mode: z.enum(["standard", "quick", "planning"]).optional(),
+  governance: z.enum(["centralized", "distributed"]).optional(),
+  experimentManifest: ExperimentManifestSchema.optional(),
   // Legacy path: pick a subset of the server-side models.config.json registry.
   // Omitted entirely (and no byokModels either) keeps the pre-BYOK default of
   // using every registry model — see selectedLegacyIds below.
@@ -188,6 +197,8 @@ export async function runsRoutes(
       const {
         question,
         mode = "standard",
+        governance,
+        experimentManifest,
         modelIds,
         byokModels = [],
         costLimitUsd = DEFAULT_COST_LIMIT_USD,
@@ -195,6 +206,17 @@ export async function runsRoutes(
         images = [],
         webSearch = false,
       } = parsed.data;
+
+      let resolvedGovernance: Governance;
+      try {
+        resolvedGovernance = resolveGovernance(mode, governance, experimentManifest);
+      } catch (error) {
+        const protocolError = error as Error & { code?: string };
+        return reply.code(400).send({
+          code: protocolError.code ?? "invalid_governance",
+          error: protocolError.message,
+        });
+      }
 
       const imagesCheck = validateInputImages(images);
       if (!imagesCheck.ok) {
@@ -305,6 +327,32 @@ export async function runsRoutes(
         });
       }
 
+      let executionModels = runProvider.models;
+      let coordinatorModelId = runProvider.coordinatorModelId;
+      if (mode === "quick") {
+        const explicitPanel = modelIds !== undefined || byokModels.length > 0;
+        if (explicitPanel && executionModels.length !== 2) {
+          return reply.code(400).send({
+            code: "quick_requires_two_models",
+            error: "quick mode requires exactly two distinct models",
+          });
+        }
+        if (!explicitPanel) {
+          const coordinator = executionModels.find(
+            (model) => model.id === coordinatorModelId
+          ) ?? executionModels[0];
+          const peer = executionModels.find((model) => model.id !== coordinator?.id);
+          if (!coordinator || !peer) {
+            return reply.code(400).send({
+              code: "quick_requires_two_models",
+              error: "quick mode could not select two distinct default models",
+            });
+          }
+          executionModels = [coordinator, peer];
+          coordinatorModelId = coordinator.id;
+        }
+      }
+
       for (const m of resolvedByokModels) {
         if (!m.save) continue;
         await saveApiKey(deps.db, deps.encryptionKey, {
@@ -324,9 +372,11 @@ export async function runsRoutes(
         images,
         webSearch,
         mode,
-        models: runProvider.models,
+        governance: resolvedGovernance,
+        experimentManifest,
+        models: executionModels,
         provider: runProvider.provider,
-        coordinatorModelId: runProvider.coordinatorModelId,
+        coordinatorModelId,
         costLimitUsd,
         outputFormat,
       });
@@ -367,9 +417,27 @@ export async function runsRoutes(
         runId: run.id,
         question: run.question,
         mode: run.mode,
+        governance: run.governance,
         status: run.status,
         ...result,
       });
+    }
+  );
+
+  // Trace snapshots are independent of the terminal result row, so callers
+  // can inspect preserved artifacts for running and failed executions too.
+  fastify.get<{ Params: { id: string } }>(
+    "/api/runs/:id/trace",
+    async (request, reply) => {
+      const run = await getRun(deps.db, request.params.id);
+      if (!run || run.workspaceId !== request.workspaceId) {
+        return reply.code(404).send({ error: "run not found" });
+      }
+      const trace = await getTraceSnapshot(deps.db, request.params.id);
+      if (!trace) {
+        return reply.code(404).send({ error: "trace not found" });
+      }
+      return reply.send(trace);
     }
   );
 

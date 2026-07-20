@@ -180,7 +180,7 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
     }
   });
 
-  it("persists a planning-mode result without candidate/vote primary-key collisions across topics (regression: MockProvider's mockNormalize deterministically emits cc_1/cc_2/... in every topic, and a real cross-topic planning run hit 'duplicate key value violates unique constraint candidates_pkey' before candidate/vote ids were scoped per topic)", async () => {
+  it("persists host-scoped v3 candidate IDs unchanged across planning topics", async () => {
     const conversation = await createConversation(db, workspaceId);
     const models = [
       { id: "model_a", provider: "mock" },
@@ -226,11 +226,11 @@ describeIfDb("apps/api repositories (integration, requires DATABASE_URL)", () =>
     // Each row's persisted classification must match its OWN topic's
     // classification, not another topic's (the bug this regresses against
     // would have let Object.assign-style merging silently pick the wrong
-    // topic's classification for a colliding "cc_1"-style id).
+    // topic's classification using the same authoritative ID as the trace.
     for (const topicResult of result.topics ?? []) {
       for (const candidate of topicResult.normalize.candidate_claims) {
         const row = candidateRows.find(
-          (r) => r.candidate_id === `${topicResult.topic.topic_id}::${candidate.candidate_id}`
+          (r) => r.candidate_id === candidate.candidate_id
         );
         expect(row).toBeDefined();
         expect(row?.classification).toEqual(

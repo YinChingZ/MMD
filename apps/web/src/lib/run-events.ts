@@ -36,10 +36,9 @@ export const SSE_EVENT_TYPES = [
  * map instead. */
 export const TOKEN_EVENT_TYPE = "token";
 
-/** composeText is keyed by topicId, or "_root" for standard/quick mode's
- * single compose call — each key accumulates that stream's deltas
- * independently, so planning mode's parallel per-topic section-compose
- * streams never bleed into each other. */
+/** composeText is keyed by topicId, or "_root" for the authoritative compose
+ * stream. Protocol v3 Planning uses one root GlobalCompose stream; topic keys
+ * remain readable only for replaying legacy pre-v3 events. */
 export const ROOT_COMPOSE_KEY = "_root";
 
 export interface TokenData {

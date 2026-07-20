@@ -6,13 +6,21 @@ import {
   VoteSetSchema,
   FinalAnswerSchema,
   OutlineResultSchema,
-  SectionAnswerSchema,
+  AlignResultSchema,
+  PlanningFinalAnswerSchema,
   ClaimSchema,
   ReviewSchema,
   RevisionSchema,
   BallotSchema,
   CandidateClaimSchema,
   classifyCandidate,
+  assertModelSelection,
+  resolveGovernance,
+  deterministicCompleteLink,
+  candidatesFromClusters,
+  stableCandidateSetId,
+  stableCallId,
+  TraceRecorderV3,
   makeRunId,
   getBudget,
   type Proposal,
@@ -32,6 +40,13 @@ import {
   type OutlineResult,
   type SectionAnswer,
   type PlanDocument,
+  type Governance,
+  type ExperimentManifest,
+  type MmdTraceV3,
+  type TraceArtifact,
+  type PlanningFinalAnswer,
+  type GlobalComposeCandidate,
+  type AlignResult,
 } from "@mmd/protocol";
 import {
   fanOutWithQuorum,
@@ -57,7 +72,8 @@ import {
   buildVotePrompt,
   buildComposePrompt,
   buildOutlinePrompt,
-  buildSectionComposePrompt,
+  buildAlignPrompt,
+  buildGlobalComposePrompt,
   buildFormatUserOutputPrompt,
   type ReviewWithReviewer,
   type PositionChangeInput,
@@ -134,7 +150,7 @@ function withModelAttempt<T>(
 }
 
 /**
- * Normalize/compose/outline/section_compose are single-coordinator calls with
+ * Normalize/compose/outline/global_compose are single-coordinator calls with
  * no fanOutWithQuorum layer of their own — without this, a timeout/abort on
  * one of them propagates the raw fetch AbortError straight up with no phase
  * attribution and no run_failed SSE event (see docs — the "This operation was
@@ -182,10 +198,16 @@ export interface DeliberationInput {
   models: ModelConfig[];
   provider: ModelProvider;
   mode?: RunMode;
+  /** v3 product governance. Quick and Planning only accept centralized. */
+  governance?: Governance;
+  /** Required to unlock experimental distributed Standard. */
+  experimentManifest?: ExperimentManifest;
   /** Model used for the single-authority normalize/compose calls. Defaults to models[0]. */
   coordinatorModelId?: string;
   fanoutOptions?: { timeoutMs?: number; retries?: number; backoffMs?: number };
   onEvent?: (event: RunEvent) => void;
+  /** Incremental immutable trace snapshot, used by persistence on partial failure. */
+  onTrace?: (trace: MmdTraceV3) => void;
   /**
    * Pre-generated run id (e.g. from @mmd/protocol's makeRunId()). Callers
    * that need the id before the run settles — the API's run-service responds
@@ -212,6 +234,9 @@ export interface DeliberationInput {
    * internal result. Omitted entirely means today's behavior is unchanged.
    */
   outputFormat?: FormatUserOutputRequest;
+  /** Internal resolved values threaded through mode-specific runners. */
+  resolvedGovernance?: Governance;
+  traceRecorder?: TraceRecorderV3;
 }
 
 /** A validated inline image persisted with a run, without exposing it in results. */
@@ -267,6 +292,8 @@ export interface DeliberationResult {
   runId: string;
   question: string;
   mode: RunMode;
+  governance: Governance;
+  trace: MmdTraceV3;
   budget: RunBudget;
   proposals: Proposal[];
   critiques: Critique[];
@@ -286,6 +313,8 @@ export interface DeliberationResult {
   outline?: OutlineResult;
   topics?: TopicResult[];
   planDocument?: PlanDocument;
+  /** v3 authoritative planning output. planDocument is a legacy projection. */
+  planningFinal?: PlanningFinalAnswer;
   /**
    * M6.1: echoes the request's outputFormat (so saveResult can persist the
    * request/response pair together), the reformatted result once validated
@@ -307,8 +336,161 @@ export interface TopicResult {
   normalize: NormalizeResult;
   votes: VoteSet[];
   classifications: Record<string, ClassifyCandidateResult>;
+  candidateSetId?: string;
   timings: Partial<Record<Phase, number>>;
   quorum: Partial<Record<Phase, QuorumCheck>>;
+  failures?: Partial<Record<Phase, ModelFailure[]>>;
+}
+
+function traceArtifact(
+  input: DeliberationInput,
+  artifact: TraceArtifact
+): void {
+  if (!input.traceRecorder) return;
+  input.traceRecorder.addArtifact(artifact);
+  input.onTrace?.(input.traceRecorder.snapshot());
+}
+
+function traceFanoutOutcome(params: {
+  input: DeliberationInput;
+  runId: string;
+  phase: string;
+  outcome: FanoutOutcome<unknown>;
+  topicId?: string;
+}): void {
+  if (!params.input.traceRecorder) return;
+  const recorder = params.input.traceRecorder;
+  recorder.trace.quorum = recorder.trace.quorum.filter(
+    (item) => item.phase !== params.phase || item.topic_id !== params.topicId
+  );
+  recorder.trace.quorum.push({
+    phase: params.phase,
+    topic_id: params.topicId,
+    met: params.outcome.quorum.met,
+    required: params.outcome.quorum.required,
+    respondent_count: params.outcome.quorum.respondentCount,
+    expected_count: params.outcome.results.length,
+    partial: params.outcome.quorum.partial,
+  });
+  params.outcome.results.forEach((result, index) => {
+    const timedOut =
+      !result.ok &&
+      (result.error.name.toLowerCase().includes("timeout") ||
+        result.error.message.toLowerCase().includes("timed out"));
+    params.input.traceRecorder!.addCall({
+      call_id: stableCallId({
+        runId: params.runId,
+        phase: params.phase,
+        modelId: result.config.id,
+        index,
+        topicId: params.topicId,
+      }),
+      phase: params.phase,
+      model_id: result.config.id,
+      role: "panel",
+      status: result.ok ? "completed" : timedOut ? "timeout" : "failed",
+      attempt: 0,
+      topic_id: params.topicId,
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_usd: 0,
+        usage_unavailable_count: 1,
+      },
+      error_code: result.ok ? undefined : result.error.name || "provider_failed",
+    });
+    if (!result.ok) {
+      recorder.addFailure({
+        phase: params.phase,
+        code: timedOut ? "provider_timeout" : "provider_failed",
+        message: result.error.message,
+        recoverable: params.outcome.quorum.met,
+        topic_id: params.topicId,
+        model_id: result.config.id,
+      });
+    }
+  });
+  params.input.onTrace?.(recorder.snapshot());
+}
+
+function traceCoordinatorAttempt(params: {
+  input: DeliberationInput;
+  runId: string;
+  phase: string;
+  modelId: string;
+  attempt: number;
+  status: "completed" | "failed" | "timeout";
+  topicId?: string;
+  error?: unknown;
+  usage?: CompletionUsage;
+}): void {
+  if (!params.input.traceRecorder) return;
+  params.input.traceRecorder.addCall({
+    call_id: stableCallId({
+      runId: params.runId,
+      phase: params.phase,
+      modelId: params.modelId,
+      index: params.attempt,
+      topicId: params.topicId,
+    }),
+    phase: params.phase,
+    model_id: params.modelId,
+    role: "coordinator",
+    status: params.status,
+    attempt: params.attempt,
+    topic_id: params.topicId,
+    usage: {
+      prompt_tokens: params.usage?.promptTokens ?? 0,
+      completion_tokens: params.usage?.completionTokens ?? 0,
+      total_tokens:
+        params.usage?.totalTokens ??
+        (params.usage?.promptTokens ?? 0) + (params.usage?.completionTokens ?? 0),
+      cost_usd: params.usage?.costUsd ?? 0,
+      usage_unavailable_count: params.usage ? 0 : 1,
+    },
+    error_code:
+      params.status === "completed"
+        ? undefined
+        : params.error instanceof Error
+          ? params.error.name
+          : "coordinator_failed",
+  });
+  params.input.onTrace?.(params.input.traceRecorder.snapshot());
+}
+
+function traceQuorumEntries(
+  result: DeliberationResult,
+  expectedCount: number
+): MmdTraceV3["quorum"] {
+  const root = Object.entries(result.quorum).flatMap(([phase, check]) =>
+    check
+      ? [{
+          phase,
+          met: check.met,
+          required: check.required,
+          respondent_count: check.respondentCount,
+          expected_count: expectedCount,
+          partial: check.partial,
+        }]
+      : []
+  );
+  const topics = (result.topics ?? []).flatMap((topic) =>
+    Object.entries(topic.quorum).flatMap(([phase, check]) =>
+      check
+        ? [{
+            phase,
+            topic_id: topic.topic.topic_id,
+            met: check.met,
+            required: check.required,
+            respondent_count: check.respondentCount,
+            expected_count: expectedCount,
+            partial: check.partial,
+          }]
+        : []
+    )
+  );
+  return [...root, ...topics];
 }
 
 interface ResolvedClaim {
@@ -399,17 +581,171 @@ function stampRevisionSet(config: ModelConfig, set: RevisionSet): RevisionSet {
   return { ...set, model_id: config.id };
 }
 
-function stampVoteSet(config: ModelConfig, set: VoteSet): VoteSet {
-  return { ...set, model_id: config.id };
+function stampVoteSet(
+  config: ModelConfig,
+  set: VoteSet,
+  candidateIds: Set<string>
+): VoteSet {
+  const seen = new Set<string>();
+  return {
+    ...set,
+    model_id: config.id,
+    votes: set.votes.filter((ballot) => {
+      if (!candidateIds.has(ballot.candidate_id) || seen.has(ballot.candidate_id)) {
+        return false;
+      }
+      seen.add(ballot.candidate_id);
+      return true;
+    }),
+  };
 }
 
-/** Same self-reported-identity problem as stampProposal etc: real models
- * routinely invent their own (more descriptive) topic_id instead of echoing
- * back the one we gave them in the prompt, which breaks the topicById
- * lookup format.ts relies on to attach per-topic timings/quorum. Ground
- * truth wins. */
-function stampSectionAnswer(topic: Topic, section: SectionAnswer): SectionAnswer {
-  return { ...section, topic_id: topic.topic_id, title: topic.title };
+function stampNormalizeResult(
+  runId: string,
+  normalize: NormalizeResult,
+  claims: ResolvedClaim[],
+  topicId?: string
+): NormalizeResult {
+  const expectedClaimIds = new Set(claims.map((claim) => claim.claim_id));
+  const assignedClaimIds = new Set<string>();
+  const sorted = [...normalize.candidate_claims].sort((left, right) => {
+    const leftKey = [...left.source_claim_ids].sort().join("\u0000");
+    const rightKey = [...right.source_claim_ids].sort().join("\u0000");
+    return leftKey.localeCompare(rightKey) || left.text.localeCompare(right.text);
+  });
+  for (const candidate of sorted) {
+    for (const claimId of candidate.source_claim_ids) {
+      if (!expectedClaimIds.has(claimId)) {
+        throw new Error(`normalize referenced unknown claim: ${claimId}`);
+      }
+      if (assignedClaimIds.has(claimId)) {
+        throw new Error(`normalize assigned claim more than once: ${claimId}`);
+      }
+      assignedClaimIds.add(claimId);
+    }
+  }
+  const missing = [...expectedClaimIds].filter((claimId) => !assignedClaimIds.has(claimId));
+  if (missing.length > 0) {
+    throw new Error(`normalize omitted claims: ${missing.join(", ")}`);
+  }
+  return {
+    candidate_claims: sorted.map((candidate, index) => ({
+      ...candidate,
+      candidate_id: `${runId}::${topicId ?? "root"}::candidate::${String(index).padStart(3, "0")}`,
+      source_claim_ids: [...new Set(candidate.source_claim_ids)].sort(),
+      topic_id: topicId ?? candidate.topic_id,
+    })),
+  };
+}
+
+function fallbackNormalizeResult(
+  runId: string,
+  claims: ResolvedClaim[],
+  topicId?: string
+): NormalizeResult {
+  const scope = topicId ?? "root";
+  return {
+    candidate_claims: [...claims]
+      .sort((left, right) => left.claim_id.localeCompare(right.claim_id))
+      .map((claim, index) => ({
+        candidate_id: `${runId}::${scope}::candidate::${String(index).padStart(3, "0")}`,
+        text: claim.text,
+        source_claim_ids: [claim.claim_id],
+        topic_id: topicId,
+        notes: "deterministic fallback after coordinator normalization failure",
+      })),
+  };
+}
+
+function stampAlignResult(config: ModelConfig, result: AlignResult): AlignResult {
+  return { ...result, aligner_model_id: config.id };
+}
+
+async function buildDistributedNormalize(params: {
+  input: DeliberationInput;
+  runId: string;
+  question: string;
+  claims: ResolvedClaim[];
+  coordinatorTimeoutMs: number;
+  topic?: Topic;
+  onUsage: (usage: CompletionUsage | undefined) => void;
+}): Promise<{ normalize: NormalizeResult; alignments: AlignResult[]; quorum: QuorumCheck; decisions: unknown[] }> {
+  const outcome = await fanOutWithQuorum(
+    params.input.models,
+    (config, context) => structuredCall(
+      params.input.provider,
+      config,
+      buildAlignPrompt({
+        question: params.question,
+        alignerModelId: config.id,
+        claims: params.claims,
+        topic: params.topic,
+      }),
+      AlignResultSchema,
+      params.onUsage,
+      { timeoutMs: params.coordinatorTimeoutMs, signal: context?.signal }
+    ),
+    {
+      timeoutMs: params.coordinatorTimeoutMs,
+      retries: params.input.fanoutOptions?.retries ?? 1,
+      backoffMs: params.input.fanoutOptions?.backoffMs ?? 200,
+    }
+  );
+  traceFanoutOutcome({
+    input: params.input,
+    runId: params.runId,
+    phase: "align",
+    outcome,
+    topicId: params.topic?.topic_id,
+  });
+  if (!outcome.quorum.met) {
+    throw new DeliberationQuorumError(
+      "normalize",
+      outcome.quorum,
+      describeFailures(outcome)
+    );
+  }
+  const alignments = outcome.succeeded.map((item) =>
+    stampAlignResult(item.config, item.value)
+  );
+  const pairMap = new Map<string, { left_claim_id: string; right_claim_id: string; support: number; cannot_link: boolean }>();
+  for (const alignment of alignments) {
+    for (const judgment of alignment.judgments) {
+      const [left, right] = [judgment.left_claim_id, judgment.right_claim_id].sort();
+      if (left === right) continue;
+      const key = `${left}\u0000${right}`;
+      const current = pairMap.get(key) ?? {
+        left_claim_id: left,
+        right_claim_id: right,
+        support: 0,
+        cannot_link: false,
+      };
+      if (judgment.relation === "equivalent") current.support += 1;
+      if (judgment.cannot_link || judgment.relation === "conflict") {
+        current.cannot_link = true;
+      }
+      pairMap.set(key, current);
+    }
+  }
+  const policy = params.input.experimentManifest!.alignment_policy!;
+  const clustered = deterministicCompleteLink({
+    claimIds: params.claims.map((claim) => claim.claim_id),
+    pairSupport: [...pairMap.values()],
+    minimumSupport: policy.minimum_pair_support,
+  });
+  return {
+    normalize: {
+      candidate_claims: candidatesFromClusters({
+        runId: params.runId,
+        topicId: params.topic?.topic_id,
+        claims: params.claims,
+        clusters: clustered.clusters,
+      }),
+    },
+    alignments,
+    quorum: outcome.quorum,
+    decisions: clustered.decisions,
+  };
 }
 
 function ballotsByCandidate(votes: VoteSet[]): Map<string, Ballot[]> {
@@ -472,6 +808,36 @@ function computeConsensusBuckets(
   return buckets;
 }
 
+function deterministicCanonicalFinal(
+  buckets: ConsensusBuckets,
+  positionChanges: PositionChangeInput[],
+  note: string
+): FinalAnswer {
+  const parts = [
+    buckets.strongConsensus.length
+      ? `Strong consensus:\n${buckets.strongConsensus.map((item) => `- ${item}`).join("\n")}`
+      : undefined,
+    buckets.qualifiedConsensus.length
+      ? `Qualified consensus:\n${buckets.qualifiedConsensus.map((item) => `- ${item}`).join("\n")}`
+      : undefined,
+    buckets.disputed.length
+      ? `Disputed:\n${buckets.disputed.map((item) => `- ${item}`).join("\n")}`
+      : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return {
+    final_answer: parts.join("\n\n") || "No supported candidate reached consensus.",
+    strong_consensus: buckets.strongConsensus,
+    qualified_consensus: buckets.qualifiedConsensus,
+    disputed_points: buckets.disputed,
+    rejected_or_unsupported: buckets.rejected,
+    model_position_changes: positionChanges,
+    confidence_summary: {
+      consensus_strength: buckets.disputed.length > 0 ? "low" : "medium",
+      notes: note,
+    },
+  };
+}
+
 function computePositionChanges(
   proposals: Proposal[],
   revisions: RevisionSet[]
@@ -511,6 +877,14 @@ interface StreamHooks {
   timeoutMs?: number;
   signal?: AbortSignal;
   preferStream?: boolean;
+  /** Coordinator phases get exactly one whole-call retry in protocol v3. */
+  retryProviderFailureOnce?: boolean;
+  traceContext?: {
+    input: DeliberationInput;
+    runId: string;
+    phase: string;
+    topicId?: string;
+  };
 }
 
 async function structuredCall<T>(
@@ -521,73 +895,132 @@ async function structuredCall<T>(
   onUsage?: (usage: CompletionUsage | undefined) => void,
   stream?: StreamHooks
 ): Promise<T> {
-  return callStructured(async (repairNote, attempt = 0) => {
-    const req: CompletionRequest = repairNote
-      ? {
-          ...request,
-          userPrompt:
-            typeof request.userPrompt === "string"
-              ? `${request.userPrompt}\n\n${repairNote}`
-              : [...request.userPrompt, { type: "text", text: repairNote }],
-        }
-      : request;
-    const runProviderCall = <R>(call: (signal?: AbortSignal) => Promise<R>) =>
-      stream?.signal
-        ? call(stream.signal)
-        : withProviderDeadline(stream?.timeoutMs, call);
-    if (provider.completeStream && stream?.onDelta && stream.preferStream !== false) {
-      try {
-        const result = await runProviderCall((signal) =>
-          provider.completeStream!(
-            config,
-            req,
-            (delta) => stream.onDelta!(delta, attempt),
-            { signal }
-          )
-        );
-        onUsage?.(result.usage);
-        return result;
-      } catch (err) {
-        if (err instanceof ProviderStreamError && canRecoverStructuredPartial(err, schema)) {
-          return {
-            text: err.partialText,
-            latencyMs: 0,
-            diagnostics: {
-              transport: "stream" as const,
-              providerRequestId: err.providerRequestId,
-              finishReason: err.finishReason,
-              errorType: err.errorType,
-              recovered: true,
-              degraded: true,
-            },
-          };
-        }
-        if (err instanceof ProviderStreamError && err.retryable && !stream.signal) {
-          const result = await withProviderDeadline(stream.timeoutMs, (signal) =>
-            provider.complete(config, req, { signal })
+  const attemptUsage = new Map<number, CompletionUsage | undefined>();
+  const run = (attemptOffset: number, maxRepairAttempts: number) =>
+    callStructured(async (repairNote, attempt = 0) => {
+      const effectiveAttempt = attemptOffset + attempt;
+      const req: CompletionRequest = repairNote
+        ? {
+            ...request,
+            userPrompt:
+              typeof request.userPrompt === "string"
+                ? `${request.userPrompt}\n\n${repairNote}`
+                : [...request.userPrompt, { type: "text", text: repairNote }],
+          }
+        : request;
+      const runProviderCall = <R>(call: (signal?: AbortSignal) => Promise<R>) =>
+        stream?.signal
+          ? call(stream.signal)
+          : withProviderDeadline(stream?.timeoutMs, call);
+      if (provider.completeStream && stream?.onDelta && stream.preferStream !== false) {
+        try {
+          const result = await runProviderCall((signal) =>
+            provider.completeStream!(
+              config,
+              req,
+              (delta) => stream.onDelta!(delta, effectiveAttempt),
+              { signal }
+            )
           );
+          attemptUsage.set(effectiveAttempt, result.usage);
           onUsage?.(result.usage);
-          return {
-            ...result,
-            diagnostics: {
-              ...result.diagnostics,
-              transport: "non_stream" as const,
-              degraded: true,
-              errorType: err.errorType,
-            },
-          };
+          return result;
+        } catch (err) {
+          if (err instanceof ProviderStreamError && canRecoverStructuredPartial(err, schema)) {
+            return {
+              text: err.partialText,
+              latencyMs: 0,
+              diagnostics: {
+                transport: "stream" as const,
+                providerRequestId: err.providerRequestId,
+                finishReason: err.finishReason,
+                errorType: err.errorType,
+                recovered: true,
+                degraded: true,
+              },
+            };
+          }
+          if (err instanceof ProviderStreamError && err.retryable && !stream.signal) {
+            const result = await withProviderDeadline(stream.timeoutMs, (signal) =>
+              provider.complete(config, req, { signal })
+            );
+            attemptUsage.set(effectiveAttempt, result.usage);
+            onUsage?.(result.usage);
+            return {
+              ...result,
+              diagnostics: {
+                ...result.diagnostics,
+                transport: "non_stream" as const,
+                degraded: true,
+                errorType: err.errorType,
+              },
+            };
+          }
+          throw err;
         }
-        throw err;
       }
+      const result = await runProviderCall((signal) =>
+        provider.complete(config, req, { signal })
+      );
+      // Every attempt costs money, including repair retries — report each one,
+      // not just the final accepted attempt.
+      attemptUsage.set(effectiveAttempt, result.usage);
+      onUsage?.(result.usage);
+      return result;
+    }, schema, { maxRepairAttempts });
+
+  if (!stream?.retryProviderFailureOnce) {
+    return run(0, 2);
+  }
+  try {
+    const value = await run(0, 0);
+    if (stream.traceContext) {
+      traceCoordinatorAttempt({
+        ...stream.traceContext,
+        modelId: config.id,
+        attempt: 0,
+        status: "completed",
+        usage: attemptUsage.get(0),
+      });
     }
-    const result = await runProviderCall((signal) =>
-      provider.complete(config, req, { signal })
-    );
-    // Every attempt costs money, including repair retries — report each one,
-    // not just the final accepted attempt.
-    onUsage?.(result.usage);
-    return result;
-  }, schema);
+    return value;
+  } catch (error) {
+    if (stream.traceContext) {
+      traceCoordinatorAttempt({
+        ...stream.traceContext,
+        modelId: config.id,
+        attempt: 0,
+        status: error instanceof Error && error.name === "AbortError" ? "timeout" : "failed",
+        error,
+        usage: attemptUsage.get(0),
+      });
+    }
+  }
+  try {
+    const value = await run(1, 0);
+    if (stream.traceContext) {
+      traceCoordinatorAttempt({
+        ...stream.traceContext,
+        modelId: config.id,
+        attempt: 1,
+        status: "completed",
+        usage: attemptUsage.get(1),
+      });
+    }
+    return value;
+  } catch (error) {
+    if (stream.traceContext) {
+      traceCoordinatorAttempt({
+        ...stream.traceContext,
+        modelId: config.id,
+        attempt: 1,
+        status: error instanceof Error && error.name === "AbortError" ? "timeout" : "failed",
+        error,
+        usage: attemptUsage.get(1),
+      });
+    }
+    throw error;
+  }
 }
 
 async function withProviderDeadline<T>(
@@ -626,7 +1059,7 @@ function canRecoverStructuredPartial<T>(
 
 /** Per-phase item-array field + element schema, for M6.3's progressive
  * parsing — only these five phases fan out an array of a validated element
- * type; normalize/compose/outline/section_compose are excluded (normalize's
+ * type; normalize/compose/outline/global_compose are excluded (normalize's
  * candidate_claims IS covered here since it's a fan-out-free single
  * coordinator call but still an array of a validated element type). */
 const ARRAY_STREAM_CONFIG: Partial<
@@ -688,7 +1121,7 @@ function itemStreamHooks(
 
 /** M6.4: builds a `StreamHooks.onDelta` that relays a prose field's unescaped
  * characters via `token` events as they arrive. Unlike M6.3's item watcher,
- * compose/section_compose never go through fanOutWithQuorum (single
+ * compose/global_compose never go through fanOutWithQuorum (single
  * coordinator call / one call per topic, not fanned out), so there's no
  * network-retry race to reason about — only callStructured's own repair
  * `attempt` matters, handled the same way (fresh watcher per attempt). */
@@ -765,10 +1198,57 @@ async function tryFormatUserOutput(params: {
 export async function runDeliberation(
   input: DeliberationInput
 ): Promise<DeliberationResult> {
-  if ((input.mode ?? "standard") === "planning") {
-    return runPlanningDeliberation(input);
+  const mode = input.mode ?? "standard";
+  const governance = resolveGovernance(
+    mode,
+    input.governance,
+    input.experimentManifest
+  );
+  assertModelSelection({
+    mode,
+    modelIds: input.models.map((model) => model.id),
+    coordinatorModelId: input.coordinatorModelId,
+  });
+  const runId = input.runId ?? makeRunId();
+  const recorder = new TraceRecorderV3(runId, mode, governance);
+  const resolvedInput: DeliberationInput = {
+    ...input,
+    runId,
+    governance,
+    resolvedGovernance: governance,
+    traceRecorder: recorder,
+  };
+  input.onTrace?.(recorder.snapshot());
+
+  try {
+    const result = mode === "planning"
+      ? await runPlanningDeliberation(resolvedInput)
+      : await runStandardOrQuickDeliberation(resolvedInput);
+    recorder.trace.usage.cost_usd = result.cost.totalUsd;
+    const alignmentQuorum = recorder.trace.quorum.filter(
+      (item) => item.phase === "align"
+    );
+    recorder.trace.quorum = [
+      ...traceQuorumEntries(result, input.models.length),
+      ...alignmentQuorum,
+    ];
+    const status = recorder.trace.failures.length > 0 ? "partial" : "completed";
+    result.trace = recorder.finish(status);
+    input.onTrace?.(recorder.snapshot());
+    return result;
+  } catch (error) {
+    if (recorder.trace.failures.length === 0) {
+      recorder.addFailure({
+        phase: "run",
+        code: "run_failed",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: false,
+      });
+    }
+    recorder.finish("failed");
+    input.onTrace?.(recorder.snapshot());
+    throw error;
   }
-  return runStandardOrQuickDeliberation(input);
 }
 
 async function runStandardOrQuickDeliberation(
@@ -776,6 +1256,7 @@ async function runStandardOrQuickDeliberation(
 ): Promise<DeliberationResult> {
   const runId = input.runId ?? makeRunId();
   const mode = input.mode ?? "standard";
+  const governance = input.resolvedGovernance ?? "centralized";
   const budget = getBudget(mode);
   const fanout = {
     // Network deadlines are independent from the UI latency estimate. Quick
@@ -785,9 +1266,9 @@ async function runStandardOrQuickDeliberation(
     retries: input.fanoutOptions?.retries ?? 1,
     backoffMs: input.fanoutOptions?.backoffMs ?? 200,
   };
-  const coordinator =
-    input.models.find((m) => m.id === input.coordinatorModelId) ??
-    input.models[0];
+  const coordinator = input.coordinatorModelId
+    ? input.models.find((m) => m.id === input.coordinatorModelId)!
+    : input.models[0];
   const toolFanout = {
     ...fanout,
     timeoutMs: fanout.timeoutMs + (input.webSearch ? budget.toolRoundTripAllowanceMs ?? 0 : 0),
@@ -843,6 +1324,7 @@ async function runStandardOrQuickDeliberation(
   );
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
+  traceFanoutOutcome({ input, runId, phase: "propose", outcome: proposeOutcome });
   if (!proposeOutcome.quorum.met) {
     const failures = describeFailures(proposeOutcome);
     emit("run_failed", "propose", { quorum: proposeOutcome.quorum, failures });
@@ -855,6 +1337,14 @@ async function runStandardOrQuickDeliberation(
     count: proposals.length,
     partial: proposeOutcome.quorum.partial,
     failures: describeFailures(proposeOutcome),
+  });
+  traceArtifact(input, {
+    artifact_id: `${runId}::artifact::proposals`,
+    kind: "proposal_set",
+    phase: "propose",
+    status: proposeOutcome.quorum.partial ? "partial" : "completed",
+    parent_ids: [],
+    payload: proposals,
   });
 
   // --- Critique (optional per budget) ---
@@ -883,6 +1373,7 @@ async function runStandardOrQuickDeliberation(
     );
     timings.critique = Date.now() - t0;
     quorum.critique = critiqueOutcome.quorum;
+    traceFanoutOutcome({ input, runId, phase: "critique", outcome: critiqueOutcome });
     if (!critiqueOutcome.quorum.met) {
       const failures = describeFailures(critiqueOutcome);
       emit("run_failed", "critique", { quorum: critiqueOutcome.quorum, failures });
@@ -895,6 +1386,14 @@ async function runStandardOrQuickDeliberation(
       count: critiques.length,
       partial: critiqueOutcome.quorum.partial,
       failures: describeFailures(critiqueOutcome),
+    });
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::critiques`,
+      kind: "critique_set",
+      phase: "critique",
+      status: critiqueOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [`${runId}::artifact::proposals`],
+      payload: critiques,
     });
   }
 
@@ -925,6 +1424,7 @@ async function runStandardOrQuickDeliberation(
     );
     timings.revise = Date.now() - t0;
     quorum.revise = reviseOutcome.quorum;
+    traceFanoutOutcome({ input, runId, phase: "revise", outcome: reviseOutcome });
     if (!reviseOutcome.quorum.met) {
       const failures = describeFailures(reviseOutcome);
       emit("run_failed", "revise", { quorum: reviseOutcome.quorum, failures });
@@ -938,36 +1438,107 @@ async function runStandardOrQuickDeliberation(
       partial: reviseOutcome.quorum.partial,
       failures: describeFailures(reviseOutcome),
     });
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::post_revision_claims`,
+      kind: "post_revision_claim_set",
+      phase: "revise",
+      status: reviseOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [`${runId}::artifact::proposals`, `${runId}::artifact::critiques`],
+      payload: resolveFinalClaims(proposals, revisions),
+    });
   }
 
   const finalClaims = resolveFinalClaims(proposals, revisions);
   const claimsById = new Map(finalClaims.map((c) => [c.claim_id, c]));
+  if (
+    input.traceRecorder &&
+    !input.traceRecorder.trace.artifacts.some(
+      (artifact) => artifact.artifact_id === `${runId}::artifact::post_revision_claims`
+    )
+  ) {
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::post_revision_claims`,
+      kind: "post_revision_claim_set",
+      phase: "propose",
+      status: "completed",
+      parent_ids: [`${runId}::artifact::proposals`],
+      payload: finalClaims,
+    });
+  }
 
   // --- Normalize (single coordinator call) ---
   assertWithinCostLimit("normalize");
   emit("phase_started", "normalize");
   t0 = Date.now();
   let normalize: NormalizeResult;
+  let alignmentPayload: unknown;
   try {
-    normalize = await structuredCall(
-      input.provider,
-      coordinator,
-      buildNormalizePrompt({
+    if (governance === "distributed") {
+      const distributed = await buildDistributedNormalize({
+        input,
+        runId,
         question: input.question,
         claims: finalClaims,
-      }),
-      NormalizeResultSchema,
-      (usage) => recordUsage(costState, usage),
-      itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
-    );
+        coordinatorTimeoutMs: fanout.timeoutMs,
+        onUsage: (usage) => recordUsage(costState, usage),
+      });
+      normalize = distributed.normalize;
+      alignmentPayload = {
+        policy: input.experimentManifest!.alignment_policy,
+        alignments: distributed.alignments,
+        decisions: distributed.decisions,
+      };
+      quorum.normalize = distributed.quorum;
+    } else {
+      normalize = await structuredCall(
+        input.provider,
+        coordinator,
+        buildNormalizePrompt({
+          question: input.question,
+          claims: finalClaims,
+        }),
+        NormalizeResultSchema,
+        (usage) => recordUsage(costState, usage),
+        {
+          ...itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs),
+          retryProviderFailureOnce: true,
+          traceContext: { input, runId, phase: "normalize" },
+        }
+      );
+      normalize = stampNormalizeResult(runId, normalize, finalClaims);
+    }
   } catch (err) {
     const message = describeCoordinatorFailure(err, "归一");
-    emit("run_failed", "normalize", { message });
-    throw new Error(message);
+    input.traceRecorder?.addFailure({
+      phase: governance === "distributed" ? "align" : "normalize",
+      code: governance === "distributed" ? "phase_quorum_not_met" : "coordinator_failed",
+      message,
+      recoverable: true,
+    });
+    if (governance === "distributed") {
+      emit("run_failed", "normalize", { message });
+      throw new Error(message);
+    }
+    normalize = fallbackNormalizeResult(runId, finalClaims);
+    emit("phase_completed", "normalize", {
+      count: normalize.candidate_claims.length,
+      degraded: true,
+      message,
+    });
   }
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
     count: normalize.candidate_claims.length,
+  });
+  const candidateSetId = stableCandidateSetId(runId, governance);
+  traceArtifact(input, {
+    artifact_id: `${runId}::artifact::candidate_set`,
+    kind: "candidate_set",
+    phase: governance === "distributed" ? "align" : "normalize",
+    status: "completed",
+    parent_ids: [`${runId}::artifact::post_revision_claims`],
+    candidate_set_id: candidateSetId,
+    payload: { candidates: normalize.candidate_claims, alignment: alignmentPayload },
   });
 
   // --- Vote (optional per budget) ---
@@ -998,16 +1569,31 @@ async function runStandardOrQuickDeliberation(
     );
     timings.vote = Date.now() - t0;
     quorum.vote = voteOutcome.quorum;
+    traceFanoutOutcome({ input, runId, phase: "vote", outcome: voteOutcome });
     if (!voteOutcome.quorum.met) {
       const failures = describeFailures(voteOutcome);
       emit("run_failed", "vote", { quorum: voteOutcome.quorum, failures });
       throw new DeliberationQuorumError("vote", voteOutcome.quorum, failures);
     }
-    votes = voteOutcome.succeeded.map((s) => stampVoteSet(s.config, s.value));
+    const candidateIds = new Set(
+      normalize.candidate_claims.map((candidate) => candidate.candidate_id)
+    );
+    votes = voteOutcome.succeeded.map((s) =>
+      stampVoteSet(s.config, s.value, candidateIds)
+    );
     emit("phase_completed", "vote", {
       count: votes.length,
       partial: voteOutcome.quorum.partial,
       failures: describeFailures(voteOutcome),
+    });
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::ballots`,
+      kind: "ballot_set",
+      phase: "vote",
+      status: voteOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [`${runId}::artifact::candidate_set`],
+      candidate_set_id: candidateSetId,
+      payload: votes,
     });
   }
 
@@ -1026,6 +1612,42 @@ async function runStandardOrQuickDeliberation(
       expectedVoterCount: input.models.length,
     });
   }
+
+  const classificationBasis = Object.fromEntries(
+    normalize.candidate_claims.map((candidate) => {
+      const ballots = ballotMap
+        ? ballotMap.get(candidate.candidate_id) ?? []
+        : impliedBallotsFromCoverage(candidate, claimsById);
+      const result = classifications[candidate.candidate_id];
+      return [candidate.candidate_id, {
+        candidate_set_id: candidateSetId,
+        expected_voter_count: input.models.length,
+        ballots,
+        approve_ratio: result.approveRatio,
+        label: result.label,
+        partial: result.partial,
+      }];
+    })
+  );
+  input.traceRecorder?.trace.candidate_sets.push({
+    candidate_set_id: candidateSetId,
+    governance,
+    candidate_ids: normalize.candidate_claims.map((candidate) => candidate.candidate_id),
+    classification_basis: classificationBasis,
+    alignment: alignmentPayload,
+  });
+  traceArtifact(input, {
+    artifact_id: `${runId}::artifact::classifications`,
+    kind: "classification_ledger",
+    phase: "classify",
+    status: "completed",
+    parent_ids: [
+      `${runId}::artifact::candidate_set`,
+      ...(budget.phases.includes("vote") ? [`${runId}::artifact::ballots`] : []),
+    ],
+    candidate_set_id: candidateSetId,
+    payload: classificationBasis,
+  });
 
   const { strongConsensus, qualifiedConsensus, disputed, rejected } =
     computeConsensusBuckets(normalize, classifications);
@@ -1054,15 +1676,38 @@ async function runStandardOrQuickDeliberation(
       {
         onDelta: makeTokenStreamHandler(emit, "compose", "final_answer"),
         timeoutMs: fanout.timeoutMs,
+        retryProviderFailureOnce: true,
+        traceContext: { input, runId, phase: "compose" },
       }
     );
   } catch (err) {
     const message = describeCoordinatorFailure(err, "合成");
-    emit("run_failed", "compose", { message });
-    throw new Error(message);
+    input.traceRecorder?.addFailure({
+      phase: "compose",
+      code: "coordinator_failed",
+      message,
+      recoverable: true,
+    });
+    final = deterministicCanonicalFinal(
+      { strongConsensus, qualifiedConsensus, disputed, rejected },
+      positionChanges,
+      "Coordinator compose failed after repair retry; deterministic classification ledger rendered instead."
+    );
+    emit("phase_completed", "compose", { degraded: true, message });
   }
   timings.compose = Date.now() - t0;
   emit("phase_completed", "compose");
+  traceArtifact(input, {
+    artifact_id: `${runId}::artifact::canonical_output`,
+    kind: "canonical_output",
+    phase: "compose",
+    status: input.traceRecorder?.trace.failures.some((failure) => failure.phase === "compose")
+      ? "partial"
+      : "completed",
+    parent_ids: [`${runId}::artifact::classifications`],
+    candidate_set_id: candidateSetId,
+    payload: final,
+  });
 
   // --- Format to user-specified JSON (optional, M6.1) ---
   let userOutput: unknown;
@@ -1105,6 +1750,8 @@ async function runStandardOrQuickDeliberation(
     runId,
     question: input.question,
     mode,
+    governance,
+    trace: input.traceRecorder?.snapshot() ?? new TraceRecorderV3(runId, mode, governance).snapshot(),
     budget,
     proposals,
     critiques,
@@ -1138,6 +1785,7 @@ interface RunTopicDeliberationParams {
   /** Shared by reference across every topic running in parallel — see DeliberationInput.costLimitUsd. */
   costState: CostState;
   costLimitUsd?: number;
+  traceInput?: DeliberationInput;
 }
 
 /** v0.2 planning mode: the same propose->critique->revise->normalize->vote->classify
@@ -1166,6 +1814,7 @@ async function runTopicDeliberation(
 
   const timings: Partial<Record<Phase, number>> = {};
   const quorum: Partial<Record<Phase, QuorumCheck>> = {};
+  const topicFailures: Partial<Record<Phase, ModelFailure[]>> = {};
   const toolFanout = {
     ...fanout,
     timeoutMs: fanout.timeoutMs + (webSearch ? toolRoundTripAllowanceMs ?? 0 : 0),
@@ -1223,6 +1872,15 @@ async function runTopicDeliberation(
   );
   timings.propose = Date.now() - t0;
   quorum.propose = proposeOutcome.quorum;
+  if (params.traceInput) {
+    traceFanoutOutcome({
+      input: params.traceInput,
+      runId,
+      phase: "propose",
+      outcome: proposeOutcome,
+      topicId: topic.topic_id,
+    });
+  }
   if (!proposeOutcome.quorum.met) {
     const failures = describeFailures(proposeOutcome);
     emit("run_failed", "propose", { quorum: proposeOutcome.quorum, failures });
@@ -1236,6 +1894,17 @@ async function runTopicDeliberation(
     partial: proposeOutcome.quorum.partial,
     failures: describeFailures(proposeOutcome),
   });
+  if (params.traceInput) {
+    traceArtifact(params.traceInput, {
+      artifact_id: `${runId}::${topic.topic_id}::artifact::proposals`,
+      kind: "proposal_set",
+      phase: "propose",
+      status: proposeOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [],
+      topic_id: topic.topic_id,
+      payload: proposals,
+    });
+  }
 
   assertWithinCostLimit("critique");
   emit("phase_started", "critique");
@@ -1261,6 +1930,15 @@ async function runTopicDeliberation(
   );
   timings.critique = Date.now() - t0;
   quorum.critique = critiqueOutcome.quorum;
+  if (params.traceInput) {
+    traceFanoutOutcome({
+      input: params.traceInput,
+      runId,
+      phase: "critique",
+      outcome: critiqueOutcome,
+      topicId: topic.topic_id,
+    });
+  }
   if (!critiqueOutcome.quorum.met) {
     const failures = describeFailures(critiqueOutcome);
     emit("run_failed", "critique", { quorum: critiqueOutcome.quorum, failures });
@@ -1274,6 +1952,17 @@ async function runTopicDeliberation(
     partial: critiqueOutcome.quorum.partial,
     failures: describeFailures(critiqueOutcome),
   });
+  if (params.traceInput) {
+    traceArtifact(params.traceInput, {
+      artifact_id: `${runId}::${topic.topic_id}::artifact::critiques`,
+      kind: "critique_set",
+      phase: "critique",
+      status: critiqueOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [`${runId}::${topic.topic_id}::artifact::proposals`],
+      topic_id: topic.topic_id,
+      payload: critiques,
+    });
+  }
 
   assertWithinCostLimit("revise");
   emit("phase_started", "revise");
@@ -1299,6 +1988,15 @@ async function runTopicDeliberation(
   );
   timings.revise = Date.now() - t0;
   quorum.revise = reviseOutcome.quorum;
+  if (params.traceInput) {
+    traceFanoutOutcome({
+      input: params.traceInput,
+      runId,
+      phase: "revise",
+      outcome: reviseOutcome,
+      topicId: topic.topic_id,
+    });
+  }
   if (!reviseOutcome.quorum.met) {
     const failures = describeFailures(reviseOutcome);
     emit("run_failed", "revise", { quorum: reviseOutcome.quorum, failures });
@@ -1314,6 +2012,20 @@ async function runTopicDeliberation(
   });
 
   const finalClaims = resolveFinalClaims(proposals, revisions);
+  if (params.traceInput) {
+    traceArtifact(params.traceInput, {
+      artifact_id: `${runId}::${topic.topic_id}::artifact::post_revision_claims`,
+      kind: "post_revision_claim_set",
+      phase: "revise",
+      status: reviseOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [
+        `${runId}::${topic.topic_id}::artifact::proposals`,
+        `${runId}::${topic.topic_id}::artifact::critiques`,
+      ],
+      topic_id: topic.topic_id,
+      payload: finalClaims,
+    });
+  }
 
   assertWithinCostLimit("normalize");
   emit("phase_started", "normalize");
@@ -1326,18 +2038,52 @@ async function runTopicDeliberation(
       buildNormalizePrompt({ question, claims: finalClaims, topic }),
       NormalizeResultSchema,
       (usage) => recordUsage(costState, usage),
-      itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs)
+      {
+        ...itemStreamHooks(emit, "normalize", coordinator.id, fanout.timeoutMs),
+        retryProviderFailureOnce: true,
+        traceContext: params.traceInput
+          ? {
+              input: params.traceInput,
+              runId,
+              phase: "normalize",
+              topicId: topic.topic_id,
+            }
+          : undefined,
+      }
     );
+    normalize = stampNormalizeResult(runId, normalize, finalClaims, topic.topic_id);
   } catch (err) {
-    // 拆题-per-topic 的 normalize 失败会被外层 Promise.allSettled 捕获并
-    // 计入 failedTopics（已带 phase_completed/failed:true 上报），这里只需
-    // 把裸 AbortError 文案改写得更友好，不需要重复 emit run_failed。
-    throw new Error(describeCoordinatorFailure(err, `归一 · ${topic.title}`));
+    const message = describeCoordinatorFailure(err, `归一 · ${topic.title}`);
+    topicFailures.normalize = [{ modelId: coordinator.id, message }];
+    params.traceInput?.traceRecorder?.addFailure({
+      phase: "normalize",
+      code: "coordinator_failed",
+      message,
+      recoverable: true,
+      topic_id: topic.topic_id,
+      model_id: coordinator.id,
+    });
+    normalize = fallbackNormalizeResult(runId, finalClaims, topic.topic_id);
   }
   timings.normalize = Date.now() - t0;
   emit("phase_completed", "normalize", {
     count: normalize.candidate_claims.length,
   });
+  const candidateSetId = stableCandidateSetId(runId, "centralized", topic.topic_id);
+  if (params.traceInput) {
+    traceArtifact(params.traceInput, {
+      artifact_id: `${runId}::${topic.topic_id}::artifact::candidate_set`,
+      kind: "candidate_set",
+      phase: "normalize",
+      status: topicFailures.normalize ? "partial" : "completed",
+      parent_ids: [
+        `${runId}::${topic.topic_id}::artifact::post_revision_claims`,
+      ],
+      topic_id: topic.topic_id,
+      candidate_set_id: candidateSetId,
+      payload: normalize.candidate_claims,
+    });
+  }
 
   assertWithinCostLimit("vote");
   emit("phase_started", "vote");
@@ -1364,17 +2110,43 @@ async function runTopicDeliberation(
   );
   timings.vote = Date.now() - t0;
   quorum.vote = voteOutcome.quorum;
+  if (params.traceInput) {
+    traceFanoutOutcome({
+      input: params.traceInput,
+      runId,
+      phase: "vote",
+      outcome: voteOutcome,
+      topicId: topic.topic_id,
+    });
+  }
   if (!voteOutcome.quorum.met) {
     const failures = describeFailures(voteOutcome);
     emit("run_failed", "vote", { quorum: voteOutcome.quorum, failures });
     throw new DeliberationQuorumError("vote", voteOutcome.quorum, failures);
   }
-  const votes = voteOutcome.succeeded.map((s) => stampVoteSet(s.config, s.value));
+  const candidateIds = new Set(
+    normalize.candidate_claims.map((candidate) => candidate.candidate_id)
+  );
+  const votes = voteOutcome.succeeded.map((s) =>
+    stampVoteSet(s.config, s.value, candidateIds)
+  );
   emit("phase_completed", "vote", {
     count: votes.length,
     partial: voteOutcome.quorum.partial,
     failures: describeFailures(voteOutcome),
   });
+  if (params.traceInput) {
+    traceArtifact(params.traceInput, {
+      artifact_id: `${runId}::${topic.topic_id}::artifact::ballots`,
+      kind: "ballot_set",
+      phase: "vote",
+      status: voteOutcome.quorum.partial ? "partial" : "completed",
+      parent_ids: [`${runId}::${topic.topic_id}::artifact::candidate_set`],
+      topic_id: topic.topic_id,
+      candidate_set_id: candidateSetId,
+      payload: votes,
+    });
+  }
 
   const ballotMap = ballotsByCandidate(votes);
   const classifications: Record<string, ClassifyCandidateResult> = {};
@@ -1382,6 +2154,46 @@ async function runTopicDeliberation(
     classifications[candidate.candidate_id] = classifyCandidate({
       ballotsForCandidate: ballotMap.get(candidate.candidate_id) ?? [],
       expectedVoterCount: models.length,
+    });
+  }
+
+  if (params.traceInput?.traceRecorder) {
+    const basis = Object.fromEntries(
+      normalize.candidate_claims.map((candidate) => {
+        const result = classifications[candidate.candidate_id];
+        return [candidate.candidate_id, {
+          candidate_set_id: candidateSetId,
+          expected_voter_count: models.length,
+          ballots: ballotMap.get(candidate.candidate_id) ?? [],
+          approve_ratio: result.approveRatio,
+          label: result.label,
+          partial: result.partial,
+        }];
+      })
+    );
+    params.traceInput.traceRecorder.trace.candidate_sets.push({
+      candidate_set_id: candidateSetId,
+      governance: "centralized",
+      topic_id: topic.topic_id,
+      candidate_ids: normalize.candidate_claims.map((candidate) => candidate.candidate_id),
+      classification_basis: basis,
+    });
+    traceArtifact(params.traceInput, {
+      artifact_id: `${runId}::${topic.topic_id}::artifact::topic_ledger`,
+      kind: "topic_ledger",
+      phase: "classify",
+      status:
+        Object.values(quorum).some((item) => item.partial) ||
+        Object.values(topicFailures).some((items) => (items?.length ?? 0) > 0)
+          ? "partial"
+          : "completed",
+      parent_ids: [
+        `${runId}::${topic.topic_id}::artifact::candidate_set`,
+        `${runId}::${topic.topic_id}::artifact::ballots`,
+      ],
+      topic_id: topic.topic_id,
+      candidate_set_id: candidateSetId,
+      payload: { proposals, critiques, revisions, normalize, votes, classifications },
     });
   }
 
@@ -1393,8 +2205,10 @@ async function runTopicDeliberation(
     normalize,
     votes,
     classifications,
+    candidateSetId,
     timings,
     quorum,
+    failures: topicFailures,
   };
 }
 
@@ -1402,15 +2216,16 @@ async function runPlanningDeliberation(
   input: DeliberationInput
 ): Promise<DeliberationResult> {
   const runId = input.runId ?? makeRunId();
+  const governance = input.resolvedGovernance ?? "centralized";
   const budget = getBudget("planning");
   const fanout = {
     timeoutMs: input.fanoutOptions?.timeoutMs ?? budget.providerTimeoutMs,
     retries: input.fanoutOptions?.retries ?? 1,
     backoffMs: input.fanoutOptions?.backoffMs ?? 200,
   };
-  const coordinator =
-    input.models.find((m) => m.id === input.coordinatorModelId) ??
-    input.models[0];
+  const coordinator = input.coordinatorModelId
+    ? input.models.find((m) => m.id === input.coordinatorModelId)!
+    : input.models[0];
   const costState = newCostState();
 
   const emit = (type: RunEventType, phase?: Phase, data?: unknown) =>
@@ -1441,6 +2256,11 @@ async function runPlanningDeliberation(
   emit("phase_started", undefined, { step: "outline" });
   const outlineStart = Date.now();
   let outline: OutlineResult;
+  const crossCuttingTopic: Topic = {
+    topic_id: "cross_cutting_risks_and_omissions",
+    title: "Cross-cutting risks and omissions",
+    description: "Risks, dependencies, interactions, and material omissions spanning multiple topics.",
+  };
   try {
     outline = await structuredCall(
       input.provider,
@@ -1451,12 +2271,53 @@ async function runPlanningDeliberation(
         priorContext: input.priorContext,
       }),
       OutlineResultSchema,
-      (usage) => recordUsage(costState, usage)
+      (usage) => recordUsage(costState, usage),
+      {
+        retryProviderFailureOnce: true,
+        traceContext: { input, runId, phase: "outline" },
+      }
     );
+    const withoutReserved = outline.topics.filter(
+      (topic) => topic.topic_id !== crossCuttingTopic.topic_id
+    );
+    outline = {
+      topics: [
+        ...withoutReserved.slice(0, Math.max(0, (budget.maxTopics ?? 8) - 1)),
+        crossCuttingTopic,
+      ],
+    };
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::outline`,
+      kind: "planning_outline",
+      phase: "outline",
+      status: "completed",
+      parent_ids: [],
+      payload: outline,
+    });
   } catch (err) {
     const message = describeCoordinatorFailure(err, "拆题");
-    emit("run_failed", undefined, { step: "outline", message });
-    throw new Error(message);
+    input.traceRecorder?.addFailure({
+      phase: "outline",
+      code: "coordinator_failed",
+      message,
+      recoverable: true,
+      model_id: coordinator.id,
+    });
+    outline = { topics: [crossCuttingTopic] };
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::outline`,
+      kind: "planning_outline",
+      phase: "outline",
+      status: "partial",
+      parent_ids: [],
+      payload: outline,
+    });
+    emit("phase_completed", undefined, {
+      step: "outline",
+      count: 1,
+      degraded: true,
+      message,
+    });
   }
   emit("phase_completed", undefined, {
     step: "outline",
@@ -1490,6 +2351,7 @@ async function runPlanningDeliberation(
         onEvent: input.onEvent,
         costState,
         costLimitUsd: input.costLimitUsd,
+        traceInput: input,
       })
     )
   );
@@ -1530,63 +2392,194 @@ async function runPlanningDeliberation(
     throw new Error(message);
   }
 
-  // --- Section compose, per topic, in parallel ---
-  assertWithinCostLimit("section_compose");
-  const sections: SectionAnswer[] = await Promise.all(
-    topics.map(async (topicResult) => {
-      const buckets = computeConsensusBuckets(
-        topicResult.normalize,
-        topicResult.classifications
+  // --- One authoritative cross-topic GlobalCompose. ---
+  assertWithinCostLimit("global_compose");
+  const allCandidates: GlobalComposeCandidate[] = topics.flatMap((topicResult) =>
+    topicResult.normalize.candidate_claims.map((candidate) => ({
+      topic_id: topicResult.topic.topic_id,
+      candidate_id: candidate.candidate_id,
+      classification: topicResult.classifications[candidate.candidate_id].label,
+      text: candidate.text,
+    }))
+  );
+  let composeCandidates = allCandidates;
+  let contextBudgetExceeded = false;
+  if (JSON.stringify(composeCandidates).length > 60_000) {
+    composeCandidates = allCandidates.map((candidate) => ({
+      ...candidate,
+      text: candidate.text.slice(0, 1_200),
+    }));
+    traceArtifact(input, {
+      artifact_id: `${runId}::artifact::topic_briefs`,
+      kind: "topic_brief_set",
+      phase: "topic_brief",
+      status: "completed",
+      parent_ids: topics.map(
+        (topic) => `${runId}::${topic.topic.topic_id}::artifact::topic_ledger`
+      ),
+      payload: composeCandidates,
+    });
+    contextBudgetExceeded = JSON.stringify(composeCandidates).length > 60_000;
+  }
+
+  const allowedCandidateIds = new Set(allCandidates.map((candidate) => candidate.candidate_id));
+  const strongCandidateIds = new Set(
+    allCandidates
+      .filter((candidate) => candidate.classification === "strong_consensus")
+      .map((candidate) => candidate.candidate_id)
+  );
+  let planningFinal: PlanningFinalAnswer;
+  let globalComposeDegraded = false;
+  try {
+    if (contextBudgetExceeded) {
+      throw new Error(
+        "GlobalCompose input remains over budget after one topic-brief compression"
       );
-      const positionChanges = computePositionChanges(
+    }
+    planningFinal = await structuredCall(
+      input.provider,
+      coordinator,
+      buildGlobalComposePrompt({
+        question: input.question,
+        topics: topics.map((topic) => topic.topic),
+        candidates: composeCandidates,
+        priorContext: input.priorContext,
+      }),
+      PlanningFinalAnswerSchema,
+      (usage) => recordUsage(costState, usage),
+      {
+        onDelta: makeTokenStreamHandler(emit, "compose", "final_answer"),
+        timeoutMs: fanout.timeoutMs,
+        retryProviderFailureOnce: true,
+        traceContext: { input, runId, phase: "global_compose" },
+      }
+    );
+    planningFinal = {
+      ...planningFinal,
+      spans: planningFinal.spans.map((span, index) => ({
+        ...span,
+        span_id: `${runId}::output_span::${String(index).padStart(3, "0")}`,
+      })),
+    };
+    const cited = new Set<string>();
+    for (const span of planningFinal.spans) {
+      const lineage = [
+        ...span.source_candidate_ids,
+        ...span.derived_from_candidate_ids,
+      ];
+      if (lineage.length === 0 || lineage.some((id) => !allowedCandidateIds.has(id))) {
+        throw new Error("GlobalCompose returned an invalid or empty candidate lineage");
+      }
+      lineage.forEach((id) => cited.add(id));
+    }
+    const omitted = new Set(
+      planningFinal.omitted_strong_candidate_reasons.map((item) => item.candidate_id)
+    );
+    for (const candidateId of strongCandidateIds) {
+      if (!cited.has(candidateId) && !omitted.has(candidateId)) {
+        throw new Error(`GlobalCompose omitted strong candidate without a reason: ${candidateId}`);
+      }
+    }
+  } catch (err) {
+    globalComposeDegraded = true;
+    const message = describeCoordinatorFailure(err, "GlobalCompose");
+    input.traceRecorder?.addFailure({
+      phase: "global_compose",
+      code: contextBudgetExceeded
+        ? "context_budget_exceeded"
+        : "global_compose_failed",
+      message,
+      recoverable: true,
+    });
+    const included = allCandidates.filter(
+      (candidate) => candidate.classification !== "rejected"
+    );
+    const fallbackCandidates = included.length > 0 ? included : allCandidates.slice(0, 1);
+    planningFinal = {
+      final_answer: topics
+        .map((topicResult) => {
+          const topicCandidates = included.filter(
+            (candidate) => candidate.topic_id === topicResult.topic.topic_id
+          );
+          return `## ${topicResult.topic.title}\n\n${
+            topicCandidates.length > 0
+              ? topicCandidates
+                  .map((candidate) =>
+                    candidate.classification === "disputed"
+                      ? `- Disputed: ${candidate.text}`
+                      : `- ${candidate.text}`
+                  )
+                  .join("\n")
+              : "- No supported candidate reached consensus."
+          }`;
+        })
+        .join("\n\n"),
+      spans: fallbackCandidates.map((candidate, index) => ({
+        span_id: `${runId}::output_span::${String(index).padStart(3, "0")}`,
+        text: candidate.text,
+        source_candidate_ids: [candidate.candidate_id],
+        lineage_kind: "candidate",
+        derived_from_candidate_ids: [],
+      })),
+      omitted_strong_candidate_reasons: allCandidates
+        .filter(
+          (candidate) =>
+            candidate.classification === "strong_consensus" &&
+            !fallbackCandidates.some((item) => item.candidate_id === candidate.candidate_id)
+        )
+        .map((candidate) => ({
+          candidate_id: candidate.candidate_id,
+          reason: "Omitted only because GlobalCompose failed; preserved in the topic ledger.",
+        })),
+    };
+  }
+  traceArtifact(input, {
+    artifact_id: `${runId}::artifact::planning_final`,
+    kind: "planning_final_answer",
+    phase: "global_compose",
+    status: globalComposeDegraded ? "partial" : "completed",
+    parent_ids: topics.map(
+      (topic) => `${runId}::${topic.topic.topic_id}::artifact::topic_ledger`
+    ),
+    payload: planningFinal,
+  });
+
+  const executiveSummary = planningFinal.final_answer;
+  // Compatibility-only projection for existing UI/readers. It is derived
+  // from the authoritative GlobalCompose output and never fed back into v3.
+  const sections: SectionAnswer[] = topics.map((topicResult) => {
+    const buckets = computeConsensusBuckets(
+      topicResult.normalize,
+      topicResult.classifications
+    );
+    return {
+      topic_id: topicResult.topic.topic_id,
+      title: topicResult.topic.title,
+      tldr: buckets.strongConsensus[0] ?? buckets.qualifiedConsensus[0] ?? "No consensus reached.",
+      section_answer: planningFinal.spans
+        .filter((span) =>
+          span.source_candidate_ids.some((candidateId) =>
+            topicResult.normalize.candidate_claims.some(
+              (candidate) => candidate.candidate_id === candidateId
+            )
+          )
+        )
+        .map((span) => span.text)
+        .join("\n\n") || "No integrated output span was assigned to this topic.",
+      strong_consensus: buckets.strongConsensus,
+      qualified_consensus: buckets.qualifiedConsensus,
+      disputed_points: buckets.disputed,
+      rejected_or_unsupported: buckets.rejected,
+      model_position_changes: computePositionChanges(
         topicResult.proposals,
         topicResult.revisions
-      );
-      const sectionStart = Date.now();
-      let section: SectionAnswer;
-      try {
-        section = await structuredCall(
-          input.provider,
-          coordinator,
-          buildSectionComposePrompt({
-            question: input.question,
-            topic: topicResult.topic,
-            strongConsensus: buckets.strongConsensus,
-            qualifiedConsensus: buckets.qualifiedConsensus,
-            disputed: buckets.disputed,
-            rejected: buckets.rejected,
-            positionChanges,
-          }),
-          SectionAnswerSchema,
-          (usage) => recordUsage(costState, usage),
-          {
-            onDelta: makeTokenStreamHandler(emit, "compose", "section_answer", {
-              topicId: topicResult.topic.topic_id,
-            }),
-            timeoutMs: fanout.timeoutMs,
-          }
-        );
-      } catch (err) {
-        const message = describeCoordinatorFailure(
-          err,
-          `合成 · ${topicResult.topic.title}`
-        );
-        emit("run_failed", undefined, {
-          step: "section_compose",
-          topicId: topicResult.topic.topic_id,
-          message,
-        });
-        throw new Error(message);
-      }
-      topicResult.timings.compose = Date.now() - sectionStart;
-      return stampSectionAnswer(topicResult.topic, section);
-    })
-  );
-
-  // Deterministic assembly from each section's tldr — never a fresh
-  // cross-topic model call, which would re-introduce compose acting as a
-  // judge across topics (see docs/protocol.md 4.1/4.3).
-  const executiveSummary = sections.map((s) => s.tldr).join("\n");
+      ),
+      confidence_summary: {
+        consensus_strength: buckets.disputed.length > 0 ? "low" : "medium",
+        notes: "Compatibility projection from mmd.v3 topic ledger and GlobalCompose lineage.",
+      },
+    };
+  });
   const planDocument: PlanDocument = {
     executive_summary: executiveSummary,
     sections,
@@ -1627,6 +2620,8 @@ async function runPlanningDeliberation(
     runId,
     question: input.question,
     mode: "planning",
+    governance,
+    trace: input.traceRecorder?.snapshot() ?? new TraceRecorderV3(runId, "planning", governance).snapshot(),
     budget,
     proposals: [],
     critiques: [],
@@ -1652,6 +2647,7 @@ async function runPlanningDeliberation(
     outline,
     topics,
     planDocument,
+    planningFinal,
     outputFormat: input.outputFormat,
     userOutput,
     userOutputError,

@@ -1,0 +1,92 @@
+{
+  "protocol_version": "mmd.v3",
+  "run_id": "run_fixture",
+  "frozen_time": "2026-01-01T00:00:00.000Z",
+  "mock_usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 5,
+    "total_tokens": 15,
+    "cost_usd": 0.001,
+    "usage_unavailable_count": 0
+  },
+  "cases": [
+    {
+      "case_id": "quick_n2",
+      "mode": "quick",
+      "governance": "centralized",
+      "model_ids": ["model_a", "model_b"],
+      "expected_phases": ["propose", "normalize", "classify", "render"],
+      "expected_status": "completed"
+    },
+    {
+      "case_id": "standard_c",
+      "mode": "standard",
+      "governance": "centralized",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "expected_phases": ["propose", "critique", "revise", "normalize", "vote", "classify", "render"],
+      "expected_status": "completed"
+    },
+    {
+      "case_id": "standard_d_equivalent",
+      "mode": "standard",
+      "governance": "distributed",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "alignment_relation": "equivalent",
+      "expected_phases": ["propose", "critique", "revise", "align", "cluster", "vote", "classify", "render"],
+      "expected_status": "completed"
+    },
+    {
+      "case_id": "standard_d_conflict_cannot_link",
+      "mode": "standard",
+      "governance": "distributed",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "alignment_relation": "conflict",
+      "cannot_link": true,
+      "expected_phases": ["propose", "critique", "revise", "align", "cluster", "vote", "classify", "render"],
+      "expected_status": "completed"
+    },
+    {
+      "case_id": "standard_d_partial_quorum",
+      "mode": "standard",
+      "governance": "distributed",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "failed_model_ids": ["model_c"],
+      "expected_align_quorum": {
+        "required": 2,
+        "respondent_count": 2,
+        "met": true,
+        "partial": true
+      },
+      "expected_status": "partial"
+    },
+    {
+      "case_id": "planning_normal",
+      "mode": "planning",
+      "governance": "centralized",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "expected_phases": ["outline", "topic_ledgers", "global_compose"],
+      "global_compose_call_count": 1,
+      "expected_status": "completed"
+    },
+    {
+      "case_id": "planning_topic_brief_compression",
+      "mode": "planning",
+      "governance": "centralized",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "context_overflow": true,
+      "expected_artifact_kind": "topic_brief_set",
+      "global_compose_call_count": 1,
+      "expected_status": "completed"
+    },
+    {
+      "case_id": "planning_global_compose_failure",
+      "mode": "planning",
+      "governance": "centralized",
+      "model_ids": ["model_a", "model_b", "model_c"],
+      "failed_phase": "global_compose",
+      "expected_failure_code": "global_compose_failed",
+      "expected_fallback": "topic_ledgers",
+      "expected_status": "partial"
+    }
+  ]
+}

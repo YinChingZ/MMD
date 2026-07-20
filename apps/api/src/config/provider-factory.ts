@@ -143,10 +143,14 @@ export function buildRunProvider(params: {
     byokProviderLabels.get(id) ?? legacy.modelIdToProviderLabel(id);
 
   const allIds = [...selectedLegacyIds, ...byokLabels];
+  const coordinatorModelId =
+    legacy.coordinatorModelId && allIds.includes(legacy.coordinatorModelId)
+      ? legacy.coordinatorModelId
+      : allIds[0];
   return {
     provider: new RoutingProvider(routes),
     models: allIds.map((id) => ({ id, provider: modelIdToProviderLabel(id) })),
-    coordinatorModelId: legacy.coordinatorModelId,
+    coordinatorModelId,
     modelIdToProviderLabel,
     supportsWebSearch:
       selectedLegacyIds.length === 0 &&

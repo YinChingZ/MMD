@@ -129,11 +129,51 @@ function generate(config: ModelConfig, request: CompletionRequest): unknown {
       return mockCompose(request);
     case "outline":
       return mockOutline(request);
-    case "section_compose":
-      return mockSectionCompose(request);
+    case "align":
+      return mockAlign(config, request);
+    case "global_compose":
+      return mockGlobalCompose(request);
     default:
       throw new Error(`mock provider: unknown phase "${phase}"`);
   }
+}
+
+function mockAlign(config: ModelConfig, request: CompletionRequest) {
+  const claims = (request.meta.claims as ClaimForNormalize[]) ?? [];
+  const judgments = claims.flatMap((left, leftIndex) =>
+    claims.slice(leftIndex + 1).map((right) => ({
+      left_claim_id: left.claim_id,
+      right_claim_id: right.claim_id,
+      relation: "distinct",
+      cannot_link: false,
+      confidence: 0.8,
+      reason: `${config.id} mock alignment keeps independent claims distinct.`,
+    }))
+  );
+  return { aligner_model_id: config.id, judgments };
+}
+
+function mockGlobalCompose(request: CompletionRequest) {
+  const candidates = (request.meta.candidates as Array<{
+    topic_id: string;
+    candidate_id: string;
+    classification: string;
+    text: string;
+  }>) ?? [];
+  const included = candidates.filter((candidate) => candidate.classification !== "rejected");
+  return {
+    final_answer: included
+      .map((candidate) => `## ${candidate.topic_id}\n\n${candidate.text}`)
+      .join("\n\n"),
+    spans: included.map((candidate, index) => ({
+      span_id: `model_span_${index}`,
+      text: candidate.text,
+      source_candidate_ids: [candidate.candidate_id],
+      lineage_kind: "candidate",
+      derived_from_candidate_ids: [],
+    })),
+    omitted_strong_candidate_reasons: [],
+  };
 }
 
 function mockProposal(config: ModelConfig, request: CompletionRequest) {
@@ -375,35 +415,4 @@ function mockOutline(request: CompletionRequest) {
     description: `Mock scope for topic ${i + 1}`,
   }));
   return { topics };
-}
-
-function mockSectionCompose(request: CompletionRequest) {
-  const topicId = String(request.meta.topicId ?? "");
-  const topicTitle = String(request.meta.topicTitle ?? "");
-  const buckets = readConsensusBuckets(request);
-  const positionChanges =
-    (request.meta.positionChanges as PositionChangeMeta[]) ?? [];
-
-  return {
-    // Real models routinely invent their own (more descriptive) topic_id
-    // instead of echoing back the one given in the prompt — this mock
-    // deliberately mangles it too, so tests actually exercise the
-    // orchestrator's stampSectionAnswer() override rather than passing
-    // vacuously because the mock happened to behave.
-    topic_id: `mock-renamed-${topicId}`,
-    title: topicTitle,
-    tldr: `${topicTitle}: ${
-      buckets.strong[0] ?? buckets.qualified[0] ?? "no consensus reached"
-    }`,
-    section_answer: buildAnswerText(`Regarding ${topicTitle}:`, buckets),
-    strong_consensus: buckets.strong,
-    qualified_consensus: buckets.qualified,
-    disputed_points: buckets.disputed,
-    rejected_or_unsupported: buckets.rejected,
-    model_position_changes: positionChanges,
-    confidence_summary: {
-      consensus_strength: computeConsensusStrength(buckets),
-      notes: `${buckets.strong.length} strong, ${buckets.qualified.length} qualified, ${buckets.disputed.length} disputed, ${buckets.rejected.length} rejected.`,
-    },
-  };
 }

@@ -7,7 +7,6 @@ import {
   buildVotePrompt,
   buildComposePrompt,
   buildOutlinePrompt,
-  buildSectionComposePrompt,
 } from "../src/index.js";
 
 const sampleTopic = {
@@ -193,27 +192,5 @@ describe("buildOutlinePrompt", () => {
   it("defaults maxTopics to 8", () => {
     const req = buildOutlinePrompt({ question: "Plan a project" });
     expect(req.meta.maxTopics).toBe(8);
-  });
-});
-
-describe("buildSectionComposePrompt", () => {
-  it("requires a one-sentence tldr and forbids cross-topic content", () => {
-    const req = buildSectionComposePrompt({
-      question: "Plan a project",
-      topic: sampleTopic,
-      strongConsensus: ["Use Postgres."],
-      qualifiedConsensus: [],
-      disputed: [],
-      rejected: [],
-      positionChanges: [],
-    });
-    expect(req.systemPrompt).toMatch(/not a judge/);
-    expect(req.systemPrompt).toMatch(/tldr must be exactly one sentence/);
-    expect(req.systemPrompt).toContain("Database");
-    expect(req.meta).toMatchObject({
-      phase: "section_compose",
-      topicId: "database",
-      topicTitle: "Database",
-    });
   });
 });

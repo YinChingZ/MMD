@@ -1,5 +1,12 @@
 import type { Kysely } from "kysely";
-import { getBudget, makeRunId, type RunMode } from "@mmd/protocol";
+import {
+  getBudget,
+  makeRunId,
+  type ExperimentManifest,
+  type Governance,
+  type MmdTraceV3,
+  type RunMode,
+} from "@mmd/protocol";
 import type { ModelConfig, ModelProvider } from "@mmd/model-adapters";
 import {
   runDeliberation,
@@ -16,6 +23,7 @@ import {
   markRunFailed,
 } from "../repositories/runs-repo.js";
 import { getResult, saveResult } from "../repositories/results-repo.js";
+import { saveTraceSnapshot } from "../repositories/traces-repo.js";
 import type { RunBroadcaster } from "../sse/broadcaster.js";
 
 export interface StartRunParams {
@@ -25,6 +33,8 @@ export interface StartRunParams {
   images?: InputImage[];
   webSearch?: boolean;
   mode: RunMode;
+  governance: Governance;
+  experimentManifest?: ExperimentManifest;
   models: ModelConfig[];
   provider: ModelProvider;
   coordinatorModelId?: string;
@@ -97,12 +107,14 @@ export class RunService {
       question: params.question,
       images: params.images,
       mode: params.mode,
+      governance: params.governance,
       modelConfig: params.models,
       budget,
     });
 
     let seq = 0;
     let eventChain: Promise<void> = Promise.resolve();
+    let traceChain: Promise<void> = Promise.resolve();
     let resolveSettledGate!: () => void;
     const settledGate = new Promise<void>((resolve) => {
       resolveSettledGate = resolve;
@@ -155,6 +167,14 @@ export class RunService {
         });
     };
 
+    const onTrace = (trace: MmdTraceV3) => {
+      traceChain = traceChain
+        .then(() => saveTraceSnapshot(this.db, trace))
+        .catch((error) => {
+          console.error(`run ${runId}: failed to persist trace snapshot`, error);
+        });
+    };
+
     runDeliberation({
       question: params.question,
       priorContext,
@@ -163,17 +183,22 @@ export class RunService {
       models: params.models,
       provider: params.provider,
       mode: params.mode,
+      governance: params.governance,
+      experimentManifest: params.experimentManifest,
       coordinatorModelId: params.coordinatorModelId,
       costLimitUsd: params.costLimitUsd,
       outputFormat: params.outputFormat,
       runId,
       onEvent,
+      onTrace,
     })
       .then(async (result) => {
+        await traceChain;
         await saveResult(this.db, result);
         await markRunCompleted(this.db, runId);
       })
       .catch(async (err) => {
+        await traceChain;
         const message = err instanceof Error ? err.message : String(err);
         await markRunFailed(this.db, runId, message).catch((dbErr) => {
           console.error(`run ${runId}: failed to mark as failed`, dbErr);

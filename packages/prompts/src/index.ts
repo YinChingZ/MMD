@@ -6,5 +6,6 @@ export * from "./normalize.js";
 export * from "./vote.js";
 export * from "./compose.js";
 export * from "./outline.js";
-export * from "./section-compose.js";
+export * from "./align.js";
+export * from "./global-compose.js";
 export * from "./format-user-output.js";
