@@ -97,6 +97,33 @@ class LiteLLMCompletionClient:
         except Exception:
             return None
 
+    def count_tokens(self, model: str, text: str) -> int | None:
+        """Use LiteLLM's tokenizer when available; protocol code stays optional."""
+
+        try:
+            import litellm
+
+            return int(litellm.token_counter(model=model, text=text))
+        except Exception:
+            return None
+
+    def context_window(self, model: str) -> int | None:
+        """Best-effort model input capacity from LiteLLM/Router metadata."""
+
+        try:
+            if self.router is not None:
+                getter = getattr(self.router, "get_model_info", None)
+                if callable(getter):
+                    info = getter(model)
+                    window = _context_window_from_info(info)
+                    if window is not None:
+                        return window
+            import litellm
+
+            return _context_window_from_info(litellm.get_model_info(model))
+        except Exception:
+            return None
+
 
 def coerce_completion_output(value: str | CompletionOutput) -> CompletionOutput:
     if isinstance(value, CompletionOutput):
@@ -193,6 +220,14 @@ def _int_or_zero(value: Any) -> int:
     if isinstance(value, float):
         return max(int(value), 0)
     return 0
+
+
+def _context_window_from_info(info: Any) -> int | None:
+    for key in ("max_input_tokens", "max_tokens", "context_window"):
+        value = _get(info, key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return int(value)
+    return None
 
 
 def _get(value: Any, key: str) -> Any:

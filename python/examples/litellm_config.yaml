@@ -8,7 +8,7 @@ model_list:
       coordinator_model: openai/gpt-4.1-mini
       preset: balanced
       mmd_mode: quick
-      quorum_ratio: 0.66
+      quorum_ratio: 0.6666666666666666
       max_run_timeout: 180
       max_total_calls: 12
       max_repair_attempts: 2

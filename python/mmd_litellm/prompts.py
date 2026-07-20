@@ -6,13 +6,14 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .schemas import (
+    AlignResult,
     Critique,
     FinalAnswer,
     NormalizeResult,
     OutlineResult,
+    PlanningFinalAnswer,
     Proposal,
     RevisionSet,
-    SectionAnswer,
     Topic,
     VoteSet,
 )
@@ -337,53 +338,80 @@ def build_outline_prompt(
     )
 
 
-def build_section_compose_prompt(
+def build_align_prompt(
     *,
     question: str,
-    topic: Topic,
-    strong_consensus: list[str],
-    qualified_consensus: list[str],
-    disputed: list[str],
-    rejected: list[str],
-    position_changes: list[dict[str, str]],
+    aligner_model_id: str,
+    claims: list[dict[str, Any]],
+    topic: Topic | None = None,
 ) -> CompletionRequest:
-    system_prompt = "\n\n".join(
-        [
-            "You are an editor, not a judge, writing one section of a larger multi-topic plan document.",
-            f'This section covers only the topic "{topic.title}" - {topic.description}. Do not discuss other topics.',
-            "You may only use the consensus classification given below; do not introduce new claims and do not resolve disputed points yourself.",
-            "strong_consensus items go into the main conclusion for this section.",
-            "qualified_consensus items go into a conditional-conclusion part of this section.",
-            "disputed_points must be presented as open disagreement or uncertainty, never resolved.",
-            "rejected_or_unsupported items must not appear in the main conclusion.",
-            'tldr must be exactly one sentence summarizing this section conclusion; it must stand alone without referring to "this section" or other topics.',
-            "Return ONLY JSON matching this schema, no prose outside the JSON:",
-            describe_schema(SectionAnswer, "SectionAnswer"),
-        ]
-    )
     return CompletionRequest(
-        system_prompt=system_prompt,
+        system_prompt="\n\n".join(
+            [
+                "Compare every unordered pair of post-revision claims for semantic alignment.",
+                "Use equivalent only when both claims can safely share one candidate without losing substance.",
+                "Use conflict and cannot_link whenever merging would hide a substantive disagreement.",
+                "Use uncertain rather than guessing. The host performs deterministic complete-link clustering.",
+                "Return ONLY JSON matching this schema:",
+                describe_schema(AlignResult, "AlignResult"),
+            ]
+        ),
         user_prompt="\n\n".join(
             [
                 f"Question: {question}",
-                f"Topic: {topic.title} - {topic.description}",
-                f"strong_consensus: {json.dumps(strong_consensus)}",
-                f"qualified_consensus: {json.dumps(qualified_consensus)}",
-                f"disputed: {json.dumps(disputed)}",
-                f"rejected: {json.dumps(rejected)}",
-                f"model_position_changes: {json.dumps(position_changes)}",
+                *(
+                    [f"Topic: {topic.title} - {topic.description}"]
+                    if topic is not None
+                    else []
+                ),
+                f"Claims: {json.dumps(claims, indent=2)}",
             ]
         ),
         meta={
-            "phase": "section_compose",
+            "phase": "align",
             "question": question,
-            "topic_id": topic.topic_id,
-            "topic_title": topic.title,
-            "strong_consensus": strong_consensus,
-            "qualified_consensus": qualified_consensus,
-            "disputed": disputed,
-            "rejected": rejected,
-            "position_changes": position_changes,
+            "aligner_model_id": aligner_model_id,
+            "claims": claims,
+            **({"topic_id": topic.topic_id} if topic is not None else {}),
+        },
+    )
+
+
+def build_global_compose_prompt(
+    *,
+    question: str,
+    topics: list[Topic],
+    candidates: list[dict[str, Any]],
+    conversation_context: str | None = None,
+) -> CompletionRequest:
+    return CompletionRequest(
+        system_prompt="\n\n".join(
+            [
+                "Write one integrated planning answer from the classified topic candidates.",
+                "You are an editor, not a judge. Keep disputed candidates visibly disputed and never assert rejected candidates.",
+                "Every substantive span must cite source_candidate_ids. Mark new cross-topic inferences as coordinator_synthesis with derived_from_candidate_ids.",
+                "Give a specific reason for every omitted strong_consensus candidate.",
+                "Return ONLY JSON matching this schema:",
+                describe_schema(PlanningFinalAnswer, "PlanningFinalAnswer"),
+            ]
+        ),
+        user_prompt="\n\n".join(
+            [
+                *(
+                    [f"Conversation context so far:\n{conversation_context}"]
+                    if conversation_context
+                    else []
+                ),
+                f"Question: {question}",
+                f"Topics: {json.dumps([topic.model_dump() for topic in topics], indent=2)}",
+                f"Classified candidates: {json.dumps(candidates, indent=2)}",
+            ]
+        ),
+        meta={
+            "phase": "global_compose",
+            "question": question,
+            "topics": [topic.model_dump() for topic in topics],
+            "candidates": candidates,
         },
     )
 

@@ -19,7 +19,7 @@ model_list:
       analysis_models: [scripted/model-a, scripted/model-b]
       coordinator_model: scripted/model-a
       mmd_mode: standard
-      quorum_ratio: 0.66
+      quorum_ratio: 0.6666666666666666
       per_model_timeout: 10
       max_run_timeout: 30
       max_total_calls: 12
@@ -56,7 +56,7 @@ def test_proxy_normal_scripted_completion_returns_trace(start_proxy):
     assert status == 200
     payload = json.loads(body)
     assert payload["choices"][0]["message"]["content"] == SCRIPTED_ANSWER
-    assert payload["mmd"]["trace_version"] == 1
+    assert payload["mmd"]["trace_version"] == "mmd.trace.v3"
     assert payload["mmd"]["mode"] == "standard"
 
 
@@ -110,7 +110,7 @@ def test_proxy_streaming_returns_incremental_chunks_matching_non_streaming_conte
 
     mmd_frames = [frame["mmd"] for frame in frames if frame.get("mmd")]
     assert mmd_frames, f"no mmd trace frame found in stream:\n{frames}"
-    assert mmd_frames[0]["trace_version"] == 1
+    assert mmd_frames[0]["trace_version"] == "mmd.trace.v3"
 
 
 def test_proxy_success_callback_fires_exactly_once_per_outer_request(
@@ -356,7 +356,7 @@ def test_proxy_tool_loop_executes_real_web_fetch_and_records_trace(
         payload["choices"][0]["message"]["content"]
         == "Use a small TypeScript monorepo for this project."
     )
-    tooling = payload["mmd"]["tooling"]
+    tooling = payload["mmd"]["extensions"]["tooling"]
     assert tooling["tool_mode"] == "mmd_native_web"
     assert tooling["tool_calls_executed"] >= 1
     assert tooling["tool_calls_failed"] == 0
@@ -404,7 +404,7 @@ def test_proxy_tool_loop_blocks_ssrf_target_and_still_degrades_gracefully(
         payload["choices"][0]["message"]["content"]
         == "Use a small TypeScript monorepo for this project."
     )
-    events = payload["mmd"]["tooling"]["tool_call_events"]
+    events = payload["mmd"]["extensions"]["tooling"]["tool_call_events"]
     assert events, "expected at least one recorded tool call event"
     assert all(event["status"] == "blocked" for event in events)
     assert all(event["error"] for event in events)

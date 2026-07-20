@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mmd.local/contracts/mmd-trace-v3.schema.json",
+  "title": "MMD Trace v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trace_version",
+    "protocol_version",
+    "run_id",
+    "mode",
+    "governance",
+    "status",
+    "versions",
+    "artifacts",
+    "candidate_sets",
+    "calls",
+    "quorum",
+    "failures",
+    "usage",
+    "extensions"
+  ],
+  "properties": {
+    "trace_version": { "const": "mmd.trace.v3" },
+    "protocol_version": { "const": "mmd.v3" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["quick", "standard", "planning"] },
+    "governance": { "enum": ["centralized", "distributed"] },
+    "status": { "enum": ["running", "completed", "partial", "failed"] },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normalization", "alignment", "decision_rule", "renderer"],
+      "properties": {
+        "normalization": { "type": "string", "minLength": 1 },
+        "alignment": { "type": "string", "minLength": 1 },
+        "decision_rule": { "type": "string", "minLength": 1 },
+        "renderer": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "candidate_sets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/candidate_set" }
+    },
+    "calls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/call" }
+    },
+    "quorum": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/quorum" }
+    },
+    "failures": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/failure" }
+    },
+    "usage": { "$ref": "#/$defs/usage" },
+    "extensions": {
+      "type": "object",
+      "description": "Non-contract implementation metadata. Consumers must not infer protocol semantics from this object."
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "kind", "phase", "status", "parent_ids", "payload"],
+      "properties": {
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "phase": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["completed", "partial", "failed"] },
+        "parent_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "topic_id": { "type": "string", "minLength": 1 },
+        "candidate_set_id": { "type": "string", "minLength": 1 },
+        "payload": {}
+      }
+    },
+    "candidate_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_set_id", "governance", "candidate_ids", "classification_basis"],
+      "properties": {
+        "candidate_set_id": { "type": "string", "minLength": 1 },
+        "governance": { "enum": ["centralized", "distributed"] },
+        "topic_id": { "type": "string", "minLength": 1 },
+        "candidate_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "classification_basis": { "type": "object" },
+        "alignment": { "type": "object" }
+      }
+    },
+    "call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_id", "phase", "model_id", "role", "status", "attempt"],
+      "properties": {
+        "call_id": { "type": "string", "minLength": 1 },
+        "phase": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["panel", "coordinator", "host"] },
+        "status": { "enum": ["completed", "failed", "timeout"] },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "topic_id": { "type": "string", "minLength": 1 },
+        "usage": { "$ref": "#/$defs/usage" },
+        "cost_usd": { "type": "number", "minimum": 0 },
+        "latency_ms": { "type": "number", "minimum": 0 },
+        "error_code": { "type": "string", "minLength": 1 }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "code", "message", "recoverable"],
+      "properties": {
+        "phase": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "recoverable": { "type": "boolean" },
+        "topic_id": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "quorum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "met", "required", "respondent_count", "expected_count", "partial"],
+      "properties": {
+        "phase": { "type": "string", "minLength": 1 },
+        "topic_id": { "type": "string", "minLength": 1 },
+        "met": { "type": "boolean" },
+        "required": { "type": "integer", "minimum": 1 },
+        "respondent_count": { "type": "integer", "minimum": 0 },
+        "expected_count": { "type": "integer", "minimum": 1 },
+        "partial": { "type": "boolean" }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_tokens", "completion_tokens", "total_tokens", "cost_usd", "usage_unavailable_count"],
+      "properties": {
+        "prompt_tokens": { "type": "integer", "minimum": 0 },
+        "completion_tokens": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 },
+        "usage_unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

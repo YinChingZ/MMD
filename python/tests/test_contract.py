@@ -12,24 +12,19 @@ from tests.test_orchestrator import ScriptedClient
 
 TRACE_KEYS = {
     "trace_version",
-    "protocol",
+    "protocol_version",
     "run_id",
-    "question",
     "mode",
-    "proposals",
-    "critiques",
-    "revisions",
-    "normalize",
-    "votes",
-    "classifications",
+    "governance",
+    "status",
+    "versions",
+    "artifacts",
+    "candidate_sets",
+    "calls",
     "quorum",
     "failures",
-    "topics",
-    "failed_topics",
     "usage",
-    "tooling",
-    "policy",
-    "performance",
+    "extensions",
 }
 
 ANALYSIS_KEYS = {

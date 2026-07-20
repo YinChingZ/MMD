@@ -1,16 +1,13 @@
-node_modules/
-dist/
 build/
+dist/
 *.egg-info/
 out/
 __pycache__/
 .pytest_cache/
 .venv/
 python/.venv/
-*.tsbuildinfo
 .env
 .env.local
-apps/cli/models.config.json
 *.log
 .DS_Store
 .claude/

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -9,24 +10,27 @@ from pydantic import BaseModel, Field, model_validator
 from . import tools
 from .client import CompletionOutput, TokenUsage, coerce_completion_output
 from .consensus import ClassifyCandidateResult, classify_candidate
+from .alignment import PairSupport, candidates_from_clusters, deterministic_complete_link
 from .cost import estimate_call_cost
-from .ids import make_run_id, scoped_id
+from .ids import make_run_id, stable_call_id, stable_candidate_set_id
 from .policy import DeliberationPolicy, PolicyTraceInfo, resolve_deliberation_policy
 from .prompts import (
     CompletionRequest,
     build_compose_prompt,
+    build_align_prompt,
     build_critique_prompt,
     build_direct_answer_prompt,
     build_normalize_prompt,
     build_outline_prompt,
+    build_global_compose_prompt,
     build_propose_prompt,
     build_revise_prompt,
-    build_section_compose_prompt,
     build_vote_prompt,
 )
 from .quorum import QuorumCheck, check_quorum
 from .schemas import (
     Ballot,
+    AlignResult,
     CandidateClaim,
     ConfidenceSummary,
     Critique,
@@ -34,18 +38,32 @@ from .schemas import (
     NormalizeResult,
     OutlineResult,
     PlanDocument,
+    PlanningFinalAnswer,
+    PlanningOutputSpan,
     Proposal,
     RevisionSet,
     SectionAnswer,
     Topic,
     VoteSet,
 )
+from .v3 import (
+    CandidateSetTrace,
+    ClassificationBasis,
+    ExperimentManifest,
+    Governance,
+    MmdTraceV3,
+    TraceArtifact,
+    TraceCall,
+    TraceFailure,
+    resolve_governance,
+    validate_model_selection,
+)
 from .structured import call_structured
 
 T = TypeVar("T", bound=BaseModel)
 MMDMode = Literal["quick", "standard", "planning"]
 PresetName = Literal["cheap", "balanced", "strong"]
-PANEL_PHASES = {"propose", "critique", "revise", "vote"}
+PANEL_PHASES = {"propose", "critique", "revise", "vote", "align"}
 DEFAULT_MAX_TOOL_CALLS = 4
 MAX_TOOL_STEPS_PER_CALL = 4
 TOOL_TRACE_PREVIEW_CHARS = 500
@@ -94,8 +112,10 @@ class DeliberationConfig(BaseModel):
     coordinator_model: str | None = None
     preset: PresetName | None = None
     mmd_mode: MMDMode = "quick"
+    governance: Governance = "centralized"
+    experiment_manifest: ExperimentManifest | None = None
     deliberation_policy: DeliberationPolicy = "required"
-    quorum_ratio: float = Field(default=0.66, gt=0, le=1)
+    quorum_ratio: float = Field(default=2 / 3, gt=0, le=1)
     per_model_timeout: float | None = Field(default=None, gt=0)
     max_run_timeout: float | None = Field(default=None, gt=0)
     max_total_calls: int | None = Field(default=None, ge=1)
@@ -153,6 +173,15 @@ class DeliberationConfig(BaseModel):
             )
         if len(self.analysis_models) > self.max_analysis_models:
             self.analysis_models = self.analysis_models[: self.max_analysis_models]
+        resolve_governance(
+            self.mmd_mode, self.governance, self.experiment_manifest
+        )
+        if self.coordinator_model and self.coordinator_model not in self.analysis_models:
+            raise ValueError(
+                "coordinator_model must be one of the explicitly selected analysis_models"
+            )
+        if len(set(self.analysis_models)) != len(self.analysis_models):
+            raise ValueError("analysis_models must be distinct")
         return self
 
     def call_params_for_phase(self, phase: str) -> dict[str, Any]:
@@ -211,6 +240,7 @@ class DeliberationConfig(BaseModel):
 class PhaseFailure(BaseModel):
     model_id: str
     message: str
+    code: str | None = None
 
 
 class ToolCallEvent(BaseModel):
@@ -252,6 +282,8 @@ class UsageEvent(BaseModel):
     duration_seconds: float | None = None
     cost_usd: float | None = None
     cost_unavailable: bool = False
+    status: Literal["completed", "failed", "timeout"] = "completed"
+    error_code: str | None = None
 
 
 class UsageSummary(BaseModel):
@@ -304,6 +336,8 @@ class UsageTracker:
         usage: TokenUsage | None,
         duration_seconds: float,
         precomputed_cost_usd: float | None = None,
+        status: Literal["completed", "failed", "timeout"] = "completed",
+        error_code: str | None = None,
     ) -> None:
         phase = str(request.meta.get("phase", "unknown"))
         role: Literal["panel", "coordinator"] = (
@@ -324,6 +358,8 @@ class UsageTracker:
                 duration_seconds=duration_seconds,
                 cost_usd=cost_estimate.cost_usd,
                 cost_unavailable=cost_estimate.cost_unavailable,
+                status=status,
+                error_code=error_code,
             )
         )
 
@@ -401,7 +437,19 @@ class UsageCollectingClient:
         self, model: str, request: CompletionRequest, *, timeout: float | None = None
     ) -> str | CompletionOutput:
         start = time.monotonic()
-        output = await self.client.acomplete(model, request, timeout=timeout)
+        try:
+            output = await self.client.acomplete(model, request, timeout=timeout)
+        except Exception as error:
+            duration_seconds = time.monotonic() - start
+            self.tracker.record(
+                model=model,
+                request=request,
+                usage=None,
+                duration_seconds=duration_seconds,
+                status=("timeout" if isinstance(error, TimeoutError) else "failed"),
+                error_code=type(error).__name__,
+            )
+            raise
         duration_seconds = time.monotonic() - start
         completion = coerce_completion_output(output)
         self.tracker.record(
@@ -412,6 +460,14 @@ class UsageCollectingClient:
             precomputed_cost_usd=completion.cost_usd,
         )
         return output
+
+    def count_tokens(self, model: str, text: str) -> int | None:
+        counter = getattr(self.client, "count_tokens", None)
+        return counter(model, text) if callable(counter) else None
+
+    def context_window(self, model: str) -> int | None:
+        getter = getattr(self.client, "context_window", None)
+        return getter(model) if callable(getter) else None
 
 
 class CallLimitedClient:
@@ -429,6 +485,14 @@ class CallLimitedClient:
             raise CallBudgetExceededError(self.max_total_calls)
         self.calls_started += 1
         return await self.client.acomplete(model, request, timeout=timeout)
+
+    def count_tokens(self, model: str, text: str) -> int | None:
+        counter = getattr(self.client, "count_tokens", None)
+        return counter(model, text) if callable(counter) else None
+
+    def context_window(self, model: str) -> int | None:
+        getter = getattr(self.client, "context_window", None)
+        return getter(model) if callable(getter) else None
 
 
 class ToolExecutingClient:
@@ -512,6 +576,14 @@ class ToolExecutingClient:
             f"tool-call loop did not resolve within {MAX_TOOL_STEPS_PER_CALL} steps"
         )
 
+    def count_tokens(self, model: str, text: str) -> int | None:
+        counter = getattr(self.client, "count_tokens", None)
+        return counter(model, text) if callable(counter) else None
+
+    def context_window(self, model: str) -> int | None:
+        getter = getattr(self.client, "context_window", None)
+        return getter(model) if callable(getter) else None
+
 
 def _apply_native_web_tools(
     client: CompletionClient, config: DeliberationConfig, tracker: ToolCallTracker
@@ -556,6 +628,7 @@ class TopicResult(BaseModel):
     classifications: dict[str, ClassifyCandidateResult]
     quorum: dict[str, QuorumCheck]
     failures: dict[str, list[PhaseFailure]] = Field(default_factory=dict)
+    candidate_set_id: str | None = None
 
 
 class FailedTopic(BaseModel):
@@ -567,6 +640,7 @@ class DeliberationResult(BaseModel):
     run_id: str
     question: str
     mode: MMDMode
+    governance: Governance = "centralized"
     proposals: list[Proposal]
     critiques: list[Critique] = Field(default_factory=list)
     revisions: list[RevisionSet] = Field(default_factory=list)
@@ -580,88 +654,25 @@ class DeliberationResult(BaseModel):
     topics: list[TopicResult] = Field(default_factory=list)
     failed_topics: list[FailedTopic] = Field(default_factory=list)
     plan_document: PlanDocument | None = None
+    planning_final: PlanningFinalAnswer | None = None
+    planning_context: dict[str, Any] | None = None
+    alignment: Any | None = None
+    trace: MmdTraceV3 | None = None
     usage: UsageSummary = Field(default_factory=UsageSummary)
     tooling: ToolTraceInfo = Field(default_factory=ToolTraceInfo)
     policy: PolicyTraceInfo | None = None
     performance: PerformanceSummary | None = None
 
     def trace_payload(self) -> dict[str, Any]:
-        payload = self.model_dump(mode="json", exclude={"final"}, exclude_none=True)
-        return {
-            "trace_version": 1,
-            "protocol": "mmd.v1",
-            **payload,
-        }
+        if self.trace is None:
+            raise RuntimeError("new executions must attach mmd.trace.v3")
+        return self.trace.model_dump(mode="json", exclude_none=True)
 
     def logging_trace_payload(
         self, *, max_candidates: int | None = None
     ) -> dict[str, Any]:
-        candidate_claims, omitted_candidates = _logging_candidates(
-            self.normalize.candidate_claims, max_candidates
-        )
-        payload = {
-            "trace_version": 1,
-            "protocol": "mmd.v1",
-            "run_id": self.run_id,
-            "mode": self.mode,
-            "quorum": {
-                phase: quorum.model_dump(mode="json")
-                for phase, quorum in self.quorum.items()
-            },
-            "classifications": {
-                candidate_id: classification.model_dump(mode="json")
-                for candidate_id, classification in self.classifications.items()
-            },
-            "candidate_claims": candidate_claims,
-            "failures": {
-                phase: [failure.model_dump(mode="json") for failure in failures]
-                for phase, failures in self.failures.items()
-            },
-            "usage": self.usage.model_dump(mode="json"),
-            "tooling": self.tooling.model_dump(mode="json", exclude_none=True),
-        }
-        omitted_topic_candidates = 0
-        if self.topics:
-            topic_payloads = []
-            for topic_result in self.topics:
-                topic_candidates, omitted = _logging_candidates(
-                    topic_result.normalize.candidate_claims, max_candidates
-                )
-                omitted_topic_candidates += omitted
-                topic_payloads.append(
-                    {
-                        "topic": topic_result.topic.model_dump(mode="json"),
-                        "quorum": {
-                            phase: quorum.model_dump(mode="json")
-                            for phase, quorum in topic_result.quorum.items()
-                        },
-                        "classifications": {
-                            candidate_id: classification.model_dump(mode="json")
-                            for candidate_id, classification in (
-                                topic_result.classifications.items()
-                            )
-                        },
-                        "candidate_claims": topic_candidates,
-                        "failures": {
-                            phase: [
-                                failure.model_dump(mode="json")
-                                for failure in failures
-                            ]
-                            for phase, failures in topic_result.failures.items()
-                        },
-                    }
-                )
-            payload["topics"] = topic_payloads
-        if omitted_candidates or omitted_topic_candidates:
-            payload["truncation"] = {
-                "candidate_claims_omitted": omitted_candidates,
-                "topic_candidate_claims_omitted": omitted_topic_candidates,
-            }
-        if self.failed_topics:
-            payload["failed_topics"] = [
-                failed.model_dump(mode="json") for failed in self.failed_topics
-            ]
-        return payload
+        del max_candidates  # v3 logging emits the canonical trace without truncation.
+        return self.trace_payload()
 
     def analysis_payload(self) -> dict[str, Any]:
         consensus_summary = {
@@ -768,15 +779,6 @@ class DeliberationResult(BaseModel):
         return "\n".join(lines).strip()
 
 
-def _logging_candidates(
-    candidates: list[CandidateClaim], max_candidates: int | None
-) -> tuple[list[dict[str, Any]], int]:
-    serialized = [candidate.model_dump(mode="json") for candidate in candidates]
-    if max_candidates is None:
-        return serialized, 0
-    return serialized[:max_candidates], max(0, len(serialized) - max_candidates)
-
-
 def _append_markdown_list(lines: list[str], title: str, values: list[str]) -> None:
     if not values:
         return
@@ -859,6 +861,37 @@ async def _call_model_structured(
     )
 
 
+async def _call_coordinator_structured(
+    *,
+    client: CompletionClient,
+    model: str,
+    request: CompletionRequest,
+    schema: type[T],
+    timeout: float | None,
+    call_params: dict[str, Any] | None = None,
+) -> T:
+    """Run one coordinator generation and exactly one whole-call retry."""
+
+    last_error: Exception | None = None
+    for _attempt in range(2):
+        try:
+            return await _call_model_structured(
+                client=client,
+                model=model,
+                request=request,
+                schema=schema,
+                timeout=timeout,
+                max_repair_attempts=0,
+                call_params=call_params,
+            )
+        except (CallBudgetExceededError, ToolCallBudgetExceededError):
+            raise
+        except Exception as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
+
+
 async def _call_model_raw(
     *,
     client: CompletionClient,
@@ -882,10 +915,7 @@ def _stamp_proposal(
             local_id = f"{topic_id}::{local_id}"
         claims.append(
             claim.model_copy(
-                update={
-                    "claim_id": scoped_id(run_id, local_id),
-                    "topic_id": topic_id,
-                }
+                update={"claim_id": local_id, "topic_id": topic_id}
             )
         )
     return proposal.model_copy(update={"model_id": model_id, "claims": claims})
@@ -901,6 +931,143 @@ def _stamp_revision_set(model_id: str, revision_set: RevisionSet) -> RevisionSet
 
 def _stamp_vote_set(model_id: str, vote_set: VoteSet) -> VoteSet:
     return vote_set.model_copy(update={"model_id": model_id})
+
+
+def _sanitize_vote_sets(
+    vote_sets: list[VoteSet], candidate_ids: set[str]
+) -> list[VoteSet]:
+    sanitized: list[VoteSet] = []
+    for vote_set in vote_sets:
+        seen: set[str] = set()
+        ballots = []
+        for ballot in vote_set.votes:
+            if ballot.candidate_id not in candidate_ids or ballot.candidate_id in seen:
+                continue
+            seen.add(ballot.candidate_id)
+            ballots.append(ballot)
+        sanitized.append(vote_set.model_copy(update={"votes": ballots}))
+    return sanitized
+
+
+def _stamp_normalize(
+    run_id: str,
+    normalize: NormalizeResult,
+    claims: list[ResolvedClaim],
+    topic_id: str | None = None,
+) -> NormalizeResult:
+    expected_claim_ids = {claim.claim_id for claim in claims}
+    assigned_claim_ids: set[str] = set()
+    candidates = sorted(
+        normalize.candidate_claims,
+        key=lambda candidate: (
+            tuple(sorted(candidate.source_claim_ids)),
+            candidate.text,
+        ),
+    )
+    for candidate in candidates:
+        for claim_id in candidate.source_claim_ids:
+            if claim_id not in expected_claim_ids:
+                raise ValueError(f"normalize referenced unknown claim: {claim_id}")
+            if claim_id in assigned_claim_ids:
+                raise ValueError(f"normalize assigned claim more than once: {claim_id}")
+            assigned_claim_ids.add(claim_id)
+    missing = sorted(expected_claim_ids - assigned_claim_ids)
+    if missing:
+        raise ValueError("normalize omitted claims: " + ", ".join(missing))
+    return NormalizeResult(
+        candidate_claims=[
+            candidate.model_copy(
+                update={
+                    "candidate_id": (
+                        f"{run_id}::{topic_id or 'root'}::candidate::{index:03d}"
+                    ),
+                    "source_claim_ids": sorted(set(candidate.source_claim_ids)),
+                    "topic_id": topic_id or candidate.topic_id,
+                }
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+    )
+
+
+def _fallback_normalize(
+    run_id: str,
+    claims: list[ResolvedClaim],
+    topic_id: str | None = None,
+) -> NormalizeResult:
+    """Preserve every immutable claim when coordinator normalization fails."""
+
+    scope = topic_id or "root"
+    ordered = sorted(claims, key=lambda claim: claim.claim_id)
+    return NormalizeResult(
+        candidate_claims=[
+            CandidateClaim(
+                candidate_id=f"{run_id}::{scope}::candidate::{index:03d}",
+                text=claim.text,
+                source_claim_ids=[claim.claim_id],
+                topic_id=topic_id,
+                notes="deterministic fallback after coordinator normalization failure",
+            )
+            for index, claim in enumerate(ordered)
+        ]
+    )
+
+
+def _fallback_final(
+    *,
+    strong: list[str],
+    qualified: list[str],
+    disputed: list[str],
+    rejected: list[str],
+    position_changes: list[dict[str, Any]],
+    note: str,
+) -> FinalAnswer:
+    parts: list[str] = []
+    if strong:
+        parts.append("Strong consensus:\n" + "\n".join(f"- {item}" for item in strong))
+    if qualified:
+        parts.append(
+            "Qualified consensus:\n" + "\n".join(f"- {item}" for item in qualified)
+        )
+    if disputed:
+        parts.append("Disputed:\n" + "\n".join(f"- {item}" for item in disputed))
+    return FinalAnswer(
+        final_answer="\n\n".join(parts) or "No supported candidate reached consensus.",
+        strong_consensus=strong,
+        qualified_consensus=qualified,
+        disputed_points=disputed,
+        rejected_or_unsupported=rejected,
+        model_position_changes=position_changes,
+        confidence_summary={
+            "consensus_strength": "low" if disputed else "medium",
+            "notes": note,
+        },
+    )
+
+
+def _global_compose_context_profile(
+    client: CompletionClient,
+    model: str,
+    candidates: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any]]:
+    serialized = json.dumps(candidates, ensure_ascii=False, sort_keys=True)
+    counter = getattr(client, "count_tokens", None)
+    window_getter = getattr(client, "context_window", None)
+    token_count = counter(model, serialized) if callable(counter) else None
+    context_window = window_getter(model) if callable(window_getter) else None
+    if token_count is not None and context_window is not None:
+        limit = max(1, int(context_window * 0.8))
+        return token_count > limit, {
+            "token_count": token_count,
+            "context_window": context_window,
+            "input_limit": limit,
+            "source": "litellm_metadata",
+        }
+    return len(serialized) > 60_000, {
+        "estimated_tokens": max(1, len(serialized) // 4),
+        "serialized_characters": len(serialized),
+        "source": "deterministic_fallback",
+    }
 
 
 def _stamp_section_answer(topic: Topic, section: SectionAnswer) -> SectionAnswer:
@@ -1001,6 +1168,79 @@ async def _fanout_structured(
 
     quorum = check_quorum(len(values), len(config.analysis_models), config.quorum_ratio)
     return StructuredFanoutOutcome(values=values, quorum=quorum, failures=failures)
+
+
+async def _distributed_normalize(
+    *,
+    client: CompletionClient,
+    config: DeliberationConfig,
+    run_id: str,
+    claims: list[ResolvedClaim],
+    topic: Topic | None = None,
+) -> tuple[NormalizeResult, dict[str, Any], QuorumCheck, list[PhaseFailure]]:
+    claim_payload = [claim.model_dump() for claim in claims]
+    outcome = await _fanout_structured(
+        client=client,
+        config=config,
+        schema=AlignResult,
+        build_request=lambda model: build_align_prompt(
+            question=config.question,
+            aligner_model_id=model,
+            claims=claim_payload,
+            topic=topic,
+        ),
+        stamp=lambda model, result: result.model_copy(
+            update={"aligner_model_id": model}
+        ),
+    )
+    if not outcome.quorum.met:
+        raise QuorumNotMetError("align", outcome.quorum, outcome.failures)
+    alignments = [value for value in outcome.values if isinstance(value, AlignResult)]
+    pair_map: dict[tuple[str, str], PairSupport] = {}
+    for alignment in alignments:
+        for judgment in alignment.judgments:
+            left, right = sorted(
+                (judgment.left_claim_id, judgment.right_claim_id)
+            )
+            if left == right:
+                continue
+            current = pair_map.get(
+                (left, right), PairSupport(left, right, support=0, cannot_link=False)
+            )
+            pair_map[(left, right)] = PairSupport(
+                left,
+                right,
+                support=current.support + (1 if judgment.relation == "equivalent" else 0),
+                cannot_link=(
+                    current.cannot_link
+                    or judgment.cannot_link
+                    or judgment.relation == "conflict"
+                ),
+            )
+    policy = config.experiment_manifest.alignment_policy  # type: ignore[union-attr]
+    clusters, decisions = deterministic_complete_link(
+        [claim.claim_id for claim in claims],
+        list(pair_map.values()),
+        policy.minimum_pair_support,  # type: ignore[union-attr]
+    )
+    normalize = NormalizeResult(
+        candidate_claims=candidates_from_clusters(
+            run_id=run_id,
+            topic_id=topic.topic_id if topic else None,
+            claims=claims,
+            clusters=clusters,
+        )
+    )
+    return (
+        normalize,
+        {
+            "policy": policy.model_dump(),  # type: ignore[union-attr]
+            "alignments": [item.model_dump() for item in alignments],
+            "decisions": decisions,
+        },
+        outcome.quorum,
+        outcome.failures,
+    )
 
 
 def _resolved_claims(
@@ -1146,6 +1386,275 @@ def _consensus_buckets(
     return strong, qualified, disputed, rejected
 
 
+def _candidate_set_trace(
+    *,
+    run_id: str,
+    governance: Governance,
+    normalize: NormalizeResult,
+    classifications: dict[str, ClassifyCandidateResult],
+    votes: list[VoteSet],
+    proposals: list[Proposal],
+    expected_voter_count: int,
+    topic_id: str | None = None,
+    alignment: Any | None = None,
+) -> CandidateSetTrace:
+    candidate_set_id = stable_candidate_set_id(run_id, governance, topic_id)
+    ballot_map = _ballots_by_candidate(votes)
+    claims_by_id = {
+        claim.claim_id: claim for claim in _resolved_claims(proposals)
+    }
+    basis: dict[str, ClassificationBasis] = {}
+    for candidate in normalize.candidate_claims:
+        ballots = ballot_map.get(candidate.candidate_id)
+        if ballots is None:
+            ballots = _implied_ballots_from_coverage(candidate, claims_by_id)
+        classification = classifications[candidate.candidate_id]
+        basis[candidate.candidate_id] = ClassificationBasis(
+            candidate_set_id=candidate_set_id,
+            expected_voter_count=expected_voter_count,
+            ballots=ballots,
+            approve_ratio=classification.approve_ratio,
+            label=classification.label,
+            partial=classification.partial,
+        )
+    return CandidateSetTrace(
+        candidate_set_id=candidate_set_id,
+        governance=governance,
+        topic_id=topic_id,
+        candidate_ids=[candidate.candidate_id for candidate in normalize.candidate_claims],
+        classification_basis=basis,
+        alignment=alignment,
+    )
+
+
+def _attach_v3_trace(
+    result: DeliberationResult, *, expected_voter_count: int
+) -> DeliberationResult:
+    trace = MmdTraceV3(
+        run_id=result.run_id,
+        mode=result.mode,
+        governance=result.governance,
+    )
+    attempts: dict[tuple[str, str, str | None], int] = {}
+    for event in result.usage.events:
+        usage = event.usage.model_dump() if event.usage else None
+        attempt_key = (event.phase, event.model_id, event.topic_id)
+        attempt = attempts.get(attempt_key, 0)
+        attempts[attempt_key] = attempt + 1
+        trace.calls.append(
+            TraceCall(
+                call_id=stable_call_id(
+                    result.run_id,
+                    event.phase,
+                    event.model_id,
+                    event.call_index,
+                    event.topic_id,
+                ),
+                phase=event.phase,
+                model_id=event.model_id,
+                role=event.role,
+                status=event.status,
+                attempt=attempt,
+                topic_id=event.topic_id,
+                usage=(
+                    {
+                        "prompt_tokens": usage["prompt_tokens"],
+                        "completion_tokens": usage["completion_tokens"],
+                        "total_tokens": usage["total_tokens"],
+                        "cost_usd": event.cost_usd or 0,
+                        "usage_unavailable_count": 0,
+                    }
+                    if usage
+                    else {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "cost_usd": event.cost_usd or 0,
+                        "usage_unavailable_count": 1,
+                    }
+                ),
+                cost_usd=event.cost_usd,
+                latency_ms=(
+                    event.duration_seconds * 1000
+                    if event.duration_seconds is not None
+                    else None
+                ),
+                error_code=event.error_code,
+            )
+        )
+    total_cost = sum(event.cost_usd or 0 for event in result.usage.events)
+    trace.usage = {
+        "prompt_tokens": result.usage.prompt_tokens,
+        "completion_tokens": result.usage.completion_tokens,
+        "total_tokens": result.usage.total_tokens,
+        "cost_usd": total_cost,
+        "usage_unavailable_count": result.usage.usage_unavailable_count,
+    }
+    trace.quorum = [
+        {
+            "phase": phase,
+            "met": check.met,
+            "required": check.required,
+            "respondent_count": check.respondent_count,
+            "expected_count": expected_voter_count,
+            "partial": check.partial,
+        }
+        for phase, check in result.quorum.items()
+    ] + [
+        {
+            "phase": phase,
+            "topic_id": topic_result.topic.topic_id,
+            "met": check.met,
+            "required": check.required,
+            "respondent_count": check.respondent_count,
+            "expected_count": expected_voter_count,
+            "partial": check.partial,
+        }
+        for topic_result in result.topics
+        for phase, check in topic_result.quorum.items()
+    ]
+    if result.proposals:
+        trace.artifacts.extend(
+            [
+                TraceArtifact(
+                    artifact_id=f"{result.run_id}::artifact::proposals",
+                    kind="proposal_set",
+                    phase="propose",
+                    status="partial" if result.quorum.get("propose") and result.quorum["propose"].partial else "completed",
+                    payload=result.proposals,
+                ),
+                TraceArtifact(
+                    artifact_id=f"{result.run_id}::artifact::post_revision_claims",
+                    kind="post_revision_claim_set",
+                    phase="revise" if result.revisions else "propose",
+                    status="completed",
+                    parent_ids=[f"{result.run_id}::artifact::proposals"],
+                    payload=_resolved_claims(result.proposals, result.revisions),
+                ),
+            ]
+        )
+        candidate_set = _candidate_set_trace(
+            run_id=result.run_id,
+            governance=result.governance,
+            normalize=result.normalize,
+            classifications=result.classifications,
+            votes=result.votes,
+            proposals=result.proposals,
+            expected_voter_count=expected_voter_count,
+            alignment=result.alignment,
+        )
+        trace.candidate_sets.append(candidate_set)
+        trace.artifacts.append(
+            TraceArtifact(
+                artifact_id=f"{result.run_id}::artifact::classifications",
+                kind="classification_ledger",
+                phase="classify",
+                status="completed",
+                candidate_set_id=candidate_set.candidate_set_id,
+                parent_ids=[f"{result.run_id}::artifact::post_revision_claims"],
+                payload=candidate_set.classification_basis,
+            )
+        )
+    for topic_result in result.topics:
+        candidate_set = _candidate_set_trace(
+            run_id=result.run_id,
+            governance="centralized",
+            normalize=topic_result.normalize,
+            classifications=topic_result.classifications,
+            votes=topic_result.votes,
+            proposals=topic_result.proposals,
+            expected_voter_count=expected_voter_count,
+            topic_id=topic_result.topic.topic_id,
+        )
+        trace.candidate_sets.append(candidate_set)
+        trace.artifacts.append(
+            TraceArtifact(
+                artifact_id=f"{result.run_id}::{topic_result.topic.topic_id}::artifact::topic_ledger",
+                kind="topic_ledger",
+                phase="classify",
+                status=(
+                    "partial"
+                    if any(check.partial for check in topic_result.quorum.values())
+                    else "completed"
+                ),
+                topic_id=topic_result.topic.topic_id,
+                candidate_set_id=candidate_set.candidate_set_id,
+                payload=topic_result,
+            )
+        )
+    if "topic_brief" in result.failures:
+        trace.artifacts.append(
+            TraceArtifact(
+                artifact_id=f"{result.run_id}::artifact::topic_briefs",
+                kind="topic_brief_set",
+                phase="topic_brief",
+                status="completed",
+                parent_ids=[
+                    f"{result.run_id}::{topic.topic.topic_id}::artifact::topic_ledger"
+                    for topic in result.topics
+                ],
+                payload={
+                    "strategy": "truncate_candidate_text",
+                    "max_candidate_characters": 1200,
+                    "context_profile": result.planning_context,
+                    "source_candidate_ids": [
+                        candidate.candidate_id
+                        for topic in result.topics
+                        for candidate in topic.normalize.candidate_claims
+                    ],
+                },
+            )
+        )
+    if result.planning_final is not None:
+        trace.artifacts.append(
+            TraceArtifact(
+                artifact_id=f"{result.run_id}::artifact::planning_final",
+                kind="planning_final_answer",
+                phase="global_compose",
+                status=(
+                    "partial" if result.failures.get("global_compose") else "completed"
+                ),
+                parent_ids=[
+                    f"{result.run_id}::{topic.topic.topic_id}::artifact::topic_ledger"
+                    for topic in result.topics
+                ],
+                payload=result.planning_final,
+            )
+        )
+    for phase, failures in result.failures.items():
+        for failure in failures:
+            trace.failures.append(
+                TraceFailure(
+                    phase=phase,
+                    code=failure.code
+                    or (
+                        "global_compose_failed"
+                        if phase == "global_compose"
+                        else (
+                            "coordinator_failed"
+                            if phase == "compose"
+                            else "phase_partial_failure"
+                        )
+                    ),
+                    message=failure.message,
+                    recoverable=True,
+                    model_id=failure.model_id,
+                )
+            )
+    for failed_topic in result.failed_topics:
+        trace.failures.append(
+            TraceFailure(
+                phase="topic",
+                code="topic_failed",
+                message=failed_topic.error,
+                recoverable=True,
+                topic_id=failed_topic.topic.topic_id,
+            )
+        )
+    trace.status = "partial" if trace.failures else "completed"
+    return result.model_copy(update={"trace": trace})
+
+
 def _candidate_coverage(
     normalize: NormalizeResult,
     classifications: dict[str, ClassifyCandidateResult],
@@ -1210,18 +1719,7 @@ def _notable_unique_points(
 
 
 def _compute_performance_summary(result: DeliberationResult) -> PerformanceSummary:
-    """Per-role (panel/coordinator) tokens, cost, duration, success rate, partial status.
-
-    Known asymmetry, by construction: coordinator-role phases (`normalize`,
-    `compose`, `outline`, `section_compose`, `direct_answer`) are single calls with
-    no try/except around them, unlike panel-role fan-out phases - a coordinator
-    call failure aborts the whole `run_deliberation()` call before any
-    `DeliberationResult` exists. So `coordinator.failure_count` is always 0 and
-    `coordinator.partial` is always False in any *returned* result; there is no
-    "coordinator partially failed" state to represent. Likewise, a planning-mode
-    topic that fails before completing (e.g. quorum not met) loses its per-model
-    failure detail - visible only as a string in `failed_topics`, not attributed here.
-    """
+    """Per-role call, usage, cost, latency, and partial-result statistics."""
     buckets: dict[str, dict[str, Any]] = {
         role: {
             "success_count": 0,
@@ -1237,7 +1735,8 @@ def _compute_performance_summary(result: DeliberationResult) -> PerformanceSumma
     }
     for event in result.usage.events:
         bucket = buckets[event.role]
-        bucket["success_count"] += 1
+        if event.status == "completed":
+            bucket["success_count"] += 1
         if event.usage is not None:
             bucket["prompt_tokens"] += event.usage.prompt_tokens
             bucket["completion_tokens"] += event.usage.completion_tokens
@@ -1250,16 +1749,10 @@ def _compute_performance_summary(result: DeliberationResult) -> PerformanceSumma
             bucket["cost_usd"] += event.cost_usd
             bucket["cost_present"] = True
 
-    failure_counts = {"panel": 0, "coordinator": 0}
-
-    def _tally_failures(failures: dict[str, list[PhaseFailure]]) -> None:
-        for phase, phase_failures in failures.items():
-            role = "panel" if phase in PANEL_PHASES else "coordinator"
-            failure_counts[role] += len(phase_failures)
-
-    _tally_failures(result.failures)
-    for topic_result in result.topics:
-        _tally_failures(topic_result.failures)
+    failure_counts = {
+        role: sum(1 for event in result.usage.events if event.role == role and event.status != "completed")
+        for role in ("panel", "coordinator")
+    }
 
     partial = {"panel": False, "coordinator": False}
 
@@ -1271,6 +1764,11 @@ def _compute_performance_summary(result: DeliberationResult) -> PerformanceSumma
     _tally_partial(result.quorum)
     for topic_result in result.topics:
         _tally_partial(topic_result.quorum)
+    for phase, phase_failures in result.failures.items():
+        if phase_failures:
+            partial["panel" if phase in PANEL_PHASES else "coordinator"] = True
+    if result.failed_topics:
+        partial["panel"] = True
 
     def _role_performance(role: Literal["panel", "coordinator"]) -> RolePerformance:
         bucket = buckets[role]
@@ -1412,6 +1910,10 @@ async def run_quick_deliberation(
 ) -> DeliberationResult:
     if config.mmd_mode != "quick":
         raise NotImplementedError("only quick mode is implemented in this PoC")
+    validate_model_selection("quick", config.analysis_models, config.coordinator_model)
+    governance = resolve_governance(
+        config.mmd_mode, config.governance, config.experiment_manifest
+    )
 
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
@@ -1432,18 +1934,29 @@ async def run_quick_deliberation(
 
     claims = _resolved_claims(propose_outcome.proposals)
     claim_payload = [claim.model_dump() for claim in claims]
-    normalize = await _call_model_structured(
-        client=client,
-        model=coordinator,
-        request=build_normalize_prompt(
-            question=config.question,
-            claims=claim_payload,
-        ),
-        schema=NormalizeResult,
-        timeout=config.per_model_timeout,
-        max_repair_attempts=config.max_repair_attempts,
-        call_params=config.call_params_for_phase("normalize"),
-    )
+    failures: dict[str, list[PhaseFailure]] = {
+        "propose": propose_outcome.failures
+    }
+    try:
+        normalize = await _call_coordinator_structured(
+            client=client,
+            model=coordinator,
+            request=build_normalize_prompt(
+                question=config.question,
+                claims=claim_payload,
+            ),
+            schema=NormalizeResult,
+            timeout=config.per_model_timeout,
+            call_params=config.call_params_for_phase("normalize"),
+        )
+        normalize = _stamp_normalize(run_id, normalize, claims)
+    except (CallBudgetExceededError, ToolCallBudgetExceededError):
+        raise
+    except Exception as error:
+        failures["normalize"] = [
+            PhaseFailure(model_id=coordinator, message=str(error))
+        ]
+        normalize = _fallback_normalize(run_id, claims)
 
     claims_by_id = {claim.claim_id: claim for claim in claims}
     classifications: dict[str, ClassifyCandidateResult] = {}
@@ -1457,36 +1970,52 @@ async def run_quick_deliberation(
     strong, qualified, disputed, rejected = _consensus_buckets(
         normalize, classifications
     )
-    final = await _call_model_structured(
-        client=client,
-        model=coordinator,
-        request=build_compose_prompt(
-            question=config.question,
-            strong_consensus=strong,
-            qualified_consensus=qualified,
+    try:
+        final = await _call_coordinator_structured(
+            client=client,
+            model=coordinator,
+            request=build_compose_prompt(
+                question=config.question,
+                strong_consensus=strong,
+                qualified_consensus=qualified,
+                disputed=disputed,
+                rejected=rejected,
+                position_changes=[],
+            ),
+            schema=FinalAnswer,
+            timeout=config.per_model_timeout,
+            call_params=config.call_params_for_phase("compose"),
+        )
+    except (CallBudgetExceededError, ToolCallBudgetExceededError):
+        raise
+    except Exception as error:
+        failures["compose"] = [
+            PhaseFailure(model_id=coordinator, message=str(error))
+        ]
+        final = _fallback_final(
+            strong=strong,
+            qualified=qualified,
             disputed=disputed,
             rejected=rejected,
             position_changes=[],
-        ),
-        schema=FinalAnswer,
-        timeout=config.per_model_timeout,
-        max_repair_attempts=config.max_repair_attempts,
-        call_params=config.call_params_for_phase("compose"),
-    )
+            note="Coordinator compose failed after one retry; deterministic classification ledger rendered instead.",
+        )
 
-    return DeliberationResult(
+    result = DeliberationResult(
         run_id=run_id,
         question=config.question,
         mode="quick",
+        governance=governance,
         proposals=propose_outcome.proposals,
         normalize=normalize,
         classifications=classifications,
         final=final,
         quorum={"propose": propose_outcome.quorum},
-        failures={"propose": propose_outcome.failures},
+        failures=failures,
         usage=usage_tracker.summary(),
         tooling=config.tool_trace_info(tool_tracker),
     )
+    return _attach_v3_trace(result, expected_voter_count=len(config.analysis_models))
 
 
 async def run_standard_deliberation(
@@ -1494,6 +2023,10 @@ async def run_standard_deliberation(
 ) -> DeliberationResult:
     if config.mmd_mode != "standard":
         raise ValueError("run_standard_deliberation requires mmd_mode='standard'")
+    validate_model_selection("standard", config.analysis_models, config.coordinator_model)
+    governance = resolve_governance(
+        config.mmd_mode, config.governance, config.experiment_manifest
+    )
 
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
@@ -1563,18 +2096,37 @@ async def run_standard_deliberation(
 
     claims = _resolved_claims(propose_outcome.proposals, revisions)
     claim_payload = [claim.model_dump() for claim in claims]
-    normalize = await _call_model_structured(
-        client=client,
-        model=coordinator,
-        request=build_normalize_prompt(
-            question=config.question,
-            claims=claim_payload,
-        ),
-        schema=NormalizeResult,
-        timeout=config.per_model_timeout,
-        max_repair_attempts=config.max_repair_attempts,
-        call_params=config.call_params_for_phase("normalize"),
-    )
+    alignment: Any | None = None
+    if governance == "distributed":
+        normalize, alignment, align_quorum, align_failures = await _distributed_normalize(
+            client=client,
+            config=config,
+            run_id=run_id,
+            claims=claims,
+        )
+        quorum["align"] = align_quorum
+        failures["align"] = align_failures
+    else:
+        try:
+            normalize = await _call_coordinator_structured(
+                client=client,
+                model=coordinator,
+                request=build_normalize_prompt(
+                    question=config.question,
+                    claims=claim_payload,
+                ),
+                schema=NormalizeResult,
+                timeout=config.per_model_timeout,
+                call_params=config.call_params_for_phase("normalize"),
+            )
+            normalize = _stamp_normalize(run_id, normalize, claims)
+        except (CallBudgetExceededError, ToolCallBudgetExceededError):
+            raise
+        except Exception as error:
+            failures["normalize"] = [
+                PhaseFailure(model_id=coordinator, message=str(error))
+            ]
+            normalize = _fallback_normalize(run_id, claims)
 
     vote_outcome = await _fanout_structured(
         client=client,
@@ -1590,7 +2142,10 @@ async def run_standard_deliberation(
         ),
         stamp=_stamp_vote_set,
     )
-    votes = [value for value in vote_outcome.values if isinstance(value, VoteSet)]
+    votes = _sanitize_vote_sets(
+        [value for value in vote_outcome.values if isinstance(value, VoteSet)],
+        {candidate.candidate_id for candidate in normalize.candidate_claims},
+    )
     quorum["vote"] = vote_outcome.quorum
     failures["vote"] = vote_outcome.failures
     if not vote_outcome.quorum.met:
@@ -1607,27 +2162,43 @@ async def run_standard_deliberation(
     strong, qualified, disputed, rejected = _consensus_buckets(
         normalize, classifications
     )
-    final = await _call_model_structured(
-        client=client,
-        model=coordinator,
-        request=build_compose_prompt(
-            question=config.question,
-            strong_consensus=strong,
-            qualified_consensus=qualified,
+    position_changes = _position_changes(propose_outcome.proposals, revisions)
+    try:
+        final = await _call_coordinator_structured(
+            client=client,
+            model=coordinator,
+            request=build_compose_prompt(
+                question=config.question,
+                strong_consensus=strong,
+                qualified_consensus=qualified,
+                disputed=disputed,
+                rejected=rejected,
+                position_changes=position_changes,
+            ),
+            schema=FinalAnswer,
+            timeout=config.per_model_timeout,
+            call_params=config.call_params_for_phase("compose"),
+        )
+    except (CallBudgetExceededError, ToolCallBudgetExceededError):
+        raise
+    except Exception as error:
+        failures["compose"] = [
+            PhaseFailure(model_id=coordinator, message=str(error))
+        ]
+        final = _fallback_final(
+            strong=strong,
+            qualified=qualified,
             disputed=disputed,
             rejected=rejected,
-            position_changes=_position_changes(propose_outcome.proposals, revisions),
-        ),
-        schema=FinalAnswer,
-        timeout=config.per_model_timeout,
-        max_repair_attempts=config.max_repair_attempts,
-        call_params=config.call_params_for_phase("compose"),
-    )
+            position_changes=position_changes,
+            note="Coordinator compose failed after one retry; deterministic classification ledger rendered instead.",
+        )
 
-    return DeliberationResult(
+    result = DeliberationResult(
         run_id=run_id,
         question=config.question,
         mode="standard",
+        governance=governance,
         proposals=propose_outcome.proposals,
         critiques=critiques,
         revisions=revisions,
@@ -1639,7 +2210,9 @@ async def run_standard_deliberation(
         failures=failures,
         usage=usage_tracker.summary(),
         tooling=config.tool_trace_info(tool_tracker),
+        alignment=alignment,
     )
+    return _attach_v3_trace(result, expected_voter_count=len(config.analysis_models))
 
 
 async def _run_topic_deliberation(
@@ -1714,19 +2287,27 @@ async def _run_topic_deliberation(
 
     claims = _resolved_claims(propose_outcome.proposals, revisions)
     claim_payload = [claim.model_dump() for claim in claims]
-    normalize = await _call_model_structured(
-        client=client,
-        model=coordinator,
-        request=build_normalize_prompt(
-            question=config.question,
-            claims=claim_payload,
-            topic=topic,
-        ),
-        schema=NormalizeResult,
-        timeout=config.per_model_timeout,
-        max_repair_attempts=config.max_repair_attempts,
-        call_params=config.call_params_for_phase("normalize"),
-    )
+    try:
+        normalize = await _call_coordinator_structured(
+            client=client,
+            model=coordinator,
+            request=build_normalize_prompt(
+                question=config.question,
+                claims=claim_payload,
+                topic=topic,
+            ),
+            schema=NormalizeResult,
+            timeout=config.per_model_timeout,
+            call_params=config.call_params_for_phase("normalize"),
+        )
+        normalize = _stamp_normalize(run_id, normalize, claims, topic.topic_id)
+    except (CallBudgetExceededError, ToolCallBudgetExceededError):
+        raise
+    except Exception as error:
+        failures["normalize"] = [
+            PhaseFailure(model_id=coordinator, message=str(error))
+        ]
+        normalize = _fallback_normalize(run_id, claims, topic.topic_id)
 
     vote_outcome = await _fanout_structured(
         client=client,
@@ -1742,7 +2323,10 @@ async def _run_topic_deliberation(
         ),
         stamp=_stamp_vote_set,
     )
-    votes = [value for value in vote_outcome.values if isinstance(value, VoteSet)]
+    votes = _sanitize_vote_sets(
+        [value for value in vote_outcome.values if isinstance(value, VoteSet)],
+        {candidate.candidate_id for candidate in normalize.candidate_claims},
+    )
     quorum["vote"] = vote_outcome.quorum
     failures["vote"] = vote_outcome.failures
     if not vote_outcome.quorum.met:
@@ -1766,6 +2350,9 @@ async def _run_topic_deliberation(
         classifications=classifications,
         quorum=quorum,
         failures=failures,
+        candidate_set_id=stable_candidate_set_id(
+            run_id, "centralized", topic.topic_id
+        ),
     )
 
 
@@ -1774,6 +2361,10 @@ async def run_planning_deliberation(
 ) -> DeliberationResult:
     if config.mmd_mode != "planning":
         raise ValueError("run_planning_deliberation requires mmd_mode='planning'")
+    validate_model_selection("planning", config.analysis_models, config.coordinator_model)
+    governance = resolve_governance(
+        config.mmd_mode, config.governance, config.experiment_manifest
+    )
 
     usage_tracker = UsageTracker()
     client = UsageCollectingClient(client, usage_tracker)
@@ -1782,18 +2373,41 @@ async def run_planning_deliberation(
     run_id = make_run_id()
     coordinator = config.coordinator_model or config.analysis_models[0]
 
-    outline = await _call_model_structured(
-        client=client,
-        model=coordinator,
-        request=build_outline_prompt(
-            question=config.question,
-            max_topics=config.max_topics,
-            conversation_context=config.conversation_context,
-        ),
-        schema=OutlineResult,
-        timeout=config.per_model_timeout,
-        max_repair_attempts=config.max_repair_attempts,
-        call_params=config.call_params_for_phase("outline"),
+    planning_phase_failures: dict[str, list[PhaseFailure]] = {}
+    try:
+        outline = await _call_coordinator_structured(
+            client=client,
+            model=coordinator,
+            request=build_outline_prompt(
+                question=config.question,
+                max_topics=config.max_topics,
+                conversation_context=config.conversation_context,
+            ),
+            schema=OutlineResult,
+            timeout=config.per_model_timeout,
+            call_params=config.call_params_for_phase("outline"),
+        )
+    except (CallBudgetExceededError, ToolCallBudgetExceededError):
+        raise
+    except Exception as error:
+        planning_phase_failures["outline"] = [
+            PhaseFailure(model_id=coordinator, message=str(error))
+        ]
+        outline = OutlineResult(topics=[])
+    cross_cutting = Topic(
+        topic_id="cross_cutting_risks_and_omissions",
+        title="Cross-cutting risks and omissions",
+        description="Risks, dependencies, interactions, and material omissions spanning multiple topics.",
+    )
+    outline = OutlineResult(
+        topics=[
+            *[
+                topic
+                for topic in outline.topics
+                if topic.topic_id != cross_cutting.topic_id
+            ][: max(0, config.max_topics - 1)],
+            cross_cutting,
+        ]
     )
 
     topic_outcomes = await asyncio.gather(
@@ -1825,33 +2439,186 @@ async def run_planning_deliberation(
             f"planning mode: all {len(outline.topics)} topic(s) failed - {detail}"
         )
 
-    async def compose_section(topic_result: TopicResult) -> SectionAnswer:
+    candidates = [
+        {
+            "topic_id": topic_result.topic.topic_id,
+            "candidate_id": candidate.candidate_id,
+            "classification": topic_result.classifications[
+                candidate.candidate_id
+            ].label,
+            "text": candidate.text,
+        }
+        for topic_result in topics
+        for candidate in topic_result.normalize.candidate_claims
+    ]
+    compose_candidates = candidates
+    topic_briefs_used = False
+    context_budget_exceeded = False
+    exceeds_context, context_profile = _global_compose_context_profile(
+        client, coordinator, compose_candidates
+    )
+    if exceeds_context:
+        topic_briefs_used = True
+        compose_candidates = [
+            {**candidate, "text": candidate["text"][:1_200]}
+            for candidate in candidates
+        ]
+        context_budget_exceeded, compressed_profile = _global_compose_context_profile(
+            client, coordinator, compose_candidates
+        )
+        context_profile = {
+            **context_profile,
+            "after_compression": compressed_profile,
+        }
+
+    allowed_ids = {candidate["candidate_id"] for candidate in candidates}
+    strong_ids = {
+        candidate["candidate_id"]
+        for candidate in candidates
+        if candidate["classification"] == "strong_consensus"
+    }
+    planning_failures: list[PhaseFailure] = []
+    try:
+        if context_budget_exceeded:
+            raise ValueError(
+                "GlobalCompose input remains over budget after one topic-brief compression"
+            )
+        planning_final = await _call_coordinator_structured(
+            client=client,
+            model=coordinator,
+            request=build_global_compose_prompt(
+                question=config.question,
+                topics=[topic.topic for topic in topics],
+                candidates=compose_candidates,
+                conversation_context=config.conversation_context,
+            ),
+            schema=PlanningFinalAnswer,
+            timeout=config.per_model_timeout,
+            call_params=config.call_params_for_phase("global_compose"),
+        )
+        planning_final = planning_final.model_copy(
+            update={
+                "spans": [
+                    span.model_copy(
+                        update={
+                            "span_id": f"{run_id}::output_span::{index:03d}"
+                        }
+                    )
+                    for index, span in enumerate(planning_final.spans)
+                ]
+            }
+        )
+        cited: set[str] = set()
+        for span in planning_final.spans:
+            lineage = [
+                *span.source_candidate_ids,
+                *span.derived_from_candidate_ids,
+            ]
+            if not lineage or any(candidate_id not in allowed_ids for candidate_id in lineage):
+                raise ValueError("GlobalCompose returned invalid or empty lineage")
+            cited.update(lineage)
+        omitted = {
+            item.candidate_id
+            for item in planning_final.omitted_strong_candidate_reasons
+        }
+        missing = strong_ids - cited - omitted
+        if missing:
+            raise ValueError(
+                "GlobalCompose omitted strong candidate without reason: "
+                + ", ".join(sorted(missing))
+            )
+    except (CallBudgetExceededError, ToolCallBudgetExceededError):
+        raise
+    except Exception as error:
+        planning_failures.append(
+            PhaseFailure(
+                model_id=coordinator,
+                message=str(error),
+                code=(
+                    "context_budget_exceeded"
+                    if context_budget_exceeded
+                    else "global_compose_failed"
+                ),
+            )
+        )
+        included = [
+            candidate
+            for candidate in candidates
+            if candidate["classification"] != "rejected"
+        ]
+        fallback_candidates = included or candidates[:1]
+        planning_final = PlanningFinalAnswer(
+            final_answer="\n\n".join(
+                f"## {topic_result.topic.title}\n\n"
+                + (
+                    "\n".join(
+                        (
+                            f"- Disputed: {candidate['text']}"
+                            if candidate["classification"] == "disputed"
+                            else f"- {candidate['text']}"
+                        )
+                        for candidate in included
+                        if candidate["topic_id"] == topic_result.topic.topic_id
+                    )
+                    or "- No supported candidate reached consensus."
+                )
+                for topic_result in topics
+            ),
+            spans=[
+                PlanningOutputSpan(
+                    span_id=f"{run_id}::output_span::{index:03d}",
+                    text=candidate["text"],
+                    source_candidate_ids=[candidate["candidate_id"]],
+                    lineage_kind="candidate",
+                )
+                for index, candidate in enumerate(fallback_candidates)
+            ],
+            omitted_strong_candidate_reasons=[
+                {
+                    "candidate_id": candidate_id,
+                    "reason": "GlobalCompose failed; candidate remains in its topic ledger.",
+                }
+                for candidate_id in sorted(
+                    strong_ids
+                    - {candidate["candidate_id"] for candidate in fallback_candidates}
+                )
+            ],
+        )
+
+    sections: list[SectionAnswer] = []
+    for topic_result in topics:
         strong, qualified, disputed, rejected = _consensus_buckets(
             topic_result.normalize, topic_result.classifications
         )
-        section = await _call_model_structured(
-            client=client,
-            model=coordinator,
-            request=build_section_compose_prompt(
-                question=config.question,
-                topic=topic_result.topic,
+        topic_candidate_ids = {
+            candidate.candidate_id
+            for candidate in topic_result.normalize.candidate_claims
+        }
+        section_text = "\n\n".join(
+            span.text
+            for span in planning_final.spans
+            if topic_candidate_ids.intersection(span.source_candidate_ids)
+        ) or "No integrated output span was assigned to this topic."
+        sections.append(
+            SectionAnswer(
+                topic_id=topic_result.topic.topic_id,
+                title=topic_result.topic.title,
+                tldr=(strong or qualified or ["No consensus reached."])[0],
+                section_answer=section_text,
                 strong_consensus=strong,
                 qualified_consensus=qualified,
-                disputed=disputed,
-                rejected=rejected,
-                position_changes=_position_changes(
+                disputed_points=disputed,
+                rejected_or_unsupported=rejected,
+                model_position_changes=_position_changes(
                     topic_result.proposals, topic_result.revisions
                 ),
-            ),
-            schema=SectionAnswer,
-            timeout=config.per_model_timeout,
-            max_repair_attempts=config.max_repair_attempts,
-            call_params=config.call_params_for_phase("section_compose"),
+                confidence_summary={
+                    "consensus_strength": "low" if disputed else "medium",
+                    "notes": "Compatibility projection from mmd.v3 topic ledger and GlobalCompose lineage.",
+                },
+            )
         )
-        return _stamp_section_answer(topic_result.topic, section)
-
-    sections = await asyncio.gather(*(compose_section(topic) for topic in topics))
-    executive_summary = "\n".join(section.tldr for section in sections)
+    executive_summary = planning_final.final_answer
     plan_document = PlanDocument(
         executive_summary=executive_summary,
         sections=list(sections),
@@ -1869,23 +2636,31 @@ async def run_planning_deliberation(
         },
     )
 
-    return DeliberationResult(
+    result = DeliberationResult(
         run_id=run_id,
         question=config.question,
         mode="planning",
+        governance=governance,
         proposals=[],
         normalize=NormalizeResult(candidate_claims=[]),
         classifications={},
         final=final,
         quorum={},
-        failures={},
+        failures={
+            **planning_phase_failures,
+            **({"global_compose": planning_failures} if planning_failures else {}),
+            **({"topic_brief": []} if topic_briefs_used else {}),
+        },
         outline=outline,
         topics=topics,
         failed_topics=failed_topics,
         plan_document=plan_document,
+        planning_final=planning_final,
+        planning_context=context_profile,
         usage=usage_tracker.summary(),
         tooling=config.tool_trace_info(tool_tracker),
     )
+    return _attach_v3_trace(result, expected_voter_count=len(config.analysis_models))
 
 
 async def run_deliberation(
@@ -1920,6 +2695,22 @@ async def run_deliberation(
             raise DeliberationTimeoutError(config.max_run_timeout) from error
 
     performance = _compute_performance_summary(result)
-    return result.model_copy(
+    result = result.model_copy(
         update={"policy": policy_decision, "performance": performance}
     )
+    if result.trace is None:
+        result = _attach_v3_trace(
+            result, expected_voter_count=len(config.analysis_models)
+        )
+    if result.trace is not None:
+        result.trace.extensions = {
+            "policy": result.policy.model_dump(mode="json") if result.policy else None,
+            "performance": (
+                result.performance.model_dump(mode="json")
+                if result.performance
+                else None
+            ),
+            "tooling": result.tooling.model_dump(mode="json", exclude_none=True),
+            "planning_context": result.planning_context,
+        }
+    return result

@@ -144,3 +144,48 @@ class PlanDocument(BaseModel):
     executive_summary: str = Field(min_length=1)
     sections: list[SectionAnswer] = Field(min_length=1)
 
+
+AlignmentRelation = Literal["equivalent", "distinct", "conflict", "uncertain"]
+
+
+class AlignmentJudgment(BaseModel):
+    left_claim_id: str = Field(min_length=1)
+    right_claim_id: str = Field(min_length=1)
+    relation: AlignmentRelation
+    preferred_source_claim_id: str | None = None
+    cannot_link: bool = False
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1)
+
+
+class AlignResult(BaseModel):
+    aligner_model_id: str = Field(min_length=1)
+    judgments: list[AlignmentJudgment] = Field(default_factory=list)
+
+
+class GlobalComposeCandidate(BaseModel):
+    topic_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    classification: ConsensusLabel
+    text: str = Field(min_length=1)
+
+
+class PlanningOutputSpan(BaseModel):
+    span_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    source_candidate_ids: list[str] = Field(default_factory=list)
+    lineage_kind: Literal["candidate", "coordinator_synthesis"]
+    derived_from_candidate_ids: list[str] = Field(default_factory=list)
+
+
+class PlanningOmission(BaseModel):
+    candidate_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class PlanningFinalAnswer(BaseModel):
+    final_answer: str = Field(min_length=1)
+    spans: list[PlanningOutputSpan] = Field(min_length=1)
+    omitted_strong_candidate_reasons: list[PlanningOmission] = Field(
+        default_factory=list
+    )

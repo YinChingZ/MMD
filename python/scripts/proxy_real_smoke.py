@@ -83,7 +83,7 @@ def main() -> None:
     max_run_timeout = _optional_float_env("MMD_SMOKE_MAX_RUN_TIMEOUT")
     max_total_calls = _optional_int_env("MMD_SMOKE_MAX_TOTAL_CALLS")
     max_repair_attempts = _int_env("MMD_SMOKE_MAX_REPAIR_ATTEMPTS", 2)
-    quorum_ratio = _float_env("MMD_SMOKE_QUORUM_RATIO", 0.66)
+    quorum_ratio = _float_env("MMD_SMOKE_QUORUM_RATIO", 2 / 3)
     max_topics = _int_env("MMD_SMOKE_MAX_TOPICS", 3)
     max_completion_tokens = _optional_int_env("MMD_SMOKE_MAX_COMPLETION_TOKENS")
     temperature = _optional_float_env("MMD_SMOKE_TEMPERATURE")
@@ -165,7 +165,10 @@ def main() -> None:
     trace = response.get("mmd")
     if not isinstance(trace, dict):
         raise AssertionError(f"missing mmd trace metadata: {response}")
-    if trace.get("trace_version") != 1 or trace.get("protocol") != "mmd.v1":
+    if (
+        trace.get("trace_version") != "mmd.trace.v3"
+        or trace.get("protocol_version") != "mmd.v3"
+    ):
         raise AssertionError(f"unexpected mmd trace contract: {trace}")
     if trace.get("mode") != mode:
         raise AssertionError(f"unexpected mmd mode in trace: {trace.get('mode')}")
@@ -259,10 +262,17 @@ def _optional_bool_env(name: str) -> bool | None:
 
 
 def _assert_expected_partial(trace: dict, expected_partial: bool) -> None:
-    propose_quorum = (trace.get("quorum") or {}).get("propose")
+    propose_quorum = next(
+        (
+            item
+            for item in trace.get("quorum") or []
+            if item.get("phase") == "propose" and item.get("topic_id") is None
+        ),
+        None,
+    )
     if not isinstance(propose_quorum, dict):
         raise AssertionError(
-            "MMD_SMOKE_EXPECT_PARTIAL requires a trace with top-level propose quorum"
+            "MMD_SMOKE_EXPECT_PARTIAL requires a root propose quorum entry"
         )
     actual_partial = propose_quorum.get("partial")
     if actual_partial is not expected_partial:

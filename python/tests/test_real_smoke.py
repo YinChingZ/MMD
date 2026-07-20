@@ -57,7 +57,7 @@ def test_real_smoke_parses_and_asserts_partial_quorum(monkeypatch):
     monkeypatch.setenv("MMD_SMOKE_EXPECT_PARTIAL", "true")
     assert proxy_real_smoke._optional_bool_env("MMD_SMOKE_EXPECT_PARTIAL") is True
     proxy_real_smoke._assert_expected_partial(
-        {"quorum": {"propose": {"partial": True}}}, True
+        {"quorum": [{"phase": "propose", "partial": True}]}, True
     )
 
 

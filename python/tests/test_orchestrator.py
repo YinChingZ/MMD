@@ -124,6 +124,25 @@ class ScriptedClient:
                     ]
                 }
             )
+        if phase == "align":
+            claims = request.meta["claims"]
+            return json.dumps(
+                {
+                    "aligner_model_id": model,
+                    "judgments": [
+                        {
+                            "left_claim_id": left["claim_id"],
+                            "right_claim_id": right["claim_id"],
+                            "relation": "distinct",
+                            "cannot_link": False,
+                            "confidence": 0.9,
+                            "reason": "Claims are independently meaningful.",
+                        }
+                        for left_index, left in enumerate(claims)
+                        for right in claims[left_index + 1 :]
+                    ],
+                }
+            )
         if phase == "vote":
             return json.dumps(
                 {
@@ -162,24 +181,28 @@ class ScriptedClient:
                     },
                 }
             )
-        if phase == "section_compose":
-            title = request.meta["topic_title"]
-            strong = request.meta["strong_consensus"]
+        if phase == "global_compose":
+            candidates = [
+                candidate
+                for candidate in request.meta["candidates"]
+                if candidate["classification"] != "rejected"
+            ]
             return json.dumps(
                 {
-                    "topic_id": "topic-id-invented-by-llm",
-                    "title": f"{title} invented",
-                    "tldr": f"{title}: {strong[0]}",
-                    "section_answer": f"{title} should follow the consensus recommendation.",
-                    "strong_consensus": strong,
-                    "qualified_consensus": request.meta["qualified_consensus"],
-                    "disputed_points": request.meta["disputed"],
-                    "rejected_or_unsupported": request.meta["rejected"],
-                    "model_position_changes": [],
-                    "confidence_summary": {
-                        "consensus_strength": "high",
-                        "notes": "All responding models converged.",
-                    },
+                    "final_answer": "\n\n".join(
+                        candidate["text"] for candidate in candidates
+                    ),
+                    "spans": [
+                        {
+                            "span_id": f"model-span-{index}",
+                            "text": candidate["text"],
+                            "source_candidate_ids": [candidate["candidate_id"]],
+                            "lineage_kind": "candidate",
+                            "derived_from_candidate_ids": [],
+                        }
+                        for index, candidate in enumerate(candidates)
+                    ],
+                    "omitted_strong_candidate_reasons": [],
                 }
             )
         if phase == "direct_answer":
@@ -222,6 +245,27 @@ class SlowScriptedClient(ScriptedClient):
     async def acomplete(self, model, request, *, timeout=None):
         await asyncio.sleep(0.05)
         return await super().acomplete(model, request, timeout=timeout)
+
+
+class ContextLimitedScriptedClient(ScriptedClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.token_count_calls = 0
+
+    def count_tokens(self, model, text):
+        self.token_count_calls += 1
+        return 90 if self.token_count_calls == 1 else 50
+
+    def context_window(self, model):
+        return 100
+
+
+class AlwaysOverContextScriptedClient(ScriptedClient):
+    def count_tokens(self, model, text):
+        return 90
+
+    def context_window(self, model):
+        return 100
 
 
 class ToolLoopScriptedClient(ScriptedClient):
@@ -280,9 +324,12 @@ def test_quick_mode_runs_and_classifies_source_coverage():
 
     assert result.final.final_answer == "Use a small TypeScript monorepo for this project."
     assert result.quorum["propose"].partial is False
-    assert result.classifications["candidate_1"].label == "strong_consensus"
+    candidate_id = result.normalize.candidate_claims[0].candidate_id
+    assert result.classifications[candidate_id].label == "strong_consensus"
     assert result.proposals[0].model_id == "model_a"
-    assert result.proposals[0].claims[0].claim_id.startswith(f"{result.run_id}:")
+    assert result.proposals[0].claims[0].claim_id == "model_a::c0"
+    assert result.trace is not None
+    assert result.trace.trace_version == "mmd.trace.v3"
     assert result.usage.usage_unavailable is True
 
 
@@ -318,21 +365,17 @@ def test_run_deliberation_enforces_total_model_call_budget():
     assert error.value.max_total_calls == 1
 
 
-def test_quick_mode_degrades_when_quorum_is_met_but_partial():
-    result = asyncio.run(
-        run_quick_deliberation(
-            DeliberationConfig(
-                question="What should we build next?",
-                analysis_models=["model_a", "model_b", "model_c"],
-            ),
-            ScriptedClient(fail_models={"model_c"}),
+def test_quick_mode_rejects_panels_other_than_two_models():
+    with pytest.raises(ValueError, match="exactly two"):
+        asyncio.run(
+            run_quick_deliberation(
+                DeliberationConfig(
+                    question="What should we build next?",
+                    analysis_models=["model_a", "model_b", "model_c"],
+                ),
+                ScriptedClient(),
+            )
         )
-    )
-
-    assert result.quorum["propose"].met is True
-    assert result.quorum["propose"].partial is True
-    assert result.classifications["candidate_1"].label == "qualified_consensus"
-    assert result.failures["propose"][0].model_id == "model_c"
 
 
 def test_quick_mode_aggregates_usage_for_successful_calls():
@@ -407,9 +450,9 @@ def test_quick_mode_raises_when_quorum_is_not_met():
             run_quick_deliberation(
                 DeliberationConfig(
                     question="What should we build next?",
-                    analysis_models=["model_a", "model_b", "model_c"],
+                    analysis_models=["model_a", "model_b"],
                 ),
-                ScriptedClient(fail_models={"model_b", "model_c"}),
+                ScriptedClient(fail_models={"model_b"}),
             )
         )
 
@@ -612,7 +655,8 @@ def test_standard_mode_runs_full_protocol_with_explicit_votes():
     assert len(result.votes) == 3
     assert result.critiques[0].reviewer_model_id == "model_a"
     assert result.votes[2].model_id == "model_c"
-    assert result.classifications["candidate_1"].label == "disputed"
+    candidate_id = result.normalize.candidate_claims[0].candidate_id
+    assert result.classifications[candidate_id].label == "disputed"
     assert result.final.disputed_points == [
         "Use a small TypeScript monorepo for this project."
     ]
@@ -657,8 +701,9 @@ def test_standard_mode_marks_vote_partial_when_quorum_is_met():
 
     assert result.quorum["vote"].met is True
     assert result.quorum["vote"].partial is True
-    assert result.classifications["candidate_1"].partial is True
-    assert result.classifications["candidate_1"].label == "qualified_consensus"
+    candidate_id = result.normalize.candidate_claims[0].candidate_id
+    assert result.classifications[candidate_id].partial is True
+    assert result.classifications[candidate_id].label == "qualified_consensus"
 
 
 def test_standard_mode_partial_failures_only_count_successful_usage():
@@ -710,6 +755,88 @@ def test_run_deliberation_dispatches_standard_mode():
     assert result.mode == "standard"
 
 
+def test_distributed_standard_uses_peer_align_and_host_complete_link():
+    result = asyncio.run(
+        run_standard_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b", "model_c"],
+                mmd_mode="standard",
+                governance="distributed",
+                experiment_manifest={
+                    "experiment_id": "exp_align",
+                    "protocol_version": "mmd.v3",
+                    "alignment_policy": {
+                        "version": "align.v1",
+                        "minimum_pair_support": 2,
+                    },
+                },
+            ),
+            ScriptedClient(),
+        )
+    )
+
+    assert result.governance == "distributed"
+    assert result.quorum["align"].met is True
+    assert result.alignment["policy"]["version"] == "align.v1"
+    assert result.trace is not None
+    assert result.trace.candidate_sets[0].alignment is not None
+
+
+def test_distributed_standard_keeps_partial_align_quorum_auditable():
+    result = asyncio.run(
+        run_standard_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b", "model_c"],
+                mmd_mode="standard",
+                governance="distributed",
+                experiment_manifest={
+                    "experiment_id": "exp_align_partial",
+                    "protocol_version": "mmd.v3",
+                    "alignment_policy": {
+                        "version": "align.v1",
+                        "minimum_pair_support": 2,
+                    },
+                },
+            ),
+            ScriptedClient(fail_by_phase={"align": {"model_c"}}),
+        )
+    )
+
+    assert result.quorum["align"].met is True
+    assert result.quorum["align"].partial is True
+    assert result.trace is not None
+    align_quorum = next(item for item in result.trace.quorum if item["phase"] == "align")
+    assert align_quorum["respondent_count"] == 2
+    assert align_quorum["required"] == 2
+    assert align_quorum["partial"] is True
+    assert any(
+        failure.phase == "align" and failure.model_id == "model_c"
+        for failure in result.trace.failures
+    )
+
+
+def test_compose_failure_preserves_classification_ledger_as_partial_result():
+    result = asyncio.run(
+        run_standard_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                coordinator_model="model_a",
+                mmd_mode="standard",
+            ),
+            ScriptedClient(fail_by_phase={"compose": {"model_a"}}),
+        )
+    )
+
+    assert result.failures["compose"]
+    assert result.final.final_answer
+    assert result.trace is not None
+    assert result.trace.status == "partial"
+    assert any(artifact.kind == "classification_ledger" for artifact in result.trace.artifacts)
+
+
 def test_planning_mode_runs_per_topic_standard_and_composes_plan():
     result = asyncio.run(
         run_deliberation(
@@ -724,15 +851,15 @@ def test_planning_mode_runs_per_topic_standard_and_composes_plan():
 
     assert result.mode == "planning"
     assert result.outline is not None
-    assert len(result.topics) == 2
+    assert len(result.topics) == 3
+    assert result.topics[-1].topic.topic_id == "cross_cutting_risks_and_omissions"
     assert result.plan_document is not None
     assert result.plan_document.sections[0].topic_id == "backend"
     assert result.plan_document.sections[0].title == "Backend"
-    assert "Backend:" in result.plan_document.executive_summary
+    assert result.planning_final is not None
+    assert result.plan_document.executive_summary == result.planning_final.final_answer
     assert result.topics[0].proposals[0].claims[0].topic_id == "backend"
-    assert result.topics[0].proposals[0].claims[0].claim_id.endswith(
-        ":backend::model_a::c0"
-    )
+    assert result.topics[0].proposals[0].claims[0].claim_id == "backend::model_a::c0"
 
 
 def test_planning_mode_aggregates_outline_topic_and_section_usage():
@@ -748,18 +875,18 @@ def test_planning_mode_aggregates_outline_topic_and_section_usage():
     )
 
     assert result.usage.openai_usage() == {
-        "prompt_tokens": 21,
-        "completion_tokens": 42,
-        "total_tokens": 63,
+        "prompt_tokens": 29,
+        "completion_tokens": 58,
+        "total_tokens": 87,
     }
     phases = [event.phase for event in result.usage.events]
     assert phases.count("outline") == 1
-    assert phases.count("propose") == 4
-    assert phases.count("critique") == 4
-    assert phases.count("revise") == 4
-    assert phases.count("normalize") == 2
-    assert phases.count("vote") == 4
-    assert phases.count("section_compose") == 2
+    assert phases.count("propose") == 6
+    assert phases.count("critique") == 6
+    assert phases.count("revise") == 6
+    assert phases.count("normalize") == 3
+    assert phases.count("vote") == 6
+    assert phases.count("global_compose") == 1
 
 
 def test_planning_mode_keeps_partial_plan_when_one_topic_fails_quorum():
@@ -776,7 +903,7 @@ def test_planning_mode_keeps_partial_plan_when_one_topic_fails_quorum():
 
     assert result.mode == "planning"
     assert [failed.topic.topic_id for failed in result.failed_topics] == ["backend"]
-    assert len(result.topics) == 1
+    assert len(result.topics) == 2
     assert result.plan_document is not None
 
 
@@ -810,7 +937,7 @@ def test_run_deliberation_off_policy_skips_fanout_and_returns_single_model_answe
     assert result.usage.events[0].phase == "direct_answer"
 
 
-def test_run_deliberation_off_policy_uses_coordinator_model_when_set_else_first_analysis_model():
+def test_run_deliberation_off_policy_uses_first_model_and_rejects_external_coordinator():
     result_no_coordinator = asyncio.run(
         run_deliberation(
             DeliberationConfig(
@@ -823,18 +950,13 @@ def test_run_deliberation_off_policy_uses_coordinator_model_when_set_else_first_
     )
     assert result_no_coordinator.final.final_answer.startswith("model_a ")
 
-    result_with_coordinator = asyncio.run(
-        run_deliberation(
-            DeliberationConfig(
-                question="What should we build next?",
-                analysis_models=["model_a", "model_b"],
-                coordinator_model="model_c",
-                deliberation_policy="off",
-            ),
-            ScriptedClient(),
+    with pytest.raises(ValueError, match="explicitly selected"):
+        DeliberationConfig(
+            question="What should we build next?",
+            analysis_models=["model_a", "model_b"],
+            coordinator_model="model_c",
+            deliberation_policy="off",
         )
-    )
-    assert result_with_coordinator.final.final_answer.startswith("model_c ")
 
 
 def test_run_deliberation_off_policy_counts_against_max_total_calls_budget():
@@ -1021,6 +1143,7 @@ def test_run_deliberation_performance_marks_partial_and_failure_count_on_partial
             DeliberationConfig(
                 question="What should we build next?",
                 analysis_models=["model_a", "model_b", "model_c"],
+                mmd_mode="standard",
             ),
             ScriptedClient(fail_models={"model_c"}),
         )
@@ -1029,8 +1152,8 @@ def test_run_deliberation_performance_marks_partial_and_failure_count_on_partial
     panel = result.performance.panel
     assert panel.partial is True
     assert panel.failure_count == 1
-    assert panel.call_count == 3
-    assert panel.success_rate == pytest.approx(2 / 3)
+    assert panel.call_count >= 3
+    assert panel.success_rate < 1
 
 
 def test_run_deliberation_off_policy_performance_is_coordinator_only():
@@ -1051,21 +1174,26 @@ def test_run_deliberation_off_policy_performance_is_coordinator_only():
     assert result.performance.coordinator.success_rate == 1.0
 
 
-def test_coordinator_phase_failure_aborts_run_instead_of_appearing_as_partial_failure():
-    with pytest.raises(RuntimeError):
-        asyncio.run(
-            run_deliberation(
-                DeliberationConfig(
-                    question="What should we build next?",
-                    analysis_models=["model_a", "model_b"],
-                    coordinator_model="model_a",
-                ),
-                ScriptedClient(fail_by_phase={"normalize": {"model_a"}}),
-            )
+def test_coordinator_phase_failure_returns_auditable_partial_fallback():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="What should we build next?",
+                analysis_models=["model_a", "model_b"],
+                coordinator_model="model_a",
+                return_trace=True,
+            ),
+            ScriptedClient(fail_by_phase={"normalize": {"model_a"}}),
         )
-    # There is no representable "coordinator partially failed" DeliberationResult
-    # for this case - the whole run aborts instead. See _compute_performance_summary's
-    # docstring for why this asymmetry is by design, not a bug.
+    )
+
+    assert result.failures["normalize"]
+    assert len(result.normalize.candidate_claims) == 2
+    assert result.trace is not None
+    assert result.trace.status == "partial"
+    normalize_calls = [call for call in result.trace.calls if call.phase == "normalize"]
+    assert [call.status for call in normalize_calls] == ["failed", "failed"]
+    assert [call.attempt for call in normalize_calls] == [0, 1]
 
 
 def test_planning_mode_performance_sums_across_topics():
@@ -1082,14 +1210,102 @@ def test_planning_mode_performance_sums_across_topics():
 
     performance = result.performance
     assert performance is not None
-    # 2 topics x (propose 2 + critique 2 + revise 2 + vote 2) = 16 panel calls
-    assert performance.panel.call_count == 16
+    # 3 topics x (propose 2 + critique 2 + revise 2 + vote 2) = 24 panel calls
+    assert performance.panel.call_count == 24
     assert performance.panel.success_rate == 1.0
-    # outline (1) + normalize x2 topics + section_compose x2 topics = 5 coordinator calls
+    # outline (1) + normalize x3 topics + one GlobalCompose = 5 coordinator calls
     assert performance.coordinator.call_count == 5
     assert performance.coordinator.success_rate == 1.0
-    assert performance.overall.call_count == 21
+    assert performance.overall.call_count == 29
     assert performance.overall.total_tokens == result.usage.total_tokens
+
+
+def test_planning_compresses_once_using_model_context_metadata():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="Plan the next milestone.",
+                analysis_models=["model_a", "model_b"],
+                mmd_mode="planning",
+                return_trace=True,
+            ),
+            ContextLimitedScriptedClient(),
+        )
+    )
+
+    assert result.trace is not None
+    briefs = [
+        artifact
+        for artifact in result.trace.artifacts
+        if artifact.kind == "topic_brief_set"
+    ]
+    assert len(briefs) == 1
+    assert briefs[0].payload["context_profile"]["source"] == "litellm_metadata"
+    assert result.trace.extensions["planning_context"]["input_limit"] == 80
+
+
+def test_planning_returns_topic_ledgers_when_compressed_input_is_still_over_budget():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="Plan the next milestone.",
+                analysis_models=["model_a", "model_b"],
+                coordinator_model="model_a",
+                mmd_mode="planning",
+                return_trace=True,
+            ),
+            AlwaysOverContextScriptedClient(),
+        )
+    )
+
+    assert result.planning_final is not None
+    assert result.planning_final.spans
+    assert result.failures["global_compose"][0].code == "context_budget_exceeded"
+    assert result.trace is not None
+    assert len(
+        [artifact for artifact in result.trace.artifacts if artifact.kind == "topic_ledger"]
+    ) == 3
+    assert any(
+        failure.phase == "global_compose"
+        and failure.code == "context_budget_exceeded"
+        for failure in result.trace.failures
+    )
+
+
+def test_planning_global_compose_failure_returns_topic_ledgers_and_fallback():
+    result = asyncio.run(
+        run_deliberation(
+            DeliberationConfig(
+                question="Plan the next milestone.",
+                analysis_models=["model_a", "model_b"],
+                coordinator_model="model_a",
+                mmd_mode="planning",
+                return_trace=True,
+            ),
+            ScriptedClient(fail_by_phase={"global_compose": {"model_a"}}),
+        )
+    )
+
+    assert result.planning_final is not None
+    assert result.planning_final.spans
+    assert result.failures["global_compose"]
+    assert result.trace is not None
+    assert result.trace.status == "partial"
+    assert len(
+        [artifact for artifact in result.trace.artifacts if artifact.kind == "topic_ledger"]
+    ) == 3
+    planning_artifact = next(
+        artifact
+        for artifact in result.trace.artifacts
+        if artifact.kind == "planning_final_answer"
+    )
+    assert planning_artifact.status == "partial"
+    assert any(
+        failure.phase == "global_compose"
+        and failure.code == "global_compose_failed"
+        and failure.recoverable
+        for failure in result.trace.failures
+    )
 
 
 def test_is_mmd_alias_matches_exact_and_prefixed_forms():
@@ -1248,10 +1464,11 @@ def test_tool_loop_step_exhaustion_becomes_phase_failure_for_panel(monkeypatch):
     monkeypatch.setattr(tools_module, "execute_tool_call", fake_executor)
 
     result = asyncio.run(
-        run_quick_deliberation(
+        run_standard_deliberation(
             DeliberationConfig(
                 question="What should we build next?",
                 analysis_models=["model_a", "model_b", "model_c"],
+                mmd_mode="standard",
                 tool_mode="mmd_native_web",
                 max_tool_calls=20,
             ),

@@ -163,9 +163,9 @@ def test_astreaming_supports_deliberation_policy_off_end_to_end():
     terminal = chunks[-1]
     assert terminal["is_finished"] is True
     mmd = terminal["provider_specific_fields"]["mmd"]
-    assert mmd["policy"]["policy"] == "off"
-    assert mmd["policy"]["deliberated"] is False
-    assert mmd["proposals"] == []
+    assert mmd["extensions"]["policy"]["policy"] == "off"
+    assert mmd["extensions"]["policy"]["deliberated"] is False
+    assert mmd["candidate_sets"] == []
 
 
 def test_astreaming_maps_bad_request_error_before_first_chunk():
@@ -226,9 +226,10 @@ def test_astreaming_maps_quorum_not_met_error():
             provider.astreaming(
                 model="mmd/fusion",
                 messages=[{"role": "user", "content": "What should we build next?"}],
-                optional_params={
-                    "analysis_models": ["model_a", "model_b", "model_c"],
-                },
+                    optional_params={
+                        "analysis_models": ["model_a", "model_b", "model_c"],
+                        "mmd_mode": "standard",
+                    },
             )
         )
 

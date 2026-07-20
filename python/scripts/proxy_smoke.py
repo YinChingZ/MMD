@@ -64,7 +64,10 @@ def main() -> None:
     trace = response.get("mmd")
     if not isinstance(trace, dict):
         raise AssertionError(f"missing mmd trace metadata: {response}")
-    if trace.get("trace_version") != 1 or trace.get("protocol") != "mmd.v1":
+    if (
+        trace.get("trace_version") != "mmd.trace.v3"
+        or trace.get("protocol_version") != "mmd.v3"
+    ):
         raise AssertionError(f"unexpected mmd trace contract: {trace}")
     if trace.get("mode") != "standard":
         raise AssertionError(f"unexpected mmd mode in trace: {trace.get('mode')}")

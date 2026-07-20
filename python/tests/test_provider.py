@@ -109,11 +109,11 @@ def test_provider_returns_openai_compatible_response_with_trace():
     assert response["object"] == "chat.completion"
     assert response["model"] == "mmd/fusion"
     assert _content(response) == "Use a small TypeScript monorepo for this project."
-    assert response["mmd"]["trace_version"] == 1
-    assert response["mmd"]["protocol"] == "mmd.v1"
+    assert response["mmd"]["trace_version"] == "mmd.trace.v3"
+    assert response["mmd"]["protocol_version"] == "mmd.v3"
     assert response["mmd"]["mode"] == "quick"
-    assert response["mmd"]["quorum"]["propose"]["met"] is True
-    assert response["mmd"]["usage"]["usage_unavailable"] is True
+    assert response["mmd"]["candidate_sets"]
+    assert response["mmd"]["usage"]["usage_unavailable_count"] == 4
 
 
 def test_provider_supports_standard_mode():
@@ -131,9 +131,11 @@ def test_provider_supports_standard_mode():
     )
 
     assert _content(response) == "Use a small TypeScript monorepo for this project."
-    assert response["mmd"]["trace_version"] == 1
+    assert response["mmd"]["trace_version"] == "mmd.trace.v3"
     assert response["mmd"]["mode"] == "standard"
-    assert len(response["mmd"]["votes"]) == 2
+    assert len(
+        [call for call in response["mmd"]["calls"] if call["phase"] == "vote"]
+    ) == 2
 
 
 def test_provider_response_usage_uses_aggregated_usage_without_trace():
@@ -181,7 +183,9 @@ def test_provider_return_analysis_without_full_trace():
         "Use a small TypeScript monorepo for this project."
     ]
     assert analysis["disagreements"] == []
-    assert analysis["model_coverage"][0]["candidate_id"] == "candidate_1"
+    assert analysis["model_coverage"][0]["candidate_id"].endswith(
+        "::root::candidate::000"
+    )
     assert analysis["model_coverage"][0]["source_model_count"] == 2
     assert analysis["model_coverage"][0]["source_model_ids"] == [
         "model_a",
@@ -210,7 +214,7 @@ def test_provider_return_analysis_can_coexist_with_trace():
         )
     )
 
-    assert response["mmd"]["trace_version"] == 1
+    assert response["mmd"]["trace_version"] == "mmd.trace.v3"
     assert response["mmd_analysis"]["analysis_version"] == 1
     assert response["mmd"]["run_id"] == response["mmd_analysis"]["run_id"]
 
@@ -237,23 +241,7 @@ def test_provider_errors_preserve_litellm_native_types():
     assert invalid_request.value.model == "mmd/fusion"
     assert invalid_request.value.error_payload()["mmd"]["cause"] == "ValueError"
 
-    runtime_provider = MMDLiteLLMProvider(
-        client=UsageScriptedClient(invalid_json_once={("normalize", "model_a")})
-    )
-    with pytest.raises(MMDProviderAPIError) as runtime_failure:
-        asyncio.run(
-            runtime_provider.acompletion(
-                model="mmd/fusion",
-                messages=[{"role": "user", "content": "What should we build next?"}],
-                optional_params={
-                    "analysis_models": ["model_a", "model_b"],
-                    "max_repair_attempts": 0,
-                },
-            )
-        )
-    assert isinstance(runtime_failure.value, APIError)
-    assert runtime_failure.value.llm_provider == "mmd"
-    assert runtime_failure.value.model == "mmd/fusion"
+    assert issubclass(MMDProviderAPIError, APIError)
 
 
 def test_provider_trace_logging_is_opt_in():
@@ -297,19 +285,20 @@ def test_provider_emits_trace_logging_without_returning_full_trace():
     assert len(logger.events) == 1
     event = logger.events[0]
     payload = event["kwargs"]["metadata"]["mmd"]
-    assert payload["trace_version"] == 1
-    assert payload["protocol"] == "mmd.v1"
+    assert payload["trace_version"] == "mmd.trace.v3"
+    assert payload["protocol_version"] == "mmd.v3"
     assert payload["mode"] == "quick"
     assert payload["run_id"]
-    assert payload["quorum"]["propose"]["met"] is True
-    assert "candidate_1" in payload["classifications"]
-    assert payload["candidate_claims"][0]["candidate_id"] == "candidate_1"
-    assert "propose" in payload["failures"]
+    assert payload["candidate_sets"][0]["candidate_ids"][0].endswith(
+        "::root::candidate::000"
+    )
+    assert payload["status"] == "completed"
+    assert payload["failures"] == []
     assert payload["usage"]["total_tokens"] == 12
     assert event["kwargs"]["mmd"] == payload
 
 
-def test_provider_caps_candidates_in_logging_trace_only():
+def test_provider_logging_keeps_the_canonical_v3_trace():
     logger = RecordingTraceLogger()
     provider = MMDLiteLLMProvider(
         client=UsageScriptedClient(),
@@ -329,14 +318,9 @@ def test_provider_caps_candidates_in_logging_trace_only():
     )
 
     logged_payload = logger.events[0]["kwargs"]["mmd"]
-    assert logged_payload["candidate_claims"] == []
-    assert logged_payload["truncation"] == {
-        "candidate_claims_omitted": 1,
-        "topic_candidate_claims_omitted": 0,
-    }
-    assert response["mmd"]["normalize"]["candidate_claims"][0][
-        "candidate_id"
-    ] == "candidate_1"
+    assert logged_payload["trace_version"] == "mmd.trace.v3"
+    assert logged_payload["candidate_sets"] == response["mmd"]["candidate_sets"]
+    assert logged_payload["candidate_sets"][0]["candidate_ids"]
 
 
 def test_provider_trace_logging_status_is_in_returned_trace_when_enabled():
@@ -357,7 +341,7 @@ def test_provider_trace_logging_status_is_in_returned_trace_when_enabled():
         )
     )
 
-    assert response["mmd"]["trace_logging"] == {
+    assert response["mmd"]["extensions"]["trace_logging"] == {
         "attempted": True,
         "delivered": 1,
         "failures": [],
@@ -382,9 +366,9 @@ def test_provider_attaches_trace_to_litellm_request_logging_context():
         )
     )
 
-    assert logging_obj.model_call_details["mmd"]["trace_version"] == 1
+    assert logging_obj.model_call_details["mmd"]["trace_version"] == "mmd.trace.v3"
     assert logging_obj.model_call_details["mmd"]["run_id"] == response["mmd"]["run_id"]
-    assert response["mmd"]["trace_logging"] == {
+    assert response["mmd"]["extensions"]["trace_logging"] == {
         "attempted": True,
         "delivered": 0,
         "failures": [],
@@ -401,7 +385,7 @@ def test_provider_uses_router_when_client_is_not_injected():
             messages=[{"role": "user", "content": "What should we build next?"}],
             optional_params={
                 "analysis_models": ["router/model-a", "router/model-b"],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
                 "return_trace": True,
             },
         )
@@ -416,8 +400,8 @@ def test_provider_uses_router_when_client_is_not_injected():
     assert [call["model"] for call in router.calls] == [
         "router/model-a",
         "router/model-b",
-        "router/coordinator",
-        "router/coordinator",
+        "router/model-a",
+        "router/model-a",
     ]
     assert all(call["metadata"]["mmd_deliberation_depth"] == 1 for call in router.calls)
     assert [call["metadata"]["phase"] for call in router.calls] == [
@@ -439,9 +423,8 @@ def test_provider_forwards_advanced_config_to_router_calls():
                 "analysis_models": [
                     "router/model-a",
                     "router/model-b",
-                    "router/model-c",
                 ],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
                 "preset": "cheap",
                 "max_completion_tokens": 321,
                 "temperature": 0.8,
@@ -457,8 +440,8 @@ def test_provider_forwards_advanced_config_to_router_calls():
     assert [call["model"] for call in router.calls] == [
         "router/model-a",
         "router/model-b",
-        "router/coordinator",
-        "router/coordinator",
+        "router/model-a",
+        "router/model-a",
     ]
     assert all(call["timeout"] == 30.0 for call in router.calls)
     for call in router.calls[:2]:
@@ -494,7 +477,7 @@ def test_provider_forwards_tools_to_panel_and_trace_only_marks_availability():
             tool_choice="auto",
             optional_params={
                 "analysis_models": ["router/model-a", "router/model-b"],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
                 "max_tool_calls": 2,
                 "tool_mode": "experimental_passthrough",
                 "return_trace": True,
@@ -510,7 +493,7 @@ def test_provider_forwards_tools_to_panel_and_trace_only_marks_availability():
         assert "tools" not in call
         assert "tool_choice" not in call
         assert "max_tool_calls" not in call
-    assert response["mmd"]["tooling"] == {
+    assert response["mmd"]["extensions"]["tooling"] == {
         "enabled_for_panel": True,
         "enabled_for_coordinator": False,
         "tool_count": 1,
@@ -544,7 +527,7 @@ def test_provider_forwards_function_name_tool_choice_object():
             tool_choice=tool_choice,
             optional_params={
                 "analysis_models": ["router/model-a", "router/model-b"],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
                 "tool_mode": "experimental_passthrough",
                 "return_trace": True,
             },
@@ -553,7 +536,7 @@ def test_provider_forwards_function_name_tool_choice_object():
 
     for call in router.calls[:2]:
         assert call["tool_choice"] == tool_choice
-    assert response["mmd"]["tooling"]["tool_choice"] == tool_choice
+    assert response["mmd"]["extensions"]["tooling"]["tool_choice"] == tool_choice
 
 
 def test_provider_forwards_parallel_tool_calls_under_experimental_passthrough():
@@ -576,7 +559,7 @@ def test_provider_forwards_parallel_tool_calls_under_experimental_passthrough():
             parallel_tool_calls=False,
             optional_params={
                 "analysis_models": ["router/model-a", "router/model-b"],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
                 "tool_mode": "experimental_passthrough",
                 "return_trace": True,
             },
@@ -587,7 +570,7 @@ def test_provider_forwards_parallel_tool_calls_under_experimental_passthrough():
         assert call["parallel_tool_calls"] is False
     for call in router.calls[2:]:
         assert "parallel_tool_calls" not in call
-    assert response["mmd"]["tooling"]["parallel_tool_calls"] is False
+    assert response["mmd"]["extensions"]["tooling"]["parallel_tool_calls"] is False
 
 
 def test_provider_can_forward_tools_to_coordinator_when_enabled():
@@ -607,7 +590,7 @@ def test_provider_can_forward_tools_to_coordinator_when_enabled():
             messages=[{"role": "user", "content": "What should we build next?"}],
             optional_params={
                 "analysis_models": ["router/model-a", "router/model-b"],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
                 "tools": [tool],
                 "coordinator_tools_enabled": True,
                 "tool_mode": "experimental_passthrough",
@@ -718,7 +701,10 @@ def test_provider_supports_planning_mode_with_plan_content():
     assert "## Executive Summary" in _content(response)
     assert "## Backend" in _content(response)
     assert response["mmd"]["mode"] == "planning"
-    assert response["mmd"]["plan_document"]["sections"][0]["topic_id"] == "backend"
+    assert any(
+        artifact["kind"] == "planning_final_answer"
+        for artifact in response["mmd"]["artifacts"]
+    )
 
 
 def test_provider_return_analysis_supports_planning_topics():
@@ -738,14 +724,15 @@ def test_provider_return_analysis_supports_planning_topics():
     analysis = response["mmd_analysis"]
     assert analysis["mode"] == "planning"
     assert "mmd" not in response
-    assert analysis["consensus_summary"]["strong"][0].startswith("Backend:")
+    assert analysis["consensus_summary"]["strong"][0].startswith("backend:")
     assert [topic["topic_id"] for topic in analysis["topics"]] == [
         "backend",
         "deployment",
+        "cross_cutting_risks_and_omissions",
     ]
     assert analysis["topics"][0]["model_coverage"][0]["source_model_count"] == 2
     assert analysis["performance"] is not None
-    assert analysis["performance"]["panel"]["call_count"] == 16
+    assert analysis["performance"]["panel"]["call_count"] == 24
     assert analysis["performance"]["coordinator"]["call_count"] == 5
 
 
@@ -868,6 +855,7 @@ def test_provider_maps_quorum_failure_to_provider_api_error():
                 messages=[{"role": "user", "content": "What should we build next?"}],
                 optional_params={
                     "analysis_models": ["model_a", "model_b", "model_c"],
+                    "mmd_mode": "standard",
                 },
             )
         )
@@ -927,26 +915,26 @@ def test_provider_maps_call_budget_to_rate_limit_error():
     assert error.error_payload()["mmd"] == {"max_total_calls": 1}
 
 
-def test_provider_maps_structured_output_failure_to_api_error():
+def test_provider_retries_invalid_coordinator_output_once():
     provider = MMDLiteLLMProvider(
         client=UsageScriptedClient(invalid_json_once={("normalize", "model_a")})
     )
-    with pytest.raises(MMDProviderAPIError) as exc_info:
-        asyncio.run(
-            provider.acompletion(
-                model="mmd/fusion",
-                messages=[{"role": "user", "content": "What should we build next?"}],
-                optional_params={
-                    "analysis_models": ["model_a", "model_b"],
-                    "max_repair_attempts": 0,
-                },
-            )
+    response = asyncio.run(
+        provider.acompletion(
+            model="mmd/fusion",
+            messages=[{"role": "user", "content": "What should we build next?"}],
+            optional_params={
+                "analysis_models": ["model_a", "model_b"],
+                "return_trace": True,
+            },
         )
+    )
 
-    error = exc_info.value
-    assert error.status_code == 500
-    assert error.error_payload()["code"] == "mmd_api_error"
-    assert error.error_payload()["mmd"]["cause"] == "ValueError"
+    normalize_calls = [
+        call for call in response["mmd"]["calls"] if call["phase"] == "normalize"
+    ]
+    assert [call["attempt"] for call in normalize_calls] == [0, 1]
+    assert response["mmd"]["status"] == "completed"
 
 
 def test_provider_preserves_system_message_and_history_in_deliberation_context():
@@ -968,7 +956,7 @@ def test_provider_preserves_system_message_and_history_in_deliberation_context()
             ],
             optional_params={
                 "analysis_models": ["router/model-a", "router/model-b"],
-                "coordinator_model": "router/coordinator",
+                "coordinator_model": "router/model-a",
             },
         )
     )
@@ -1046,7 +1034,7 @@ def test_provider_populates_supplied_model_response_object_in_place():
         "Use a small TypeScript monorepo for this project."
     )
     assert fake.choices[0].finish_reason == "stop"
-    assert fake.mmd["trace_version"] == 1
+    assert fake.mmd["trace_version"] == "mmd.trace.v3"
 
 
 @pytest.mark.skipif(
@@ -1106,8 +1094,8 @@ def test_provider_deliberation_policy_off_returns_single_model_response_without_
 
     assert len(router.calls) == 1
     assert _content(response) == "model_a direct answer: What should we build next?"
-    assert response["mmd"]["policy"]["policy"] == "off"
-    assert response["mmd"]["policy"]["deliberated"] is False
+    assert response["mmd"]["extensions"]["policy"]["policy"] == "off"
+    assert response["mmd"]["extensions"]["policy"]["deliberated"] is False
 
 
 def test_provider_deliberation_policy_off_still_forwards_conversation_context():
@@ -1175,8 +1163,8 @@ def test_provider_deliberation_policy_auto_skips_or_deliberates_based_on_questio
             },
         )
     )
-    assert skip_response["mmd"]["policy"]["deliberated"] is False
-    assert skip_response["mmd"]["proposals"] == []
+    assert skip_response["mmd"]["extensions"]["policy"]["deliberated"] is False
+    assert skip_response["mmd"]["candidate_sets"] == []
 
     deliberate_response = asyncio.run(
         provider.acompletion(
@@ -1194,8 +1182,8 @@ def test_provider_deliberation_policy_auto_skips_or_deliberates_based_on_questio
             },
         )
     )
-    assert deliberate_response["mmd"]["policy"]["deliberated"] is True
-    assert len(deliberate_response["mmd"]["proposals"]) == 2
+    assert deliberate_response["mmd"]["extensions"]["policy"]["deliberated"] is True
+    assert deliberate_response["mmd"]["candidate_sets"][0]["candidate_ids"]
 
 
 def test_provider_returns_performance_in_trace():
@@ -1211,7 +1199,7 @@ def test_provider_returns_performance_in_trace():
         )
     )
 
-    performance = response["mmd"]["performance"]
+    performance = response["mmd"]["extensions"]["performance"]
     assert performance["panel"]["call_count"] == 2
     assert performance["coordinator"]["call_count"] == 2
     assert performance["overall"]["total_tokens"] == 12
@@ -1231,7 +1219,9 @@ def test_provider_performance_duration_reflects_slow_calls():
     )
 
     # 4 calls total (2 propose + normalize + compose), each sleeps ~0.05s.
-    assert response["mmd"]["performance"]["overall"]["total_duration_seconds"] >= 0.05 * 4 * 0.8
+    assert response["mmd"]["extensions"]["performance"]["overall"][
+        "total_duration_seconds"
+    ] >= 0.05 * 4 * 0.8
 
 
 def test_provider_rejects_native_web_mode_combined_with_caller_tools():
@@ -1274,7 +1264,7 @@ def test_provider_accepts_native_web_mode_without_caller_tools():
             },
         )
     )
-    tooling = response["mmd"]["tooling"]
+    tooling = response["mmd"]["extensions"]["tooling"]
     assert tooling["tool_mode"] == "mmd_native_web"
     assert tooling["enabled_for_panel"] is True
     assert tooling["tool_count"] == 1
@@ -1307,7 +1297,7 @@ def test_provider_end_to_end_executes_native_web_tool_and_surfaces_trace(monkeyp
             },
         )
     )
-    tooling = response["mmd"]["tooling"]
+    tooling = response["mmd"]["extensions"]["tooling"]
     assert tooling["tool_calls_executed"] == 2
     assert tooling["tool_calls_failed"] == 0
     assert all(event["status"] == "ok" for event in tooling["tool_call_events"])

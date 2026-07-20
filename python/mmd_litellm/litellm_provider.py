@@ -190,6 +190,8 @@ class MMDLiteLLMProvider(CustomLLM):
             "coordinator_model",
             "preset",
             "mmd_mode",
+            "governance",
+            "experiment_manifest",
             "deliberation_policy",
             "quorum_ratio",
             "per_model_timeout",
@@ -266,7 +268,7 @@ class MMDLiteLLMProvider(CustomLLM):
             logging_obj=logging_obj,
         )
         if metadata is not None and trace_logging["attempted"]:
-            metadata["trace_logging"] = trace_logging
+            metadata.setdefault("extensions", {})["trace_logging"] = trace_logging
         return response
 
 
@@ -350,21 +352,42 @@ def _build_config(
             )
 
         conversation = extract_conversation(messages or [])
+        mode = optional_params.get("mmd_mode", "quick")
+        explicit_models = optional_params.get("analysis_models") or []
+        analysis_models = _resolve_analysis_models(
+            explicit_models=explicit_models,
+            client=client,
+            public_model=public_model,
+        )
+        coordinator_model = optional_params.get("coordinator_model")
+        if mode == "quick" and not explicit_models and analysis_models:
+            coordinator = (
+                coordinator_model
+                if coordinator_model in analysis_models
+                else analysis_models[0]
+            )
+            peer = next(
+                (model for model in analysis_models if model != coordinator), None
+            )
+            if peer is None:
+                raise ValueError(
+                    "quick mode could not discover two distinct default models"
+                )
+            analysis_models = [coordinator, peer]
+            coordinator_model = coordinator
         return DeliberationConfig(
             question=conversation.question,
             conversation_context=conversation.rendered_context_block(),
-            analysis_models=_resolve_analysis_models(
-                explicit_models=optional_params.get("analysis_models") or [],
-                client=client,
-                public_model=public_model,
-            ),
-            coordinator_model=optional_params.get("coordinator_model"),
+            analysis_models=analysis_models,
+            coordinator_model=coordinator_model,
             preset=optional_params.get("preset"),
-            mmd_mode=optional_params.get("mmd_mode", "quick"),
+            mmd_mode=mode,
+            governance=optional_params.get("governance", "centralized"),
+            experiment_manifest=optional_params.get("experiment_manifest"),
             deliberation_policy=optional_params.get(
                 "deliberation_policy", "required"
             ),
-            quorum_ratio=optional_params.get("quorum_ratio", 0.66),
+            quorum_ratio=optional_params.get("quorum_ratio", 2 / 3),
             per_model_timeout=optional_params.get("per_model_timeout"),
             max_run_timeout=optional_params.get("max_run_timeout"),
             max_total_calls=optional_params.get("max_total_calls"),
