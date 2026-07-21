@@ -47,6 +47,7 @@ describe("buildRetrySnapshot", () => {
     const snapshot = buildRetrySnapshot({
       question: "q",
       mode: "standard",
+      governance: "distributed",
       modelIds: ["m1"],
       costLimitUsd: 5,
       outputSchemaText: "",
@@ -55,12 +56,14 @@ describe("buildRetrySnapshot", () => {
     });
     expect(snapshot.byokEntries).toEqual([savedKeyEntry]);
     expect(snapshot.droppedByokLabels).toEqual(["raw-model"]);
+    expect(snapshot.governance).toBe("distributed");
   });
 
   it("never includes plaintext apiKey in the snapshot", () => {
     const snapshot = buildRetrySnapshot({
       question: "q",
       mode: "quick",
+      governance: "distributed",
       modelIds: [],
       costLimitUsd: 5,
       outputSchemaText: "",
@@ -68,6 +71,7 @@ describe("buildRetrySnapshot", () => {
       byokEntries: [rawKeyEntry],
     });
     expect(JSON.stringify(snapshot)).not.toContain("sk-secret");
+    expect(snapshot.governance).toBe("centralized");
   });
 });
 
@@ -80,6 +84,7 @@ describe("save/consumeRetrySnapshot", () => {
     const snapshot = buildRetrySnapshot({
       question: "q",
       mode: "standard",
+      governance: "centralized",
       modelIds: ["m1"],
       costLimitUsd: 5,
       outputSchemaText: "",

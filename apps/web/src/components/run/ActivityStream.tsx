@@ -60,12 +60,14 @@ export function ActivityStream({
   phaseOrder,
   selectedPhase,
   onSelectPhase,
+  phaseLabelFor = (phase) => messages.run.phases[phase] ?? phase,
 }: {
   itemProgress: Partial<Record<Phase, PhaseItemProgress>>;
   phases: Partial<Record<Phase, PhaseStatus>>;
   phaseOrder: Phase[];
   selectedPhase?: Phase;
   onSelectPhase?: (phase: Phase) => void;
+  phaseLabelFor?: (phase: Phase) => string;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   // 未受外部（RunPageClient）控制时（如 planning 模式每个主题卡片各自独立），
@@ -127,7 +129,7 @@ export function ActivityStream({
                 : "text-ink-faint hover:bg-surface-hover hover:text-ink",
             )}
           >
-            {messages.run.phases[phase] ?? phase}
+            {phaseLabelFor(phase)}
             {phases[phase] === "in_progress" && (
               <span
                 aria-hidden
@@ -145,7 +147,7 @@ export function ActivityStream({
           >
             <div className="mb-1.5 flex items-center gap-2">
               <ModelChip modelId={entry.modelId} showName />
-              <Badge tone="accent">{messages.run.phases[active] ?? active}</Badge>
+              <Badge tone="accent">{phaseLabelFor(active)}</Badge>
             </div>
             <ul className="ml-4 list-disc text-xs leading-relaxed text-ink-muted">
               {renderItems(entry.arrayField, entry.items)}

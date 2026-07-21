@@ -24,15 +24,14 @@ const models = [
 async function waitUntilTerminal(db: Kysely<Database>, runId: string): Promise<void> {
   for (let i = 0; i < 200; i++) {
     const row = await db
-      .selectFrom("run_events")
-      .select("type")
-      .where("run_id", "=", runId)
-      .where((eb) => eb.or([eb("type", "=", "run_completed"), eb("type", "=", "run_failed")]))
+      .selectFrom("runs")
+      .select("status")
+      .where("id", "=", runId)
       .executeTakeFirst();
-    if (row) return;
+    if (row && row.status !== "running") return;
     await new Promise((r) => setTimeout(r, 20));
   }
-  throw new Error(`run ${runId} never reached a terminal event within the timeout`);
+  throw new Error(`run ${runId} never reached a terminal status within the timeout`);
 }
 
 describeIfDb("RunService — M6.4 ephemeral token events (integration, requires DATABASE_URL)", () => {

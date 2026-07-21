@@ -96,8 +96,23 @@ export const messages = {
   modes: {
     label: "模式",
     standard: { name: "标准", hint: "完整六阶段审议，质量最佳" },
-    quick: { name: "快速", hint: "更快、审议较少" },
-    planning: { name: "规划", hint: "按主题拆分并行协商，输出分节文档" },
+    quick: { name: "快速", hint: "低延迟双模型，由协调器归一并合成" },
+    planning: { name: "规划", hint: "按主题协商，再跨主题融合为单一答案" },
+  },
+
+  governance: {
+    label: "标准模式治理",
+    centralized: {
+      name: "Centralized / Classic",
+      shortName: "Classic",
+      hint: "由协调器归一候选并整理最终答案，兼容默认路径。",
+    },
+    distributed: {
+      name: "Peer-governed",
+      shortName: "Peer-governed",
+      hint: "由同伴对齐形成候选台账；权威结果是投票与确定性分类。",
+    },
+    experimental: "实验性",
   },
 
   models: {
@@ -146,10 +161,19 @@ export const messages = {
       compose: "合成",
       outline: "拆题",
     } as Record<string, string>,
+    peerAlign: "同伴对齐与聚类",
     phaseResponded: (done: number, total: number) => `${done}/${total} 已响应`,
     liveActivity: "实时产物",
     composing: "正在合成最终答案",
     topicsTitle: "并行主题",
+    globalCompose: "跨主题融合",
+    globalComposeHint: "协调器读取全部主题台账，生成唯一的融合答案。",
+    phaseStatus: {
+      pending: "等待中",
+      in_progress: "进行中",
+      done: "已完成",
+      failed: "失败",
+    },
     failedAtPhase: (phase: string) => `在「${phase}」阶段失败`,
     failedGeneric: "本次协商未能完成",
     viewRun: "查看协商记录",
@@ -190,6 +214,48 @@ export const messages = {
     transcriptCopied: "协商过程已复制",
     copyPlan: "复制报告",
     planCopied: "报告已复制",
+    partial: "部分响应",
+    classificationBasis: "分类依据",
+    classificationBasisUnavailable: "分类依据未随结果返回",
+    classificationSummary: (ratio: number, actual: number, expected: number) =>
+      `支持率 ${ratio}% · ${actual}/${expected} 份 ballot`,
+    sourceClaimCount: (count: number) => `${count} 条源主张`,
+    ballotCount: (actual: number, expected: number) =>
+      `${actual}/${expected} 份 ballot`,
+    authoritativeLedger: "权威决策台账",
+    authoritative: "权威",
+    authoritativeLedgerHint:
+      "候选血缘、同伴投票和确定性分类构成本次结果的权威依据；争议不会被展示性文字覆盖。",
+    partialQuorum: "本次结果基于部分 quorum",
+    quorumRequired: (required: number) => `至少需要 ${required} 份响应`,
+    nonAuthoritativeProse: "协调器整理",
+    nonAuthoritativeProseHint:
+      "这段自然语言仅用于阅读体验，不是同伴治理的权威决策，也不会改变上方台账。",
+    deterministicFallback: "确定性回退摘要",
+    deterministicFallbackHint:
+      "协调器整理失败；此摘要由确定性规则从权威分类台账生成。",
+    integratedPlanningAnswer: "融合规划答案",
+    integratedPlanningAnswerHint:
+      "这是一次 GlobalCompose 基于全部主题台账生成的唯一权威规划答案。",
+    globalComposeFallback: "GlobalCompose 未正常完成；所有主题台账已保留，并显示结构化回退答案。",
+    globalComposeFallbackHint:
+      "GlobalCompose 已降级；以下答案来自保留 candidate lineage 的结构化回退。",
+    planningTrace: "证据与跨主题 Trace",
+    planningTraceHint: (topics: number, spans: number) =>
+      `${topics} 个主题 · ${spans} 个可追溯输出 span`,
+    outputLineage: "输出血缘",
+    coordinatorSynthesis: "协调器跨主题推导",
+    panelConsensus: "Panel 共识依据",
+    sources: "来源",
+    lineageUnavailable: "来源信息不可用",
+    crossTopicDependencies: "跨主题依赖",
+    omittedStrongCandidates: "未采用的强共识候选",
+    topicLedgers: "主题台账与完整审议",
+    alignmentTrace: "同伴对齐与聚类",
+    alignmentTraceHint: (aligners: number, decisions: number) =>
+      `${aligners} 个 aligner · ${decisions} 个确定性聚类决策`,
+    unknownAligner: "未知 aligner",
+    clusterDecisions: "聚类决策",
   },
 
   images: {
@@ -210,6 +276,11 @@ export const messages = {
     retryRestored: "已恢复上次配置，确认后可发送",
     retryKeysNeeded: (labels: string[]) =>
       `，以下模型需重新添加密钥：${labels.join("、")}`,
+    quickRequiresTwoModels: (selected: number) =>
+      `快速模式必须恰好选择 2 个模型；当前已选择 ${selected} 个。`,
+    quickRequiresExactlyTwoModels: "快速模式必须恰好选择 2 个不同模型。",
+    invalidGovernance: "当前模式不支持所选治理方式，请重新选择。",
+    distributedRequiresManifest: "同伴治理配置不完整，请重新选择后再试。",
   },
 } as const;
 

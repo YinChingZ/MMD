@@ -72,7 +72,7 @@ function SectionItem({
   );
 }
 
-/** 规划模式结果：目录 + 执行摘要 + 分节文档（每节含局部共识与证据）。 */
+/** Legacy pre-v3 Planning projection retained for already-persisted runs. */
 export function PlanDocumentView({
   planDocument,
   topics,

@@ -1,4 +1,5 @@
-import type { RunMode } from "@mmd/protocol";
+import type { Governance, RunMode } from "@mmd/protocol";
+import { governanceForMode } from "./governance";
 import type { ByokEntryUI } from "./model-sources";
 
 /**
@@ -10,6 +11,7 @@ import type { ByokEntryUI } from "./model-sources";
 export interface RetrySnapshot {
   question: string;
   mode: RunMode;
+  governance: Governance;
   modelIds: string[];
   costLimitUsd: number;
   outputSchemaText: string;
@@ -27,6 +29,7 @@ export function retryStorageKey(runId: string): string {
 export function buildRetrySnapshot(params: {
   question: string;
   mode: RunMode;
+  governance: Governance;
   modelIds: string[];
   costLimitUsd: number;
   outputSchemaText: string;
@@ -40,6 +43,7 @@ export function buildRetrySnapshot(params: {
   return {
     question: params.question,
     mode: params.mode,
+    governance: governanceForMode(params.mode, params.governance),
     modelIds: params.modelIds,
     costLimitUsd: params.costLimitUsd,
     outputSchemaText: params.outputSchemaText,

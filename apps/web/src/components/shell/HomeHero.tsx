@@ -7,6 +7,7 @@ import { createConversation, createRun } from "../../lib/api";
 import { messages } from "../../lib/messages";
 import { buildCreateRunPayload } from "../../lib/model-sources";
 import { parseOutputSchema } from "../../lib/output-schema";
+import { runCreationErrorMessage } from "../../lib/run-errors";
 import { buildRetrySnapshot, saveRetrySnapshot } from "../../lib/retry-snapshot";
 import { notifyConversationsChanged } from "../../lib/workspace-events";
 import { AdvancedRunSettings } from "../composer/AdvancedRunSettings";
@@ -39,6 +40,7 @@ export function HomeHero() {
         buildCreateRunPayload({
           question,
           mode: config.mode,
+          governance: config.governance,
           modelIds: config.modelIds,
           byokEntries: config.byokEntries,
           costLimitUsd: config.costLimitUsd,
@@ -52,6 +54,7 @@ export function HomeHero() {
         buildRetrySnapshot({
           question,
           mode: config.mode,
+          governance: config.governance,
           modelIds: config.modelIds,
           costLimitUsd: config.costLimitUsd,
           outputSchemaText: config.outputSchemaText,
@@ -61,7 +64,7 @@ export function HomeHero() {
       );
       router.push(`/conversations/${conversation.id}/runs/${runId}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : messages.errors.generic);
+      toast.error(runCreationErrorMessage(err));
       setSubmitting(false);
     }
   };

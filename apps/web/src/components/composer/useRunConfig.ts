@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { RunMode } from "@mmd/protocol";
+import type { Governance, RunMode } from "@mmd/protocol";
 import { toast } from "sonner";
 import {
   listModels,
@@ -32,6 +32,8 @@ export const DEFAULT_COST_LIMIT_USD = 5;
 export interface RunConfig {
   mode: RunMode;
   setMode: (m: RunMode) => void;
+  governance: Governance;
+  setGovernance: (governance: Governance) => void;
   models: ModelInfo[] | null;
   modelIds: string[];
   setModelIds: (ids: string[]) => void;
@@ -57,7 +59,9 @@ export interface RunConfig {
 }
 
 export function useRunConfig(): RunConfig {
-  const [mode, setMode] = useState<RunMode>("standard");
+  const [mode, setModeState] = useState<RunMode>("standard");
+  const [governance, setGovernanceState] =
+    useState<Governance>("centralized");
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [byokEntries, setByokEntries] = useState<ByokEntryUI[]>([]);
@@ -147,7 +151,12 @@ export function useRunConfig(): RunConfig {
 
   return {
     mode,
-    setMode,
+    setMode: (nextMode) => {
+      setModeState(nextMode);
+      if (nextMode !== "standard") setGovernanceState("centralized");
+    },
+    governance,
+    setGovernance: setGovernanceState,
     models,
     modelIds,
     setModelIds,

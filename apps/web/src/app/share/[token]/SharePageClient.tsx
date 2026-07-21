@@ -7,6 +7,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { RunResultView } from "@/components/RunResultView";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Badge } from "@/components/ui/badge";
+import { GovernanceBadge } from "@/components/run/GovernanceBadge";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
@@ -73,6 +74,10 @@ export function SharePageClient({ token }: { token: string }) {
                 <Badge tone="neutral">
                   {messages.modes[result.mode]?.name ?? result.mode}
                 </Badge>
+                <GovernanceBadge
+                  mode={result.mode}
+                  governance={result.governance}
+                />
                 <span className="text-xs text-ink-faint">
                   {messages.share.deliberatedBy(
                     result.proposals.length ||

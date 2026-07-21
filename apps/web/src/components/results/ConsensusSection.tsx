@@ -10,8 +10,10 @@ import {
 import type {
   CandidateClaim,
   ClassifyCandidateResult,
+  ClassificationBasis,
   Proposal,
   RevisionSet,
+  VoteSet,
 } from "@mmd/protocol";
 import {
   bucketCandidatesByConsensus,
@@ -75,12 +77,18 @@ export function ConsensusSection({
   proposals,
   revisions,
   idPrefix = "consensus",
+  classificationBasis,
+  votes,
+  showTraceMetadata = false,
 }: {
   candidates: CandidateClaim[];
   classifications: Record<string, ClassifyCandidateResult>;
   proposals: Proposal[];
   revisions: RevisionSet[];
   idPrefix?: string;
+  classificationBasis?: Record<string, ClassificationBasis>;
+  votes?: VoteSet[];
+  showTraceMetadata?: boolean;
 }) {
   const buckets = bucketCandidatesByConsensus(candidates, classifications);
   return (
@@ -117,6 +125,9 @@ export function ConsensusSection({
                   candidate={candidate}
                   proposals={proposals}
                   revisions={revisions}
+                  basis={classificationBasis?.[candidate.candidate_id]}
+                  votes={votes}
+                  showTraceMetadata={showTraceMetadata}
                 />
               ))}
             </ul>

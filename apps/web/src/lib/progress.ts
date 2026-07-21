@@ -121,6 +121,7 @@ function recordItemProgress(
 export interface PlanningProgress {
   kind: "planning";
   outline: PhaseStatus;
+  globalCompose: PhaseStatus;
   topics: Map<string, TopicProgress>;
 }
 
@@ -161,6 +162,7 @@ export function deriveRunProgress(
   }
 
   let outline: PhaseStatus = "pending";
+  let globalCompose: PhaseStatus = "pending";
   const topics = new Map<string, TopicProgress>();
   const getTopic = (topicId: string): TopicProgress => {
     let entry = topics.get(topicId);
@@ -185,6 +187,12 @@ export function deriveRunProgress(
           getTopic(topic.topic_id).title = topic.title;
         }
       }
+      continue;
+    }
+    if (!event.topicId && data.step === "global_compose") {
+      if (event.type === "phase_started") globalCompose = "in_progress";
+      else if (event.type === "phase_completed") globalCompose = "done";
+      else if (event.type === "run_failed") globalCompose = "failed";
       continue;
     }
     if (!event.topicId) continue;
@@ -219,5 +227,5 @@ export function deriveRunProgress(
     }
   }
 
-  return { kind: "planning", outline, topics };
+  return { kind: "planning", outline, globalCompose, topics };
 }

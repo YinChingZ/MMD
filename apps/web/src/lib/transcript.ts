@@ -1,12 +1,17 @@
 import type {
   Critique,
   PlanDocument,
+  PlanningFinalAnswer,
   Proposal,
   RevisionSet,
   VoteSet,
 } from "@mmd/protocol";
 import type { RunResult } from "./api";
 import { messages } from "./messages";
+import {
+  classificationBasisFor,
+  partialQuorumEntries,
+} from "./result-trace";
 
 function formatDeliberationBlock(
   proposals: Proposal[],
@@ -66,10 +71,44 @@ export function buildTranscript(result: RunResult): string {
   const lines: string[] = [
     `问题：${result.question}`,
     `模式：${messages.modes[result.mode]?.name ?? result.mode}`,
+    ...(result.mode === "standard"
+      ? [`治理：${messages.governance[result.governance].name}`]
+      : []),
     "",
   ];
 
-  if (result.planDocument) {
+  if (result.planningFinal) {
+    lines.push(`===== ${messages.results.integratedPlanningAnswer} =====`);
+    lines.push(result.planningFinal.final_answer, "");
+    lines.push(`===== ${messages.results.outputLineage} =====`);
+    for (const span of result.planningFinal.spans) {
+      const candidateIds =
+        span.lineage_kind === "coordinator_synthesis"
+          ? span.derived_from_candidate_ids
+          : span.source_candidate_ids;
+      lines.push(
+        `[${span.lineage_kind}] ${span.text}`,
+        `  ${candidateIds.join(", ")}`,
+      );
+    }
+    if (result.planningFinal.omitted_strong_candidate_reasons.length) {
+      lines.push("", `--- ${messages.results.omittedStrongCandidates} ---`);
+      for (const omission of result.planningFinal.omitted_strong_candidate_reasons) {
+        lines.push(`- ${omission.candidate_id}: ${omission.reason}`);
+      }
+    }
+    for (const topic of result.topics ?? []) {
+      lines.push("", `===== ${topic.topic.title} =====`);
+      lines.push(
+        ...formatDeliberationBlock(
+          topic.proposals,
+          topic.critiques,
+          topic.revisions,
+          topic.votes,
+        ),
+      );
+    }
+  } else if (result.planDocument) {
     lines.push(`===== ${messages.results.executiveSummary} =====`);
     lines.push(result.planDocument.executive_summary, "");
 
@@ -101,6 +140,36 @@ export function buildTranscript(result: RunResult): string {
         result.votes,
       ),
     );
+    if (result.mode === "standard" && result.governance === "distributed") {
+      const candidates = result.normalize.candidate_claims;
+      const basis = classificationBasisFor(
+        result.trace,
+        candidates.map((candidate) => candidate.candidate_id),
+      );
+      lines.push("", `===== ${messages.results.authoritativeLedger} =====`);
+      for (const candidate of candidates) {
+        const classification = result.classifications[candidate.candidate_id];
+        const candidateBasis = basis?.[candidate.candidate_id];
+        lines.push(
+          `[${classification?.label ?? "unknown"}] ${candidate.text}`,
+          `  ${candidate.candidate_id} <- ${candidate.source_claim_ids.join(", ")}`,
+        );
+        if (candidateBasis) {
+          lines.push(
+            `  approve_ratio=${candidateBasis.approve_ratio}; ballots=${candidateBasis.ballots.length}/${candidateBasis.expected_voter_count}; partial=${candidateBasis.partial}`,
+          );
+        }
+      }
+      const partialQuorum = partialQuorumEntries(result.trace, ["align", "vote"]);
+      if (partialQuorum.length > 0) {
+        lines.push("", `--- ${messages.results.partialQuorum} ---`);
+        for (const entry of partialQuorum) {
+          lines.push(
+            `${entry.phase}: ${entry.respondent_count}/${entry.expected_count}; required=${entry.required}`,
+          );
+        }
+      }
+    }
     lines.push("", `===== ${messages.results.finalAnswer} =====`);
     lines.push(result.final.final_answer);
   }
@@ -108,7 +177,14 @@ export function buildTranscript(result: RunResult): string {
   return lines.join("\n");
 }
 
-/** 规划模式的干净报告正文（执行摘要 + 分节结论，不含审议记录），供"复制报告"使用。 */
+/** Clean v3 Planning report: one authoritative integrated answer. */
+export function buildPlanningReportText(
+  planningFinal: PlanningFinalAnswer,
+): string {
+  return planningFinal.final_answer.trim();
+}
+
+/** Legacy PlanDocument report formatter for pre-v3 persisted runs. */
 export function buildPlanReportText(planDocument: PlanDocument): string {
   const lines: string[] = [planDocument.executive_summary, ""];
   for (const section of planDocument.sections) {

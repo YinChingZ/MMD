@@ -21,6 +21,7 @@ import { ConsensusSummary } from "@/components/results/ConsensusSection";
 import { ActivityStream } from "@/components/run/ActivityStream";
 import { ProtocolTimeline } from "@/components/run/ProtocolTimeline";
 import { StreamingAnswer } from "@/components/run/StreamingAnswer";
+import { GovernanceBadge } from "@/components/run/GovernanceBadge";
 import {
   PlanningSummary,
   TopicProgress,
@@ -82,6 +83,12 @@ export function RunPageClient({ runId }: { runId: string }) {
           ([, s]) => s === "failed",
         )?.[0] as Phase | undefined)
       : undefined;
+  const phaseLabelFor = (phase: Phase) =>
+    run.mode === "standard" &&
+    run.governance === "distributed" &&
+    phase === "normalize"
+      ? messages.run.peerAlign
+      : (messages.run.phases[phase] ?? phase);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5 px-6 py-6">
@@ -115,6 +122,7 @@ export function RunPageClient({ runId }: { runId: string }) {
           <Badge tone="neutral">
             {messages.modes[run.mode]?.name ?? run.mode}
           </Badge>
+          <GovernanceBadge mode={run.mode} governance={run.governance} />
           {run.status === "completed" && <ShareButton runId={runId} />}
         </div>
       </header>
@@ -130,6 +138,7 @@ export function RunPageClient({ runId }: { runId: string }) {
                 phaseOrder={phaseListForMode(run.mode)}
                 selectedPhase={selectedPhase}
                 onSelectPhase={setSelectedPhase}
+                phaseLabelFor={phaseLabelFor}
               />
               {progress.phases.compose === "in_progress" && (
                 <StreamingAnswer text={composeText[ROOT_COMPOSE_KEY] ?? ""} />
@@ -147,6 +156,7 @@ export function RunPageClient({ runId }: { runId: string }) {
                 modelProgressFor={(phase) => progress.modelProgress[phase]}
                 selectedPhase={selectedPhase}
                 onSelectPhase={setSelectedPhase}
+                phaseLabelFor={phaseLabelFor}
               />
             ) : (
               <PlanningSummary progress={progress} />
@@ -170,12 +180,26 @@ export function RunPageClient({ runId }: { runId: string }) {
           <RunResultView result={result} />
           <ContextPanel
             title={
-              result.planDocument
+              result.planningFinal
+                ? messages.results.planningTrace
+                : result.planDocument
                 ? messages.results.tableOfContents
                 : messages.results.consensusTitle
             }
           >
-            {result.planDocument ? (
+            {result.planningFinal ? (
+              <div className="flex flex-col gap-2 text-sm text-ink-muted">
+                <p>{messages.results.planningTraceHint(
+                  result.topics?.length ?? 0,
+                  result.planningFinal.spans.length,
+                )}</p>
+                <p>{messages.results.coordinatorSynthesis}：{
+                  result.planningFinal.spans.filter(
+                    (span) => span.lineage_kind === "coordinator_synthesis",
+                  ).length
+                }</p>
+              </div>
+            ) : result.planDocument ? (
               <ol className="flex flex-col gap-1.5">
                 {result.planDocument.sections.map((section, i) => (
                   <li key={section.topic_id}>

@@ -180,8 +180,30 @@ describe("deriveRunProgress — planning mode", () => {
     const progress = deriveRunProgress(events, "planning");
     if (progress.kind !== "planning") throw new Error("expected planning");
     expect(progress.outline).toBe("done");
+    expect(progress.globalCompose).toBe("pending");
     expect(progress.topics.get("topic_1")?.phases.propose).toBe("done");
     expect(progress.topics.get("topic_2")?.phases.propose).toBe("in_progress");
+  });
+
+  it("tracks the one root GlobalCompose separately from topic ledgers", () => {
+    const events = [
+      event({
+        seq: 1,
+        type: "phase_started",
+        phase: "compose",
+        data: { step: "global_compose" },
+      }),
+      event({
+        seq: 2,
+        type: "phase_completed",
+        phase: "compose",
+        data: { step: "global_compose" },
+      }),
+    ];
+    const progress = deriveRunProgress(events, "planning");
+    if (progress.kind !== "planning") throw new Error("expected planning");
+    expect(progress.globalCompose).toBe("done");
+    expect(progress.topics.size).toBe(0);
   });
 
   it("backfills topic titles from the outline step's phase_completed event", () => {

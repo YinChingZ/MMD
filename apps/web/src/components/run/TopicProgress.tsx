@@ -2,27 +2,29 @@ import type { Phase } from "@mmd/protocol";
 import { cn } from "../../lib/cn";
 import { messages } from "../../lib/messages";
 import type { PlanningProgress, PhaseStatus } from "../../lib/progress";
+import { ROOT_COMPOSE_KEY } from "../../lib/run-events";
 import { Badge } from "../ui/badge";
 import { ActivityStream } from "./ActivityStream";
 import { StreamingAnswer } from "./StreamingAnswer";
 
-const TOPIC_PHASES: Phase[] = [
+const TOPIC_LEDGER_PHASES: Phase[] = [
   "propose",
   "critique",
   "revise",
   "normalize",
   "vote",
-  "compose",
 ];
 
 function MiniPhaseDots({
   statusFor,
+  phases = TOPIC_LEDGER_PHASES,
 }: {
   statusFor: (phase: Phase) => PhaseStatus;
+  phases?: Phase[];
 }) {
   return (
     <span className="flex items-center gap-1" aria-hidden>
-      {TOPIC_PHASES.map((phase) => {
+      {phases.map((phase) => {
         const status = statusFor(phase);
         return (
           <span
@@ -72,22 +74,40 @@ export function PlanningSummary({ progress }: { progress: PlanningProgress }) {
           </li>
         ))}
       </ul>
+      <div className="flex items-center justify-between border-t border-border pt-3">
+        <span className="text-sm font-medium text-ink">
+          {messages.run.globalCompose}
+        </span>
+        <Badge
+          tone={
+            progress.globalCompose === "done"
+              ? "strong"
+              : progress.globalCompose === "failed"
+                ? "rejected"
+                : progress.globalCompose === "in_progress"
+                  ? "accent"
+                  : "neutral"
+          }
+        >
+          {messages.run.phaseStatus[progress.globalCompose]}
+        </Badge>
+      </div>
     </div>
   );
 }
 
-/** 规划模式中央视图：主题卡片网格，每卡迷你六段指示 + 实时产物 + 流式段落。 */
+/** Planning v3: per-topic five-stage ledgers plus one root GlobalCompose stream. */
 export function TopicProgress({
   progress,
   composeText,
 }: {
   progress: PlanningProgress;
-  /** M6.4: keyed by topicId — 各主题的段落 compose 并行流式。 */
+  /** v3 uses the root key for the one authoritative GlobalCompose stream. */
   composeText?: Record<string, string>;
 }) {
   const topics = [...progress.topics.entries()];
   const done = topics.filter(([, t]) =>
-    Object.values(t.phases).every((s) => s === "done"),
+    TOPIC_LEDGER_PHASES.every((phase) => t.phases[phase] === "done"),
   ).length;
 
   return (
@@ -110,7 +130,11 @@ export function TopicProgress({
       )}
 
       {topics.map(([topicId, topic]) => {
-        const activePhase = TOPIC_PHASES.find(
+        const hasLegacyCompose = topic.phases.compose !== undefined;
+        const visiblePhases = hasLegacyCompose
+          ? [...TOPIC_LEDGER_PHASES, "compose" as Phase]
+          : TOPIC_LEDGER_PHASES;
+        const activePhase = visiblePhases.find(
           (p) => topic.phases[p] === "in_progress",
         );
         return (
@@ -130,7 +154,10 @@ export function TopicProgress({
                     {messages.run.phases[activePhase]}
                   </Badge>
                 ) : null}
-                <MiniPhaseDots statusFor={(p) => topic.phases[p] ?? "pending"} />
+                <MiniPhaseDots
+                  phases={visiblePhases}
+                  statusFor={(p) => topic.phases[p] ?? "pending"}
+                />
               </div>
             </div>
             {topic.failed && topic.error && (
@@ -140,7 +167,7 @@ export function TopicProgress({
               <ActivityStream
                 itemProgress={topic.itemProgress}
                 phases={topic.phases}
-                phaseOrder={TOPIC_PHASES}
+                phaseOrder={visiblePhases}
               />
             </div>
             {topic.phases.compose === "in_progress" && (
@@ -154,6 +181,43 @@ export function TopicProgress({
           </div>
         );
       })}
+
+      {topics.length > 0 && (
+        <section className="rounded-lg border border-accent/30 bg-accent-muted/30 p-4 shadow-card">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-ink">
+                {messages.run.globalCompose}
+              </h3>
+              <p className="mt-0.5 text-xs text-ink-muted">
+                {messages.run.globalComposeHint}
+              </p>
+            </div>
+            <Badge
+              tone={
+                progress.globalCompose === "done"
+                  ? "strong"
+                  : progress.globalCompose === "failed"
+                    ? "rejected"
+                    : progress.globalCompose === "in_progress"
+                      ? "accent"
+                      : "neutral"
+              }
+            >
+              {messages.run.phaseStatus[progress.globalCompose]}
+            </Badge>
+          </div>
+          {(progress.globalCompose === "in_progress" ||
+            Boolean(composeText?.[ROOT_COMPOSE_KEY])) && (
+            <div className="mt-3">
+              <StreamingAnswer
+                text={composeText?.[ROOT_COMPOSE_KEY] ?? ""}
+                title={messages.run.composing}
+              />
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

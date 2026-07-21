@@ -40,12 +40,14 @@ export function ProtocolTimeline({
   modelProgressFor,
   selectedPhase,
   onSelectPhase,
+  phaseLabelFor = (phase) => messages.run.phases[phase] ?? phase,
 }: {
   phases: Phase[];
   statusFor: (phase: Phase) => PhaseStatus;
   modelProgressFor?: (phase: Phase) => PhaseModelProgress | undefined;
   selectedPhase?: Phase;
   onSelectPhase?: (phase: Phase) => void;
+  phaseLabelFor?: (phase: Phase) => string;
 }) {
   return (
     <ol className="flex flex-col">
@@ -72,7 +74,7 @@ export function ProtocolTimeline({
               type="button"
               disabled={!clickable}
               onClick={() => onSelectPhase?.(phase)}
-              aria-label={messages.run.phases[phase] ?? phase}
+              aria-label={phaseLabelFor(phase)}
               className={cn(
                 "z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-shadow",
                 clickable && "cursor-pointer hover:opacity-80",
@@ -104,7 +106,7 @@ export function ProtocolTimeline({
                     status === "pending" ? "text-ink-faint" : "text-ink",
                   )}
                 >
-                  {messages.run.phases[phase] ?? phase}
+                  {phaseLabelFor(phase)}
                 </span>
                 {status === "in_progress" && progress && progress.total > 0 && (
                   <span className="text-xs text-ink-faint">

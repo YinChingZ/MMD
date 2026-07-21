@@ -12,6 +12,7 @@ function legacyModel(overrides: Partial<ModelInfo> = {}): ModelInfo {
     id: "model_a",
     providerLabel: "mock",
     isCoordinator: false,
+    isMock: false,
     ...overrides,
   };
 }
@@ -109,6 +110,7 @@ describe("buildCreateRunPayload", () => {
     const payload = buildCreateRunPayload({
       question: "Q?",
       mode: "quick",
+      governance: "centralized",
       modelIds: [],
       byokEntries: [original, restored],
       costLimitUsd: 5,
@@ -120,6 +122,7 @@ describe("buildCreateRunPayload", () => {
     const payload = buildCreateRunPayload({
       question: "Q?",
       mode: "standard",
+      governance: "centralized",
       modelIds: [],
       byokEntries: [byokEntry()],
       costLimitUsd: 5,
@@ -132,6 +135,7 @@ describe("buildCreateRunPayload", () => {
     const payload = buildCreateRunPayload({
       question: "Q?",
       mode: "standard",
+      governance: "centralized",
       modelIds: ["model_a"],
       byokEntries: [],
       costLimitUsd: 5,
@@ -144,6 +148,7 @@ describe("buildCreateRunPayload", () => {
     const payload = buildCreateRunPayload({
       question: "Q?",
       mode: "standard",
+      governance: "centralized",
       modelIds: ["model_a"],
       byokEntries: [byokEntry()],
       costLimitUsd: 5,
@@ -156,6 +161,7 @@ describe("buildCreateRunPayload", () => {
     const payload = buildCreateRunPayload({
       question: "Q?",
       mode: "standard",
+      governance: "centralized",
       modelIds: ["model_a"],
       byokEntries: [],
       costLimitUsd: 5,
@@ -165,8 +171,41 @@ describe("buildCreateRunPayload", () => {
   });
 
   it("omits webSearch unless the user explicitly enables it", () => {
-    const base = { question: "Q?", mode: "standard" as const, modelIds: ["model_a"], byokEntries: [], costLimitUsd: 5 };
+    const base = { question: "Q?", mode: "standard" as const, governance: "centralized" as const, modelIds: ["model_a"], byokEntries: [], costLimitUsd: 5 };
     expect(buildCreateRunPayload(base).webSearch).toBeUndefined();
     expect(buildCreateRunPayload({ ...base, webSearch: true }).webSearch).toBe(true);
+  });
+
+  it("derives the gated Standard-D manifest from the final panel size", () => {
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "standard",
+      governance: "distributed",
+      modelIds: ["model_a", "model_b"],
+      byokEntries: [byokEntry()],
+      costLimitUsd: 5,
+    });
+    expect(payload.governance).toBe("distributed");
+    expect(payload.experimentManifest).toEqual({
+      experiment_id: "webui-standard-d-v1",
+      protocol_version: "mmd.v3",
+      alignment_policy: {
+        version: "complete-link.v1",
+        minimum_pair_support: 2,
+      },
+    });
+  });
+
+  it("forces unsupported Quick governance back to centralized", () => {
+    const payload = buildCreateRunPayload({
+      question: "Q?",
+      mode: "quick",
+      governance: "distributed",
+      modelIds: ["model_a", "model_b"],
+      byokEntries: [],
+      costLimitUsd: 5,
+    });
+    expect(payload.governance).toBe("centralized");
+    expect(payload.experimentManifest).toBeUndefined();
   });
 });

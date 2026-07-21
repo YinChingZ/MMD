@@ -11,6 +11,8 @@ import { DeliberationRecord } from "./results/DeliberationRecord";
 import { FinalAnswerCard } from "./results/FinalAnswerCard";
 import { StructuredOutputPanel } from "./results/StructuredOutputPanel";
 import { PlanDocumentView } from "./PlanDocumentView";
+import { PeerGovernedResultView } from "./results/PeerGovernedResultView";
+import { PlanningFinalView } from "./results/PlanningFinalView";
 
 /**
  * The read-only "completed run" view — shared between the authenticated
@@ -37,11 +39,15 @@ export function RunResultView({ result }: { result: RunResult }) {
         </Button>
       </div>
 
-      {result.planDocument ? (
+      {result.planningFinal ? (
+        <PlanningFinalView result={result} />
+      ) : result.planDocument ? (
         <PlanDocumentView
           planDocument={result.planDocument}
           topics={result.topics ?? []}
         />
+      ) : result.mode === "standard" && result.governance === "distributed" ? (
+        <PeerGovernedResultView result={result} />
       ) : (
         <>
           <FinalAnswerCard text={result.final.final_answer} result={result} />

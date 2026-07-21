@@ -49,7 +49,15 @@ export function DecisionComposer({
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [question]);
 
-  const canSubmit = !submitting && question.trim().length > 0 && config.hasAnyModel;
+  const configurationError =
+    config.mode === "quick" && config.selectedCount !== 2
+      ? messages.errors.quickRequiresTwoModels(config.selectedCount)
+      : undefined;
+  const canSubmit =
+    !submitting &&
+    !configurationError &&
+    question.trim().length > 0 &&
+    config.hasAnyModel;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -106,6 +114,12 @@ export function DecisionComposer({
             </div>
           ))}
         </div>
+      )}
+
+      {configurationError && (
+        <p className="px-4 pb-1 pt-1 text-xs text-danger" role="alert">
+          {configurationError}
+        </p>
       )}
 
       <div className="flex items-center gap-2 px-2.5 pb-2.5 pt-1">

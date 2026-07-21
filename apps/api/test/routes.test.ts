@@ -373,7 +373,7 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
         url: `/api/conversations/${conversation.id}/runs`,
         payload: {
           question: "Q?",
-          mode: "quick",
+          mode: "standard",
           byokModels: [
             {
               providerId: "openai",
@@ -442,7 +442,7 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
         url: `/api/conversations/${conversation.id}/runs`,
         payload: {
           question: "Q?",
-          mode: "quick",
+          mode: "standard",
           byokModels: [
             {
               providerId: "openai",
@@ -472,7 +472,7 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
         url: `/api/conversations/${conversation.id}/runs`,
         payload: {
           question: "Q2?",
-          mode: "quick",
+          mode: "standard",
           byokModels: [{ savedKeyId }],
         },
         headers: { cookie: conversation.cookie },
@@ -517,7 +517,7 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
         url: `/api/conversations/${conversation.id}/runs`,
         payload: {
           question: "Q?",
-          mode: "quick",
+          mode: "standard",
           byokModels: [
             {
               providerId: "openai",
@@ -554,12 +554,12 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
       // Saving again for the same (workspace, provider, model) with a
       // different rate replaces the stored one, same upsert semantics as
       // the key/label themselves.
-      await app.inject({
+      const updateRunRes = await app.inject({
         method: "POST",
         url: `/api/conversations/${conversation.id}/runs`,
         payload: {
           question: "Q2?",
-          mode: "quick",
+          mode: "standard",
           byokModels: [
             {
               providerId: "openai",
@@ -573,6 +573,12 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
         },
         headers: { cookie: conversation.cookie },
       });
+      expect(updateRunRes.statusCode).toBe(201);
+      await pollUntilSettled(
+        app,
+        updateRunRes.json().runId,
+        conversation.cookie
+      );
       const updatedRow = await db
         .selectFrom("workspace_api_keys")
         .select(["input_per_million", "output_per_million"])
@@ -611,7 +617,7 @@ describeIfDb("apps/api routes (integration, requires DATABASE_URL)", () => {
         url: `/api/conversations/${conversation.id}/runs`,
         payload: {
           question: "Q?",
-          mode: "quick",
+          mode: "standard",
           byokModels: [
             {
               providerId: "openai",

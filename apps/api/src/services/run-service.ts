@@ -115,6 +115,13 @@ export class RunService {
     let seq = 0;
     let eventChain: Promise<void> = Promise.resolve();
     let traceChain: Promise<void> = Promise.resolve();
+    // Keep the externally visible runs.status transition behind the terminal
+    // event insert. Tests (and reconnecting SSE clients) use status as the
+    // signal that the persisted event log is complete; without this gate a
+    // following test could TRUNCATE the shared DB while the prior run was
+    // still writing its terminal event, producing intermittent FK/deadlock
+    // failures in CI.
+    let terminalEventPersisted: Promise<void> = Promise.resolve();
     let resolveSettledGate!: () => void;
     const settledGate = new Promise<void>((resolve) => {
       resolveSettledGate = resolve;
@@ -146,6 +153,12 @@ export class RunService {
       seq += 1;
       const currentSeq = seq;
       const isTerminal = TERMINAL_TYPES.has(event.type);
+      let resolveThisTerminalEvent: (() => void) | undefined;
+      if (isTerminal) {
+        terminalEventPersisted = new Promise<void>((resolve) => {
+          resolveThisTerminalEvent = resolve;
+        });
+      }
       eventChain = eventChain
         .then(async () => {
           const persisted = await appendRunEvent(this.db, {
@@ -153,6 +166,7 @@ export class RunService {
             seq: currentSeq,
             event,
           });
+          resolveThisTerminalEvent?.();
           // Terminal events wait until the result/status row is actually
           // committed before broadcasting — otherwise an SSE client could
           // see "run_completed" and immediately GET /result before it exists.
@@ -160,6 +174,9 @@ export class RunService {
           this.broadcaster.publish(runId, persisted);
         })
         .catch((err) => {
+          // Do not leave the run permanently "running" if the terminal event
+          // insert itself fails; status/error persistence must still proceed.
+          resolveThisTerminalEvent?.();
           console.error(
             `run ${runId}: failed to persist/broadcast event`,
             err
@@ -194,11 +211,13 @@ export class RunService {
     })
       .then(async (result) => {
         await traceChain;
+        await terminalEventPersisted;
         await saveResult(this.db, result);
         await markRunCompleted(this.db, runId);
       })
       .catch(async (err) => {
         await traceChain;
+        await terminalEventPersisted;
         const message = err instanceof Error ? err.message : String(err);
         await markRunFailed(this.db, runId, message).catch((dbErr) => {
           console.error(`run ${runId}: failed to mark as failed`, dbErr);

@@ -6,6 +6,7 @@ const baseResult: RunResult = {
   runId: "run_1",
   question: "要不要迁移到 GraphQL？",
   mode: "standard",
+  governance: "centralized",
   status: "completed",
   proposals: [
     {
@@ -59,7 +60,7 @@ const baseResult: RunResult = {
       votes: [
         {
           candidate_id: "cc1",
-          vote: "support",
+          vote: "approve",
           confidence: 0.8,
           reason: "证据充分",
         },
@@ -87,6 +88,32 @@ describe("buildTranscript", () => {
     expect(text).toContain("GraphQL 减少过取数");
     expect(text).toContain("同意，但要考虑缓存");
     expect(text).toContain("建议迁移到 GraphQL。");
+    expect(text).toContain("Centralized / Classic");
+  });
+
+  it("uses PlanningFinalAnswer as the authoritative v3 report", () => {
+    const text = buildTranscript({
+      ...baseResult,
+      mode: "planning",
+      governance: "centralized",
+      planningFinal: {
+        final_answer: "统一的跨主题答案。",
+        spans: [
+          {
+            span_id: "span-1",
+            text: "跨主题结论",
+            source_candidate_ids: [],
+            lineage_kind: "coordinator_synthesis",
+            derived_from_candidate_ids: ["candidate-a", "candidate-b"],
+          },
+        ],
+        omitted_strong_candidate_reasons: [],
+      },
+      topics: [],
+    });
+    expect(text).toContain("统一的跨主题答案。");
+    expect(text).toContain("coordinator_synthesis");
+    expect(text).toContain("candidate-a, candidate-b");
   });
 
   it("omits empty critique/revise/vote sections gracefully", () => {

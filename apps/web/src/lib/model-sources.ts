@@ -1,10 +1,18 @@
-import type { RunMode } from "@mmd/protocol";
+import type {
+  ExperimentManifest,
+  Governance,
+  RunMode,
+} from "@mmd/protocol";
 import type {
   ByokModelInput,
   InputImageInput,
   ModelInfo,
   OutputFormatInput,
 } from "./api";
+import {
+  governanceForMode,
+  productExperimentManifest,
+} from "./governance";
 
 // UI-only representation of a BYOK entry the user has added but not yet
 // submitted — clientId is a local React key/removal handle, never sent to
@@ -58,6 +66,7 @@ export interface MergedModelRow {
 export function buildCreateRunPayload(params: {
   question: string;
   mode: RunMode;
+  governance: Governance;
   modelIds: string[];
   byokEntries: ByokEntryUI[];
   costLimitUsd: number;
@@ -67,6 +76,8 @@ export function buildCreateRunPayload(params: {
 }): {
   question: string;
   mode: RunMode;
+  governance: Governance;
+  experimentManifest?: ExperimentManifest;
   modelIds?: string[];
   byokModels?: ByokModelInput[];
   costLimitUsd: number;
@@ -74,9 +85,17 @@ export function buildCreateRunPayload(params: {
   images?: InputImageInput[];
   webSearch?: boolean;
 } {
+  const governance = governanceForMode(params.mode, params.governance);
   return {
     question: params.question,
     mode: params.mode,
+    governance,
+    experimentManifest: productExperimentManifest({
+      mode: params.mode,
+      governance,
+      selectedModelCount:
+        params.modelIds.length + dedupeByokEntries(params.byokEntries).length,
+    }),
     modelIds: params.modelIds.length ? params.modelIds : undefined,
     byokModels: params.byokEntries.length
       ? dedupeByokEntries(params.byokEntries).map((e) => e.payload)

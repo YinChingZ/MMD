@@ -13,17 +13,21 @@ export function FinalAnswerCard({
   text,
   result,
   title,
+  notice,
 }: {
   text: string;
   result?: RunResult;
   title?: string;
+  notice?: string;
 }) {
   const copy = async () => {
     await navigator.clipboard.writeText(text);
     toast.success(messages.results.answerCopied);
   };
 
-  const modelCount = result?.proposals.length;
+  const modelCount = result
+    ? result.proposals.length || result.topics?.[0]?.proposals.length
+    : undefined;
 
   return (
     <section
@@ -38,6 +42,11 @@ export function FinalAnswerCard({
           <Copy className="h-4 w-4" />
         </IconButton>
       </div>
+      {notice && (
+        <p className="mt-2 rounded-md bg-surface-muted px-3 py-2 text-xs leading-relaxed text-ink-muted">
+          {notice}
+        </p>
+      )}
       <div className="mt-3 leading-relaxed">
         <Markdown text={text} />
       </div>
@@ -47,6 +56,9 @@ export function FinalAnswerCard({
             result.cost &&
               `${messages.run.cost} ${formatCostUsd(result.cost.totalUsd)}${result.cost.hasUnknownPricing ? "+" : ""}`,
             `${messages.run.mode} ${messages.modes[result.mode]?.name ?? result.mode}`,
+            result.mode === "standard"
+              ? messages.governance[result.governance].shortName
+              : undefined,
             modelCount ? messages.run.modelCount(modelCount) : undefined,
           ]
             .filter(Boolean)

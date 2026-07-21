@@ -2430,6 +2430,7 @@ async function runPlanningDeliberation(
   );
   let planningFinal: PlanningFinalAnswer;
   let globalComposeDegraded = false;
+  emit("phase_started", "compose", { step: "global_compose" });
   try {
     if (contextBudgetExceeded) {
       throw new Error(
@@ -2533,6 +2534,10 @@ async function runPlanningDeliberation(
         })),
     };
   }
+  emit("phase_completed", "compose", {
+    step: "global_compose",
+    degraded: globalComposeDegraded,
+  });
   traceArtifact(input, {
     artifact_id: `${runId}::artifact::planning_final`,
     kind: "planning_final_answer",

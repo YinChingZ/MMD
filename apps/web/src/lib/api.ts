@@ -2,6 +2,7 @@ import type { RunCostSummary, TopicResult } from "@mmd/orchestrator";
 import type {
   ClassifyCandidateResult,
   Critique,
+  ExperimentManifest,
   FinalAnswer,
   Governance,
   MmdTraceV3,
@@ -108,6 +109,7 @@ export interface RunResult {
   runId: string;
   question: string;
   mode: RunMode;
+  governance: Governance;
   status: "completed";
   proposals: Proposal[];
   critiques: Critique[];
@@ -132,10 +134,28 @@ export interface RunResult {
   userOutputError?: string;
 }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `request failed with status ${res.status}`);
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      code?: string;
+    };
+    throw new ApiError(
+      body.error ?? `request failed with status ${res.status}`,
+      body.code,
+      res.status,
+    );
   }
   return res.json() as Promise<T>;
 }
@@ -217,6 +237,7 @@ export async function createRun(
     question: string;
     mode: RunMode;
     governance?: Governance;
+    experimentManifest?: ExperimentManifest;
     modelIds?: string[];
     byokModels?: ByokModelInput[];
     costLimitUsd?: number;

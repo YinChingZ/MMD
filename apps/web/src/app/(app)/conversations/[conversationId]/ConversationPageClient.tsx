@@ -17,6 +17,7 @@ import { formatRelativeTime } from "@/lib/format";
 import { messages } from "@/lib/messages";
 import { buildCreateRunPayload } from "@/lib/model-sources";
 import { parseOutputSchema } from "@/lib/output-schema";
+import { runCreationErrorMessage } from "@/lib/run-errors";
 import {
   buildRetrySnapshot,
   consumeRetrySnapshot,
@@ -32,6 +33,7 @@ import { DecisionComposer } from "@/components/composer/DecisionComposer";
 import { useRunConfig } from "@/components/composer/useRunConfig";
 import { ImageThumbnails } from "@/components/ImageThumbnails";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
+import { GovernanceBadge } from "@/components/run/GovernanceBadge";
 import { ContextPanel } from "@/components/shell/ContextPanel";
 import { PREFILL_KEY } from "@/components/shell/HomeHero";
 import { IconButton } from "@/components/ui/icon-button";
@@ -107,6 +109,11 @@ export function ConversationPageClient({
     }
     retryAppliedRef.current = true;
     config.setMode(retrySnapshot.mode);
+    config.setGovernance(
+      retrySnapshot.mode === "standard"
+        ? (retrySnapshot.governance ?? "centralized")
+        : "centralized",
+    );
     config.setModelIds(
       retrySnapshot.modelIds.filter((id) => config.models?.some((model) => model.id === id)),
     );
@@ -155,6 +162,7 @@ export function ConversationPageClient({
         buildCreateRunPayload({
           question,
           mode: config.mode,
+          governance: config.governance,
           modelIds: config.modelIds,
           byokEntries: config.byokEntries,
           costLimitUsd: config.costLimitUsd,
@@ -168,6 +176,7 @@ export function ConversationPageClient({
         buildRetrySnapshot({
           question,
           mode: config.mode,
+          governance: config.governance,
           modelIds: config.modelIds,
           costLimitUsd: config.costLimitUsd,
           outputSchemaText: config.outputSchemaText,
@@ -177,7 +186,7 @@ export function ConversationPageClient({
       );
       router.push(`/conversations/${conversationId}/runs/${runId}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : messages.errors.generic);
+      toast.error(runCreationErrorMessage(err));
       setSubmitting(false);
     }
   };
@@ -334,6 +343,7 @@ function RunTimelineItem({ run, index }: { run: RunRow; index: number }) {
               {messages.modes[run.mode]?.name ?? run.mode} ·{" "}
               {formatRelativeTime(run.createdAt)}
             </span>
+            <GovernanceBadge mode={run.mode} governance={run.governance} />
           </div>
           {run.status === "failed" && run.error && (
             <p className="mt-2 line-clamp-2 text-sm text-danger">{run.error}</p>

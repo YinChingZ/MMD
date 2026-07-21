@@ -757,6 +757,22 @@ describe("runDeliberation — M6.4 compose-stage token streaming", () => {
     expect(tokens.every((token) => token.data.topicId === undefined)).toBe(true);
     const reconstructed = tokens.map((token) => token.data.delta).join("");
     expect(reconstructed).toBe(result.planningFinal?.final_answer);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "phase_started" &&
+          event.phase === "compose" &&
+          (event.data as { step?: string })?.step === "global_compose"
+      )
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "phase_completed" &&
+          event.phase === "compose" &&
+          (event.data as { step?: string })?.step === "global_compose"
+      )
+    ).toBe(true);
   });
 });
 

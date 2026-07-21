@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, ChevronDown, Crown, Star, X } from "lucide-react";
+import { Check, ChevronDown, Crown, Star, UsersRound, X } from "lucide-react";
 import { formatCostUsd } from "../../lib/format";
 import { messages } from "../../lib/messages";
 import { modelColor, modelInitials } from "../../lib/model-colors";
@@ -20,12 +20,63 @@ export function RunPresetBar({ config }: { config: RunConfig }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       <ModePicker config={config} />
+      {config.mode === "standard" && <GovernancePicker config={config} />}
       <ModelPicker config={config} />
       <span className="hidden truncate text-xs text-ink-faint sm:inline">
         {messages.composer.timeEstimates[config.mode]} ·{" "}
         {messages.composer.costCapSummary(formatCostUsd(config.costLimitUsd))}
       </span>
     </div>
+  );
+}
+
+function GovernancePicker({ config }: { config: RunConfig }) {
+  const options = ["centralized", "distributed"] as const;
+  return (
+    <Popover>
+      <PopoverTrigger className={chipClass(config.governance === "distributed")}>
+        {config.governance === "distributed" ? (
+          <UsersRound className="h-3 w-3" />
+        ) : (
+          <Crown className="h-3 w-3" />
+        )}
+        {messages.governance[config.governance].shortName}
+        <ChevronDown className="h-3 w-3" />
+      </PopoverTrigger>
+      <PopoverContent className="w-72 p-1.5">
+        <p className="px-2 pb-1 pt-1 text-xs font-medium text-ink-faint">
+          {messages.governance.label}
+        </p>
+        {options.map((governance) => (
+          <button
+            key={governance}
+            type="button"
+            onClick={() => config.setGovernance(governance)}
+            className="flex w-full items-start gap-2 rounded-sm px-2 py-2 text-left transition-colors hover:bg-surface-hover"
+          >
+            <Check
+              className={cn(
+                "mt-0.5 h-3.5 w-3.5 shrink-0 text-accent",
+                config.governance !== governance && "invisible",
+              )}
+            />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                {messages.governance[governance].name}
+                {governance === "distributed" && (
+                  <Badge tone="qualified">
+                    {messages.governance.experimental}
+                  </Badge>
+                )}
+              </span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-ink-muted">
+                {messages.governance[governance].hint}
+              </span>
+            </span>
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }
 
